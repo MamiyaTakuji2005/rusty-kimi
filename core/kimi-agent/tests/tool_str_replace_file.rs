@@ -507,6 +507,59 @@ async fn test_regex_capture_expansion() {
 }
 
 #[tokio::test]
+async fn test_regex_undefined_group_errors() {
+    let fixture = RuntimeFixture::new();
+    let tool = StrReplaceFile::new(&fixture.runtime);
+    let file_path = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone() / "test.txt";
+    let original = "PRICE";
+    file_path.write_text(original).await.expect("write file");
+
+    let result = call_with_tool_call(
+        "StrReplaceFile",
+        tool.call_typed(StrReplaceParams {
+            path: file_path.to_string_lossy(),
+            edit: vec![EditParams {
+                regex: true,
+                old: "PRICE".to_string(),
+                new: "$5".to_string(), // meant literally; no group 5 exists
+                replace_all: false,
+            }],
+        }),
+    )
+    .await;
+
+    // Previously this silently expanded to "" and wiped the file.
+    assert!(result.is_error);
+    assert!(result.message.contains("undefined capture group"), "msg: {}", result.message);
+    assert_eq!(file_path.read_text().await.expect("read file"), original);
+}
+
+#[tokio::test]
+async fn test_regex_literal_dollar_via_double() {
+    let fixture = RuntimeFixture::new();
+    let tool = StrReplaceFile::new(&fixture.runtime);
+    let file_path = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone() / "test.txt";
+    file_path.write_text("PRICE").await.expect("write file");
+
+    let result = call_with_tool_call(
+        "StrReplaceFile",
+        tool.call_typed(StrReplaceParams {
+            path: file_path.to_string_lossy(),
+            edit: vec![EditParams {
+                regex: true,
+                old: "PRICE".to_string(),
+                new: "$$5".to_string(), // escaped -> literal "$5"
+                replace_all: false,
+            }],
+        }),
+    )
+    .await;
+
+    assert!(!result.is_error, "msg: {}", result.message);
+    assert_eq!(file_path.read_text().await.expect("read file"), "$5");
+}
+
+#[tokio::test]
 async fn test_replace_empty_strings() {
     let fixture = RuntimeFixture::new();
     let tool = StrReplaceFile::new(&fixture.runtime);

@@ -321,6 +321,77 @@ fn replace_all_regex(text: &str, re: &Regex, new: &str) -> Option<String> {
     Some(result)
 }
 
+fn ref_exists(name: &str, group_count: usize, names: &[Option<&str>]) -> bool {
+    if let Ok(idx) = name.parse::<usize>() {
+        idx < group_count
+    } else {
+        names.iter().any(|n| *n == Some(name))
+    }
+}
+
+/// Validate that every capture reference in a regex replacement template
+/// (`$N`, `${name}`) refers to a group that exists in `re`.
+///
+/// The `regex` crate silently expands an unknown reference to the empty
+/// string, which turns a typo'd group number — or a `$` that was meant
+/// literally — into silent data loss (e.g. `new = "$5"` wipes the match).
+/// We mirror the crate's template grammar and reject undefined references so
+/// the model gets an actionable error instead. A literal `$` is written `$$`.
+fn validate_capture_refs(re: &Regex, new: &str) -> Result<(), String> {
+    let names: Vec<Option<&str>> = re.capture_names().collect();
+    let group_count = re.captures_len(); // includes the implicit whole-match group 0
+    let bytes = new.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        // `$$` is an escaped literal dollar sign.
+        if bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        // `${name}` form.
+        if bytes.get(i + 1) == Some(&b'{') {
+            let Some(close) = new[i + 2..].find('}').map(|off| i + 2 + off) else {
+                // Unterminated `${`: the crate treats `$` as a literal here.
+                i += 2;
+                continue;
+            };
+            let name = &new[i + 2..close];
+            if !ref_exists(name, group_count, &names) {
+                return Err(format!(
+                    "regex replacement references undefined capture group `${{{name}}}`; \
+                     write `$$` for a literal '$'"
+                ));
+            }
+            i = close + 1;
+            continue;
+        }
+        // `$name` form: greedily consume ASCII alphanumerics / underscores.
+        let start = i + 1;
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end == start {
+            // `$` not followed by a name (e.g. "$ "): the crate keeps it literal.
+            i += 1;
+            continue;
+        }
+        let name = &new[start..end];
+        if !ref_exists(name, group_count, &names) {
+            return Err(format!(
+                "regex replacement references undefined capture group `${name}`; \
+                 write `$$` for a literal '$'"
+            ));
+        }
+        i = end;
+    }
+    Ok(())
+}
+
 fn apply_edits(content: &mut String, edits: &[EditParams]) -> Result<bool, String> {
     let mut changed = false;
     for e in edits {
@@ -331,6 +402,7 @@ fn apply_edits(content: &mut String, edits: &[EditParams]) -> Result<bool, Strin
         let maybe_new = if e.regex {
             let re = Regex::new(&e.old)
                 .map_err(|err| format!("invalid regex: {err}"))?;
+            validate_capture_refs(&re, &e.new)?;
             if e.replace_all {
                 replace_all_regex(content, &re, &e.new)
             } else {
