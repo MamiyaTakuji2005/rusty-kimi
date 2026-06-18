@@ -1621,6 +1621,7 @@ dependencies = [
  "ignore",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -1642,6 +1643,7 @@ dependencies = [
  "futures",
  "globset",
  "html2md",
+ "ignore",
  "image",
  "jsonschema",
  "kaos",

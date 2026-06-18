@@ -1,5 +1,5 @@
-A powerful search tool based-on ripgrep.
+Ripgrep-compatible content search. Walks the working directory (ignore-aware, same rules as Glob) and matches each file against a regex pattern.
 
-**Tips:**
-- ALWAYS use Grep tool instead of running `grep` or `rg` command with Shell tool.
-- Use the ripgrep pattern syntax, not grep syntax. E.g. you need to escape braces like `\\{` to search for `{`.
+Output modes: `files_with_matches` (default) returns one file path per match; `content` returns matching lines; `count_matches` returns per-file match counts.
+
+Use `-F: true` to search for literal text that contains regex metacharacters (e.g. `fn foo(`, `[ERROR]`).

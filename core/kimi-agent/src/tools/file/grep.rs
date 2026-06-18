@@ -1,36 +1,29 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
-use futures::StreamExt;
+use globset::GlobBuilder;
+use ignore::WalkBuilder;
+use ignore::types::TypesBuilder;
+use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tracing::{debug, error, info};
 
 use kosong::tooling::{CallableTool2, ToolReturnValue, tool_error};
 
-use crate::share::get_share_dir;
 use crate::soul::agent::Runtime;
 use crate::tools::utils::ToolResultBuilder;
 
 use super::GREP_DESC;
 
-const RG_VERSION: &str = "15.0.0";
-const RG_BASE_URL: &str = "http://cdn.kimi.com/binaries/kimi-cli/rg";
-
-static RG_DOWNLOAD_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GrepParams {
-    #[schemars(description = "The regular expression pattern to search for in file contents")]
+    #[schemars(description = "The regular expression pattern to search for in file contents.")]
     pub pattern: String,
-    #[serde(default = "default_grep_path")]
+    #[serde(default)]
     #[schemars(
-        description = "File or directory to search in. Defaults to current working directory. If specified, it must be an absolute path.",
-        default = "default_grep_path"
+        description = "File or directory to search in. Defaults to the working directory. Accepts absolute or relative paths."
     )]
-    pub path: String,
+    pub path: Option<String>,
     #[serde(default)]
     #[schemars(
         description = "Glob pattern to filter files (e.g. `*.js`, `*.{ts,tsx}`). No filter by default."
@@ -38,52 +31,53 @@ pub struct GrepParams {
     pub glob: Option<String>,
     #[serde(default = "default_output_mode")]
     #[schemars(
-        description = "`content`: Show matching lines (supports `-B`, `-A`, `-C`, `-n`, `head_limit`); `files_with_matches`: Show file paths (supports `head_limit`); `count_matches`: Show total number of matches. Defaults to `files_with_matches`.",
+        description = "`content`: show matching lines (supports `-B`/`-A`/`-C`/`-n`/`head_limit`); `files_with_matches`: one file path per match (default); `count_matches`: per-file match count.",
         default = "default_output_mode"
     )]
     pub output_mode: String,
     #[serde(default, rename = "-B")]
     #[schemars(
-        description = "Number of lines to show before each match (the `-B` option). Requires `output_mode` to be `content`."
+        description = "Lines of context before each match. Requires `output_mode: content`."
     )]
-    pub before_context: Option<i64>,
+    pub before_context: Option<usize>,
     #[serde(default, rename = "-A")]
     #[schemars(
-        description = "Number of lines to show after each match (the `-A` option). Requires `output_mode` to be `content`."
+        description = "Lines of context after each match. Requires `output_mode: content`."
     )]
-    pub after_context: Option<i64>,
+    pub after_context: Option<usize>,
     #[serde(default, rename = "-C")]
     #[schemars(
-        description = "Number of lines to show before and after each match (the `-C` option). Requires `output_mode` to be `content`."
+        description = "Lines of context before AND after each match. Requires `output_mode: content`."
     )]
-    pub context: Option<i64>,
+    pub context: Option<usize>,
     #[serde(default, rename = "-n")]
     #[schemars(
-        description = "Show line numbers in output (the `-n` option). Requires `output_mode` to be `content`."
+        description = "Show line numbers in output. Requires `output_mode: content`."
     )]
     pub line_number: bool,
     #[serde(default, rename = "-i")]
-    #[schemars(description = "Case insensitive search (the `-i` option).")]
+    #[schemars(description = "Case-insensitive search.")]
     pub ignore_case: bool,
+    #[serde(default, rename = "-F")]
+    #[schemars(
+        description = "Treat `pattern` as a literal string rather than a regex (fixed strings). Useful when searching for text that contains regex metacharacters."
+    )]
+    pub fixed_strings: bool,
     #[serde(default, rename = "type")]
     #[schemars(
-        description = "File type to search. Examples: py, rust, js, ts, go, java, etc. More efficient than `glob` for standard file types."
+        description = "File type to search. Examples: rust, python, js, ts, go, java, cpp, c. More efficient than `glob` for standard file types."
     )]
     pub file_type: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Limit output to first N lines, equivalent to `| head -N`. Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count_matches (limits count entries). By default, no limit is applied."
+        description = "Limit output to first N lines. Works across all output modes."
     )]
-    pub head_limit: Option<i64>,
+    pub head_limit: Option<usize>,
     #[serde(default)]
     #[schemars(
-        description = "Enable multiline mode where `.` matches newlines and patterns can span lines (the `-U` and `--multiline-dotall` options). By default, multiline mode is disabled."
+        description = "Enable multiline mode: `.` matches newlines and the pattern can span lines."
     )]
     pub multiline: bool,
-}
-
-fn default_grep_path() -> String {
-    ".".to_string()
 }
 
 fn default_output_mode() -> String {
@@ -92,12 +86,14 @@ fn default_output_mode() -> String {
 
 pub struct Grep {
     description: String,
+    work_dir: PathBuf,
 }
 
 impl Grep {
-    pub fn new(_runtime: &Runtime) -> Self {
+    pub fn new(runtime: &Runtime) -> Self {
         Self {
             description: GREP_DESC.to_string(),
+            work_dir: runtime.builtin_args.KIMI_WORK_DIR.as_path().to_path_buf(),
         }
     }
 }
@@ -115,330 +111,275 @@ impl CallableTool2 for Grep {
     }
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
-        let mut builder = ToolResultBuilder::default();
-        let rg_path = match ensure_rg_path().await {
-            Ok(path) => path,
-            Err(err) => {
-                return tool_error(
-                    "",
-                    format!("Failed to locate ripgrep binary. Error: {err}"),
-                    "Failed to grep",
-                );
+        let root = match &params.path {
+            Some(p) if !p.is_empty() => {
+                let candidate = Path::new(p);
+                if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    self.work_dir.join(candidate)
+                }
             }
+            _ => self.work_dir.clone(),
         };
 
-        let mut command = Command::new(&rg_path);
-        if params.ignore_case {
-            command.arg("-i");
-        }
-        if params.multiline {
-            command.arg("-U");
-            command.arg("--multiline-dotall");
-        }
-        if params.output_mode == "content" {
-            if let Some(before) = params.before_context {
-                command.arg("-B").arg(before.to_string());
-            }
-            if let Some(after) = params.after_context {
-                command.arg("-A").arg(after.to_string());
-            }
-            if let Some(context) = params.context {
-                command.arg("-C").arg(context.to_string());
-            }
-            if params.line_number {
-                command.arg("-n");
-            }
-        }
-        if let Some(glob) = &params.glob {
-            command.arg("-g").arg(glob);
-        }
-        if let Some(file_type) = &params.file_type {
-            command.arg("--type").arg(file_type);
-        }
+        let before_ctx = params.context.unwrap_or(0).max(params.before_context.unwrap_or(0));
+        let after_ctx = params.context.unwrap_or(0).max(params.after_context.unwrap_or(0));
 
-        if params.output_mode == "files_with_matches" {
-            command.arg("-l");
-        } else if params.output_mode == "count_matches" {
-            command.arg("-c");
-        }
-
-        if params.pattern.starts_with('-') {
-            command.arg("--");
-        }
-        command.arg(&params.pattern);
-        command.arg(&params.path);
-
-        let output = match command.output().await {
-            Ok(output) => output,
-            Err(err) => {
-                return tool_error(
-                    "",
-                    format!("Failed to grep. Error: {err}"),
-                    "Failed to grep",
-                );
-            }
+        let cfg = GrepConfig {
+            pattern: params.pattern,
+            root,
+            glob: params.glob,
+            output_mode: params.output_mode,
+            before_context: before_ctx,
+            after_context: after_ctx,
+            line_number: params.line_number,
+            ignore_case: params.ignore_case,
+            fixed_strings: params.fixed_strings,
+            file_type: params.file_type,
+            head_limit: params.head_limit,
+            multiline: params.multiline,
         };
 
-        if !output.status.success() && output.status.code() != Some(1) {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let message = if stderr.trim().is_empty() {
-                format!(
-                    "Failed to grep. Exit status: {}",
-                    output.status.code().unwrap_or(-1)
-                )
-            } else {
-                format!("Failed to grep. Error: {stderr}")
-            };
-            return tool_error("", message, "Failed to grep");
+        let result = tokio::task::spawn_blocking(move || run_grep(cfg))
+            .await
+            .map_err(|e| e.to_string());
+
+        match result {
+            Ok(Ok(GrepOutput { lines, truncated })) => {
+                if lines.is_empty() {
+                    return ToolResultBuilder::default().ok("No matches found", "");
+                }
+                let mut builder = ToolResultBuilder::default();
+                builder.write(&lines.join("\n"));
+                let msg = if truncated {
+                    format!("Results truncated to first {} lines", lines.len())
+                } else {
+                    String::new()
+                };
+                builder.ok(&msg, "")
+            }
+            Ok(Err(e)) => tool_error("", e, "Grep failed"),
+            Err(e) => tool_error("", e, "Grep failed"),
+        }
+    }
+}
+
+struct GrepConfig {
+    pattern: String,
+    root: PathBuf,
+    glob: Option<String>,
+    output_mode: String,
+    before_context: usize,
+    after_context: usize,
+    line_number: bool,
+    ignore_case: bool,
+    fixed_strings: bool,
+    file_type: Option<String>,
+    head_limit: Option<usize>,
+    multiline: bool,
+}
+
+struct GrepOutput {
+    lines: Vec<String>,
+    truncated: bool,
+}
+
+fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
+    // Build the regex from the pattern.
+    let pattern = if cfg.fixed_strings {
+        regex::escape(&cfg.pattern)
+    } else {
+        cfg.pattern.clone()
+    };
+    let re = RegexBuilder::new(&pattern)
+        .case_insensitive(cfg.ignore_case)
+        .multi_line(true)
+        .dot_matches_new_line(cfg.multiline)
+        .build()
+        .map_err(|e| format!("Invalid pattern `{}`: {e}", cfg.pattern))?;
+
+    // Build the file type filter.
+    let types = if let Some(ref type_name) = cfg.file_type {
+        let mut tb = TypesBuilder::new();
+        tb.add_defaults();
+        tb.select(type_name);
+        Some(
+            tb.build()
+                .map_err(|e| format!("Unknown file type `{type_name}`: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    // Build the glob filter (matches against full relative path so `src/*.rs` works).
+    let glob_matcher = if let Some(ref glob_pattern) = cfg.glob {
+        let m = GlobBuilder::new(glob_pattern)
+            .literal_separator(false)
+            .build()
+            .map_err(|e| format!("Invalid glob `{glob_pattern}`: {e}"))?
+            .compile_matcher();
+        Some(m)
+    } else {
+        None
+    };
+
+    // Build the directory walker.
+    let mut wb = WalkBuilder::new(&cfg.root);
+    wb.hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .parents(true)
+        .require_git(false);
+    if let Some(types) = types {
+        wb.types(types);
+    }
+
+    let limit = cfg.head_limit.unwrap_or(usize::MAX);
+    let mut out: Vec<String> = Vec::new();
+    let mut truncated = false;
+
+    'walk: for entry in wb.build() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
         }
 
-        let mut output_text = String::from_utf8_lossy(&output.stdout).to_string();
-        if output_text.is_empty() {
-            return builder.ok("No matches found", "");
-        }
+        let path = entry.path();
 
-        let mut message = String::new();
-        if let Some(limit) = params.head_limit {
-            let limit = limit.max(0) as usize;
-            let lines: Vec<&str> = output_text.split('\n').collect();
-            if lines.len() > limit {
-                let mut truncated = lines[..limit].join("\n");
-                truncated.push_str(&format!("\n... (results truncated to {limit} lines)"));
-                output_text = truncated;
-                message = format!("Results truncated to first {limit} lines");
+        // Apply glob filter against the path relative to the search root.
+        if let Some(ref m) = glob_matcher {
+            let rel = path.strip_prefix(&cfg.root).unwrap_or(path);
+            if !m.is_match(rel) {
+                continue;
             }
         }
 
-        builder.write(&output_text);
-        builder.ok(&message, "")
-    }
-}
-
-fn rg_download_lock() -> &'static tokio::sync::Mutex<()> {
-    RG_DOWNLOAD_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-fn rg_binary_name() -> &'static str {
-    if cfg!(windows) { "rg.exe" } else { "rg" }
-}
-
-fn find_existing_rg(bin_name: &str) -> Option<PathBuf> {
-    let share_bin = get_share_dir().join("bin").join(bin_name);
-    if share_bin.is_file() {
-        return Some(share_bin);
-    }
-
-    if let Some(local_dep) = find_local_dep(bin_name) {
-        return Some(local_dep);
-    }
-
-    find_on_path(bin_name)
-}
-
-fn find_local_dep(bin_name: &str) -> Option<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let local_dep = manifest_dir
-        .join("src")
-        .join("deps")
-        .join("bin")
-        .join(bin_name);
-    if local_dep.is_file() {
-        return Some(local_dep);
-    }
-
-    let exe_dep = std::env::current_exe().ok().and_then(|exe| {
-        exe.parent()
-            .map(|parent| parent.join("deps").join("bin").join(bin_name))
-    });
-    if let Some(path) = exe_dep {
-        if path.is_file() {
-            return Some(path);
+        // Read file — skip on error or binary content.
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if is_binary(&bytes) {
+            continue;
         }
-    }
+        let text = String::from_utf8_lossy(&bytes);
 
-    None
-}
+        match cfg.output_mode.as_str() {
+            "files_with_matches" => {
+                if re.is_match(&text) {
+                    out.push(path.to_string_lossy().to_string());
+                    if out.len() >= limit {
+                        truncated = true;
+                        break 'walk;
+                    }
+                }
+            }
+            "count_matches" => {
+                let count = re.find_iter(&text).count();
+                if count > 0 {
+                    out.push(format!("{}:{count}", path.display()));
+                    if out.len() >= limit {
+                        truncated = true;
+                        break 'walk;
+                    }
+                }
+            }
+            _ => {
+                // content mode
+                if cfg.multiline {
+                    // Multiline: match across lines, output each matched span.
+                    for m in re.find_iter(&text) {
+                        let snippet = m.as_str().replace('\n', "↵");
+                        out.push(format!("{}:{snippet}", path.display()));
+                        if out.len() >= limit {
+                            truncated = true;
+                            break 'walk;
+                        }
+                    }
+                } else {
+                    let mut pre_buf: VecDeque<(usize, &str)> =
+                        VecDeque::with_capacity(cfg.before_context + 1);
+                    let mut after_remaining = 0usize;
 
-fn find_on_path(bin_name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for path in std::env::split_paths(&path_var) {
-        let candidate = path.join(bin_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
+                    for (idx, line) in text.lines().enumerate() {
+                        let line_no = idx + 1;
+                        let is_match = re.is_match(line);
 
-fn detect_target() -> Option<String> {
-    let arch = match std::env::consts::ARCH {
-        "x86_64" | "amd64" => "x86_64",
-        "aarch64" | "arm64" => "aarch64",
-        other => {
-            error!("Unsupported architecture for ripgrep: {}", other);
-            return None;
-        }
-    };
-
-    let os = match std::env::consts::OS {
-        "macos" => "apple-darwin",
-        "linux" => {
-            if arch == "x86_64" {
-                "unknown-linux-musl"
-            } else {
-                "unknown-linux-gnu"
+                        if is_match {
+                            // Flush pre-context.
+                            for (n, pre) in pre_buf.drain(..) {
+                                let formatted = if cfg.line_number {
+                                    format!("{}-{pre}", display_path(path, &cfg.root, n))
+                                } else {
+                                    format!("{}-{pre}", path.display())
+                                };
+                                out.push(formatted);
+                                if out.len() >= limit {
+                                    truncated = true;
+                                    break 'walk;
+                                }
+                            }
+                            // Output matched line.
+                            let formatted = if cfg.line_number {
+                                format!("{}:{line}", display_path(path, &cfg.root, line_no))
+                            } else {
+                                format!("{}:{line}", path.display())
+                            };
+                            out.push(formatted);
+                            if out.len() >= limit {
+                                truncated = true;
+                                break 'walk;
+                            }
+                            after_remaining = cfg.after_context;
+                        } else if after_remaining > 0 {
+                            let formatted = if cfg.line_number {
+                                format!("{}-{line}", display_path(path, &cfg.root, line_no))
+                            } else {
+                                format!("{}-{line}", path.display())
+                            };
+                            out.push(formatted);
+                            if out.len() >= limit {
+                                truncated = true;
+                                break 'walk;
+                            }
+                            after_remaining -= 1;
+                            pre_buf.clear();
+                        } else {
+                            if cfg.before_context > 0 {
+                                pre_buf.push_back((line_no, line));
+                                if pre_buf.len() > cfg.before_context {
+                                    pre_buf.pop_front();
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        "windows" => "pc-windows-msvc",
-        other => {
-            error!("Unsupported operating system for ripgrep: {}", other);
-            return None;
-        }
+    }
+
+    Ok(GrepOutput { lines: out, truncated })
+}
+
+/// Format `path:line_no` using a path relative to root when possible.
+fn display_path(path: &Path, root: &Path, line_no: usize) -> String {
+    let display = if root.is_file() {
+        path.to_string_lossy().into_owned()
+    } else {
+        path.strip_prefix(root)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned())
     };
-
-    Some(format!("{arch}-{os}"))
+    format!("{display}:{line_no}")
 }
 
-async fn ensure_rg_path() -> Result<PathBuf, String> {
-    let bin_name = rg_binary_name();
-    if let Some(existing) = find_existing_rg(bin_name) {
-        debug!("Using ripgrep binary: {}", existing.display());
-        return Ok(existing);
-    }
-
-    let _guard = rg_download_lock().lock().await;
-    if let Some(existing) = find_existing_rg(bin_name) {
-        debug!("Using ripgrep binary: {}", existing.display());
-        return Ok(existing);
-    }
-
-    download_and_install_rg(bin_name).await
-}
-
-async fn download_and_install_rg(bin_name: &str) -> Result<PathBuf, String> {
-    let target =
-        detect_target().ok_or_else(|| "Unsupported platform for ripgrep download".to_string())?;
-    let is_windows = target.contains("windows");
-    let archive_ext = if is_windows { "zip" } else { "tar.gz" };
-    let filename = format!("ripgrep-{RG_VERSION}-{target}.{archive_ext}");
-    let url = format!("{RG_BASE_URL}/{filename}");
-    info!("Downloading ripgrep from {}", url);
-
-    let temp_dir = std::env::temp_dir().join(format!("kimi-rg-{}", uuid::Uuid::new_v4()));
-    tokio::fs::create_dir_all(&temp_dir)
-        .await
-        .map_err(|err| format!("Failed to create temp dir: {err}"))?;
-    let archive_path = temp_dir.join(&filename);
-
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|err| format!("Failed to download ripgrep: {err}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to download ripgrep: HTTP {}",
-            response.status()
-        ));
-    }
-
-    let mut file = tokio::fs::File::create(&archive_path)
-        .await
-        .map_err(|err| format!("Failed to create download file: {err}"))?;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| format!("Failed to download ripgrep: {err}"))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|err| format!("Failed to write download: {err}"))?;
-    }
-
-    let share_bin = get_share_dir().join("bin");
-    tokio::fs::create_dir_all(&share_bin)
-        .await
-        .map_err(|err| format!("Failed to create share bin dir: {err}"))?;
-    let destination = share_bin.join(bin_name);
-
-    let bin_name_owned = bin_name.to_string();
-    let archive_bytes = tokio::fs::read(&archive_path)
-        .await
-        .map_err(|err| format!("Failed to read ripgrep archive: {err}"))?;
-    let bin_bytes = tokio::task::spawn_blocking(move || {
-        if is_windows {
-            extract_zip_bytes(&archive_bytes, &bin_name_owned)
-        } else {
-            extract_tar_bytes(&archive_bytes, &bin_name_owned)
-        }
-    })
-    .await
-    .map_err(|err| format!("Failed to extract ripgrep: {err}"))?
-    .map_err(|err| format!("Failed to extract ripgrep: {err}"))?;
-
-    tokio::fs::write(&destination, bin_bytes)
-        .await
-        .map_err(|err| format!("Failed to write ripgrep binary: {err}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = tokio::fs::metadata(&destination)
-            .await
-            .map_err(|err| format!("Failed to read permissions: {err}"))?
-            .permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        tokio::fs::set_permissions(&destination, perms)
-            .await
-            .map_err(|err| format!("Failed to set permissions: {err}"))?;
-    }
-
-    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-    info!("Installed ripgrep to {}", destination.display());
-
-    Ok(destination)
-}
-
-fn extract_zip_bytes(archive_bytes: &[u8], bin_name: &str) -> Result<Vec<u8>, String> {
-    let reader = std::io::Cursor::new(archive_bytes);
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|err| format!("Failed to read zip archive: {err}"))?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|err| format!("Failed to read zip entry: {err}"))?;
-        let entry_name = entry.name();
-        if Path::new(entry_name)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(bin_name)
-        {
-            let mut buf = Vec::new();
-            std::io::copy(&mut entry, &mut buf)
-                .map_err(|err| format!("Failed to extract ripgrep: {err}"))?;
-            return Ok(buf);
-        }
-    }
-
-    Err("Ripgrep binary not found in archive".to_string())
-}
-
-fn extract_tar_bytes(archive_bytes: &[u8], bin_name: &str) -> Result<Vec<u8>, String> {
-    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive_bytes));
-    let mut archive = tar::Archive::new(decoder);
-
-    let mut entries = archive
-        .entries()
-        .map_err(|err| format!("Failed to read tar archive: {err}"))?;
-    while let Some(entry) = entries.next() {
-        let mut entry = entry.map_err(|err| format!("Failed to read tar entry: {err}"))?;
-        let path = entry
-            .path()
-            .map_err(|err| format!("Failed to read tar entry path: {err}"))?;
-        if path.file_name().and_then(|name| name.to_str()) == Some(bin_name) {
-            let mut buf = Vec::new();
-            std::io::copy(&mut entry, &mut buf)
-                .map_err(|err| format!("Failed to extract ripgrep: {err}"))?;
-            return Ok(buf);
-        }
-    }
-
-    Err("Ripgrep binary not found in archive".to_string())
+/// Returns true if `bytes` looks like binary data (contains a null byte in the first 8 KB).
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(8192)].contains(&0u8)
 }
