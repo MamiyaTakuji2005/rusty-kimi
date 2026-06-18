@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use kaos::KaosPath;
 
 #[derive(Clone, Debug)]
@@ -7,6 +9,42 @@ pub struct Environment {
     pub os_version: String,
     pub shell_name: String,
     pub shell_path: KaosPath,
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_windows_shell() -> (String, KaosPath) {
+    // Prefer PowerShell 7 (pwsh.exe) over the legacy Windows PowerShell 5.1.
+    for name in ["pwsh.exe", "powershell.exe"] {
+        if let Some(path) = find_on_path(name) {
+            let label = if name == "pwsh.exe" {
+                "PowerShell 7"
+            } else {
+                "Windows PowerShell"
+            };
+            return (label.to_string(), KaosPath::from(path));
+        }
+    }
+    // Last-resort fallback — should never be reached on a normal Windows install.
+    (
+        "Windows PowerShell".to_string(),
+        KaosPath::from("powershell.exe".into()),
+    )
+}
+
+#[cfg(not(windows))]
+fn find_windows_shell() -> (String, KaosPath) {
+    unreachable!()
 }
 
 impl Environment {
@@ -23,12 +61,13 @@ impl Environment {
         let os_version = sysinfo::System::long_os_version().unwrap_or_default();
 
         if os_kind == "Windows" {
+            let (shell_name, shell_path) = find_windows_shell();
             return Environment {
                 os_kind,
                 os_arch,
                 os_version,
-                shell_name: "Windows PowerShell".to_string(),
-                shell_path: KaosPath::from("powershell.exe".into()),
+                shell_name,
+                shell_path,
             };
         }
 

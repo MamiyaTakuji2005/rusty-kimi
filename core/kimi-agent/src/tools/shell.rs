@@ -42,7 +42,10 @@ pub struct Shell {
 impl Shell {
     pub fn new(runtime: &crate::soul::agent::Runtime) -> Self {
         let environment = runtime.environment.clone();
-        let is_powershell = environment.shell_name == "Windows PowerShell";
+        let is_powershell = matches!(
+            environment.shell_name.as_str(),
+            "Windows PowerShell" | "PowerShell 7"
+        );
         let shell_label = format!("{} (`{}`)", environment.shell_name, environment.shell_path);
         let template = if is_powershell {
             POWERSHELL_DESC
@@ -121,19 +124,11 @@ impl Shell {
     }
 
     fn shell_args(&self, command: &str) -> Vec<String> {
-        if self.is_powershell {
-            vec![
-                self.shell_path.to_string_lossy(),
-                "-command".to_string(),
-                command.to_string(),
-            ]
-        } else {
-            vec![
-                self.shell_path.to_string_lossy(),
-                "-c".to_string(),
-                command.to_string(),
-            ]
-        }
+        vec![
+            self.shell_path.to_string_lossy(),
+            "-c".to_string(),
+            command.to_string(),
+        ]
     }
 }
 
