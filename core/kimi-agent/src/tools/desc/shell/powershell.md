@@ -1,4 +1,4 @@
-Execute a ${SHELL} command. Use this tool to run scripts, build/test projects, manage processes, and perform operations that have no dedicated tool. For file reading, writing, searching, and editing use ReadFile, WriteFile, StrReplaceFile, Grep, and Glob instead. Only use this tool on Windows.
+Execute a ${SHELL} command. Use this tool to run scripts, build/test projects, manage processes, and perform operations that have no dedicated tool. For file reading, writing, searching, and editing use ReadFile, WriteFile, StrReplaceFile, Grep, and Glob instead.
 
 **Output:**
 The stdout and stderr streams are combined and returned as a single string. Extremely long output may be truncated. When a command fails, the exit code is provided in a system tag.
