@@ -17,12 +17,97 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(not(unix))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub struct LocalKaos;
+pub struct LocalKaos {
+    /// When true, `glob` honors ignore rules (`.gitignore`, hidden files, and
+    /// well-known heavy dirs like `node_modules`/`target`). Not exposed on the
+    /// tool surface yet — it's the internal escape hatch for getting the raw,
+    /// unfiltered tree back.
+    respect_ignores: bool,
+}
 
 impl LocalKaos {
     pub fn new() -> Self {
-        Self
+        Self {
+            respect_ignores: true,
+        }
     }
+
+    /// Construct a backend with explicit control over ignore handling.
+    pub fn with_respect_ignores(respect_ignores: bool) -> Self {
+        Self { respect_ignores }
+    }
+}
+
+/// Directory names always pruned when `respect_ignores` is on, so the walk
+/// stays fast and relevant even in a repo without a `.gitignore`.
+const ALWAYS_PRUNE_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".pytest_cache",
+];
+
+/// Walk `root` (ignore-aware when `respect_ignores`) and return every entry
+/// whose path relative to `root` matches `pattern`. `**` crosses directory
+/// separators; `*`/`?` do not (literal separator), matching the previous glob
+/// semantics. Brace alternation (`{a,b}`) is supported.
+fn glob_walk(
+    root: &Path,
+    pattern: &str,
+    case_sensitive: bool,
+    respect_ignores: bool,
+) -> Result<Vec<PathBuf>> {
+    let matcher = globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|err| anyhow!(err))?
+        .compile_matcher();
+
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .hidden(respect_ignores)
+        .git_ignore(respect_ignores)
+        .git_global(respect_ignores)
+        .git_exclude(respect_ignores)
+        .ignore(respect_ignores)
+        .parents(respect_ignores)
+        .require_git(false);
+    if respect_ignores {
+        builder.filter_entry(|entry| {
+            // Prune well-known heavy dirs regardless of git status.
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                if let Some(name) = entry.file_name().to_str() {
+                    return !ALWAYS_PRUNE_DIRS.contains(&name);
+                }
+            }
+            true
+        });
+    }
+
+    let mut out = Vec::new();
+    for entry in builder.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue, // skip unreadable entries rather than aborting
+        };
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(root) {
+            if matcher.is_match(rel) {
+                out.push(path.to_path_buf());
+            }
+        }
+    }
+    Ok(out)
 }
 
 struct LocalProcess {
@@ -297,19 +382,15 @@ impl Kaos for LocalKaos {
         pattern: &str,
         case_sensitive: bool,
     ) -> Result<Vec<KaosPath>> {
-        let search = path.as_path().join(pattern).to_string_lossy().to_string();
-        let options = glob::MatchOptions {
-            case_sensitive,
-            require_literal_separator: true,
-            require_literal_leading_dot: true,
-        };
-
-        let mut entries = Vec::new();
-        for entry in glob::glob_with(&search, options).map_err(|err| anyhow!(err))? {
-            let entry = entry.map_err(|err| anyhow!(err))?;
-            entries.push(KaosPath::from(entry));
-        }
-        Ok(entries)
+        let root = path.as_path().to_path_buf();
+        let pattern = pattern.to_string();
+        let respect_ignores = self.respect_ignores;
+        let paths = tokio::task::spawn_blocking(move || {
+            glob_walk(&root, &pattern, case_sensitive, respect_ignores)
+        })
+        .await
+        .map_err(|err| anyhow!(err))??;
+        Ok(paths.into_iter().map(KaosPath::from).collect())
     }
 
     async fn read_bytes(&self, path: &KaosPath, limit: Option<usize>) -> Result<Vec<u8>> {

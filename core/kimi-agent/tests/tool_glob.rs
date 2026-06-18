@@ -108,7 +108,9 @@ async fn test_glob_multiple_matches() {
 }
 
 #[tokio::test]
-async fn test_glob_recursive_pattern_prohibited() {
+async fn test_glob_recursive_pattern_allowed() {
+    // The `**`-prefix ban was removed; recursive search now works because the
+    // walk is ignore-aware (heavy dirs are pruned).
     let fixture = RuntimeFixture::new();
     let work_dir = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone();
     setup_test_files(&work_dir).await;
@@ -118,13 +120,14 @@ async fn test_glob_recursive_pattern_prohibited() {
         .call_typed(params("**/*.py", Some(&work_dir), true))
         .await;
 
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
-    assert_eq!(result.brief(), "Unsafe pattern");
+    assert!(!result.is_error, "msg: {}", result.message);
+    let output = match result.output {
+        kosong::tooling::ToolOutput::Text(text) => text.replace("\\", "/"),
+        _ => String::new(),
+    };
+    assert!(output.contains("src/main.py"));
+    assert!(output.contains("src/main/app.py"));
+    assert!(output.contains("src/test/test_app.py"));
 }
 
 #[tokio::test]
@@ -413,51 +416,68 @@ async fn test_glob_max_matches_limit() {
 }
 
 #[tokio::test]
-async fn test_glob_enhanced_double_star_validation() {
+async fn test_glob_skips_ignored_dirs() {
+    // Heavy/ignored dirs are pruned even when a recursive pattern would match
+    // inside them.
     let fixture = RuntimeFixture::new();
     let work_dir = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone();
     let tool = Glob::new(&fixture.runtime);
 
-    (work_dir.clone() / "file1.txt")
-        .write_text("content1")
+    (work_dir.clone() / "src").mkdir(false, true).await.expect("mkdir");
+    (work_dir.clone() / "src" / "app.js")
+        .write_text("real")
         .await
         .expect("write file");
-    (work_dir.clone() / "file2.py")
-        .write_text("content2")
+    (work_dir.clone() / "node_modules" / "dep")
+        .mkdir(true, true)
+        .await
+        .expect("mkdir");
+    (work_dir.clone() / "node_modules" / "dep" / "index.js")
+        .write_text("noise")
         .await
         .expect("write file");
-    (work_dir.clone() / "src")
-        .mkdir(false, true)
+    (work_dir.clone() / "target").mkdir(false, true).await.expect("mkdir");
+    (work_dir.clone() / "target" / "build.js")
+        .write_text("noise")
         .await
-        .expect("mkdir");
-    (work_dir.clone() / "docs")
-        .mkdir(false, true)
-        .await
-        .expect("mkdir");
+        .expect("write file");
 
     let result = tool
-        .call_typed(params("**/*.txt", Some(&work_dir), true))
+        .call_typed(params("**/*.js", Some(&work_dir), true))
         .await;
 
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
-    assert!(
-        result
-            .message
-            .contains("Use more specific patterns instead")
-    );
+    assert!(!result.is_error, "msg: {}", result.message);
+    let output = match result.output {
+        kosong::tooling::ToolOutput::Text(text) => text.replace("\\", "/"),
+        _ => String::new(),
+    };
+    assert!(output.contains("src/app.js"));
+    assert!(!output.contains("node_modules"), "should prune node_modules: {output}");
+    assert!(!output.contains("target"), "should prune target: {output}");
+}
+
+#[tokio::test]
+async fn test_glob_brace_alternation() {
+    let fixture = RuntimeFixture::new();
+    let work_dir = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone();
+    let tool = Glob::new(&fixture.runtime);
+
+    (work_dir.clone() / "a.js").write_text("x").await.expect("write");
+    (work_dir.clone() / "b.ts").write_text("x").await.expect("write");
+    (work_dir.clone() / "c.md").write_text("x").await.expect("write");
+
+    let result = tool
+        .call_typed(params("*.{js,ts}", Some(&work_dir), true))
+        .await;
+
+    assert!(!result.is_error, "msg: {}", result.message);
     let output = match result.output {
         kosong::tooling::ToolOutput::Text(text) => text,
         _ => String::new(),
     };
-    assert!(output.contains("file1.txt"));
-    assert!(output.contains("file2.py"));
-    assert!(output.contains("src"));
-    assert!(output.contains("docs"));
+    assert!(output.contains("a.js"));
+    assert!(output.contains("b.ts"));
+    assert!(!output.contains("c.md"));
 }
 
 #[tokio::test]
@@ -557,12 +577,13 @@ async fn test_glob_wildcard_with_double_star_patterns() {
         .call_typed(params("**/main/*.py", Some(&work_dir), true))
         .await;
 
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
+    assert!(!result.is_error, "msg: {}", result.message);
+    let output = match result.output {
+        kosong::tooling::ToolOutput::Text(text) => text.replace("\\", "/"),
+        _ => String::new(),
+    };
+    assert!(output.contains("src/main/app.py"));
+    assert!(output.contains("src/main/config.py"));
 
     let result = tool
         .call_typed(params("src/**/test_*.py", Some(&work_dir), true))
@@ -595,10 +616,7 @@ async fn test_glob_pattern_edge_cases() {
     let result = tool
         .call_typed(params("**/*.txt", Some(&work_dir), true))
         .await;
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
+    // No .txt files exist here: succeeds with no matches (not an error).
+    assert!(!result.is_error, "msg: {}", result.message);
+    assert!(result.message.contains("No matches found"));
 }

@@ -14,7 +14,7 @@ futures.workspace = true
 async-trait.workspace = true
 dirs.workspace = true
 globset.workspace = true
-glob.workspace = true
+ignore.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

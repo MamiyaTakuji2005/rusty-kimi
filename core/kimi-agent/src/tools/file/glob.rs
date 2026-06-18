@@ -6,7 +6,7 @@ use kosong::tooling::{CallableTool2, ToolReturnValue, tool_error, tool_ok};
 
 use crate::soul::agent::Runtime;
 use crate::tools::utils::load_desc;
-use crate::utils::{is_within_directory, list_directory};
+use crate::utils::is_within_directory;
 
 use super::{GLOB_DESC, MAX_MATCHES};
 
@@ -59,18 +59,6 @@ impl CallableTool2 for Glob {
     }
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
-        if params.pattern.starts_with("**") {
-            let listing = list_directory(&self.work_dir).await;
-            return tool_error(
-                listing,
-                format!(
-                    "Pattern `{}` starts with '**' which is not allowed. This would recursively search all directories and may include large directories like `node_modules`. Use more specific patterns instead. For your convenience, a list of all files and directories in the top level of the working directory is provided below.",
-                    params.pattern
-                ),
-                "Unsafe pattern",
-            );
-        }
-
         let dir = if let Some(directory) = params.directory.as_deref() {
             KaosPath::new(directory).expanduser()
         } else {

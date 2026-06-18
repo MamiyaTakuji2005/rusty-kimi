@@ -1,17 +1,17 @@
-Find files and directories using glob patterns. This tool supports standard glob syntax like `*`, `?`, and `**` for recursive searches.
+Find files and directories using glob patterns. Supports `*`, `?`, `[...]` character classes, `{a,b}` brace alternation, and `**` for recursive search.
+
+The search is ignore-aware: it skips `.gitignore`d paths, hidden dot-entries, and well-known heavy directories (`node_modules`, `target`, `.venv`, `__pycache__`, …), so recursive patterns stay fast and relevant. Results are limited to the first ${MAX_MATCHES} matches.
 
 **When to use:**
-- Find files matching specific patterns (e.g., all Python files: `*.py`)
-- Search for files recursively in subdirectories (e.g., `src/**/*.js`)
-- Locate configuration files (e.g., `*.config.*`, `*.json`)
-- Find test files (e.g., `test_*.py`, `*_test.go`)
+- Find files matching a pattern (e.g. all Python files: `*.py`)
+- Search recursively (e.g. `**/*.rs`, `src/**/*.js`)
+- Locate config files (e.g. `*.config.{js,ts}`, `*.json`)
+- Find test files (e.g. `test_*.py`, `*_test.go`)
 
 **Example patterns:**
-- `*.py` - All Python files in current directory
-- `src/**/*.js` - All JavaScript files in src directory recursively
-- `test_*.py` - Python test files starting with "test_"
-- `*.config.{js,ts}` - Config files with .js or .ts extension
+- `*.py` — Python files in the top level
+- `**/*.rs` — all Rust files recursively
+- `src/**/*.js` — JavaScript files under `src` recursively
+- `*.config.{js,ts}` — config files ending in `.js` or `.ts`
 
-**Bad example patterns:**
-- `**`, `**/*.py` - Any pattern starting with '**' will be rejected. Because it would recursively search all directories and subdirectories, which is very likely to yield large result that exceeds your context size. Always use more specific patterns like `src/**/*.py` instead.
-- `node_modules/**/*.js` - Although this does not start with '**', it would still highly possible to yield large result because `node_modules` is well-known to contain too many directories and files. Avoid recursively searching in such directories, other examples include `venv`, `.venv`, `__pycache__`, `target`. If you really need to search in a dependency, use more specific patterns like `node_modules/react/src/*` instead.
+Note: `*` and `?` do not cross directory separators; use `**` to recurse.

@@ -29,6 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 jsonschema = "0.40"
 schemars = { version = "1.2", features = ["derive"] }
 walkdir = "2"
+ignore = "0.4"
 globset = "0.4"
 base64 = "0.22"
 hex = "0.4"
