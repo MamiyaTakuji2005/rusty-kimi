@@ -1,3 +1,4 @@
-Replace text in a file. Supports exact, fuzzy (whitespace-tolerant), and regex matching. Multi-line edits supported.
-
-Set `regex: true` to treat `old` as a regex. In regex mode, `new` may reference capture groups with `$1`/`${name}`; write `$$` for a literal `$` (an undefined group reference is rejected rather than silently dropped). Use `replace_all: true` to replace all occurrences.
+Functional equivalent to python's str.replace(old, new) but with regex matching, proper whitespace handling and a fuzzy matching fallback.
+- Multi-line edits supported and suggested.
+- Use `replace_all: true` to replace all occurrences.
+- Set `regex: true` to treat `old` as a regex and reference capture groups with `$1`/`${name}`; write `$$` for a literal `$`, undefined group references are rejected rather than dropped.
