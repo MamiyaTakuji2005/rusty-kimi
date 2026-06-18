@@ -380,15 +380,16 @@ class _PromptLiveView(_LiveView):
         return ANSI(body if body else "")
 
     def render_running_prompt_body(self, columns: int) -> ANSI:
-        """Render the interactive part — queued messages."""
-        if not self._queued_messages:
-            return ANSI("")
-
+        """Render the interactive part — approval panel or queued messages."""
         blocks: list[RenderableType] = []
+        if self._current_approval_request_panel is not None:
+            blocks.append(self._current_approval_request_panel.render())
         for qi in self._queued_messages:
             blocks.append(Text(f"❯ {qi.command}", style="dim cyan"))
-        blocks.append(Text("↑ to edit · ctrl-s to send immediately", style="dim"))
-
+        if self._queued_messages:
+            blocks.append(Text("↑ to edit · ctrl-s to send immediately", style="dim"))
+        if not blocks:
+            return ANSI("")
         body = render_to_ansi(Group(*blocks), columns=columns).rstrip("\n")
         return ANSI(body if body else "")
 

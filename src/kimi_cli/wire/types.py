@@ -193,6 +193,8 @@ class StatusUpdate(BaseModel):
     """Whether plan mode (read-only) is active. None means no change."""
     mcp_status: MCPStatusSnapshot | None = None
     """The current MCP startup snapshot. None means no change."""
+    model: str | None = None
+    """The current model name. None means no change."""
 
 
 class Notification(BaseModel):

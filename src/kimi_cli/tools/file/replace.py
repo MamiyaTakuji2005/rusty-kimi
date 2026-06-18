@@ -28,8 +28,7 @@ class Edit(BaseModel):
 class Params(BaseModel):
     path: str = Field(
         description=(
-            "The path to the file to edit. Absolute paths are required when editing files "
-            "outside the working directory."
+            "The path to the file to edit. Absolute paths only required when working outside the workdir."
         )
     )
     edit: Edit | list[Edit] = Field(

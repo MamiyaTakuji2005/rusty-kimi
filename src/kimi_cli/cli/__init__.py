@@ -616,6 +616,8 @@ def kimi(
             # the saved original stderr fd.
             redirect_stderr_to_logger()
 
+            import os
+
             instance = await KimiCLI.create(
                 session,
                 config=config,
@@ -635,6 +637,9 @@ def kimi(
                 startup_progress=startup_progress.update if ui == "shell" else None,
                 defer_mcp_loading=ui == "shell" and prompt is None,
                 ui_mode=ui,
+                remote_agent=(
+                    os.environ.get("KIMI_AGENT_BIN") if ui == "shell" else None
+                ),
             )
             startup_progress.stop()
 

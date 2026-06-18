@@ -143,6 +143,7 @@ class KimiCLI:
         max_ralph_iterations: int | None = None,
         startup_progress: Callable[[str], None] | None = None,
         defer_mcp_loading: bool = False,
+        remote_agent: str | None = None,
     ) -> KimiCLI:
         """
         Create a KimiCLI instance.
@@ -205,6 +206,23 @@ class KimiCLI:
 
         _phase_t = time.monotonic()
         oauth = OAuthManager(config)
+
+        if remote_agent is not None:
+            # Remote mode: the external Wire agent owns the loop, LLM, tools, MCP
+            # and session. Skip all local LLM/agent/soul construction.
+            return await KimiCLI._create_remote(
+                remote_agent,
+                config=config,
+                oauth=oauth,
+                session=session,
+                yolo=yolo,
+                afk=afk,
+                runtime_afk=runtime_afk,
+                skills_dirs=skills_dirs,
+                ui_mode=ui_mode,
+                resumed=resumed,
+                startup_progress=startup_progress,
+            )
 
         bg_refresh_task = asyncio.create_task(_refresh_managed_models_silent(config))
 
@@ -376,6 +394,61 @@ class KimiCLI:
 
         return KimiCLI(soul, runtime, env_overrides, bg_refresh_task)
 
+    @staticmethod
+    async def _create_remote(
+        remote_agent: str,
+        *,
+        config: Config,
+        oauth: OAuthManager,
+        session: Session,
+        yolo: bool,
+        afk: bool,
+        runtime_afk: bool,
+        skills_dirs: list[KaosPath] | None,
+        ui_mode: str,
+        resumed: bool,
+        startup_progress: Callable[[str], None] | None,
+    ) -> KimiCLI:
+        """
+        Build a `KimiCLI` that drives an external Wire agent (`KIMI_AGENT_BIN`).
+
+        No local LLM, agent, tools, MCP or `KimiSoul` are created — the agent
+        process owns all of that. We keep only a light `Runtime` (for the local
+        session / work dir / approval state the shell furniture reads) and a
+        `RemoteSoul` shim over a connected `WireClient`.
+        """
+        import shlex
+
+        from kimi_cli.soul.remote import RemoteSoul
+        from kimi_cli.wire.client import WireClient
+
+        runtime = await Runtime.create(
+            config,
+            oauth,
+            None,  # no local LLM
+            session,
+            yolo,
+            afk=afk,
+            runtime_afk=runtime_afk,
+            skills_dirs=skills_dirs,
+        )
+        runtime.ui_mode = ui_mode
+        runtime.resumed = resumed
+        runtime.notifications.recover()
+        runtime.background_tasks.reconcile()
+
+        if startup_progress is not None:
+            startup_progress("Connecting to agent...")
+        tokens = [t.strip('"') for t in shlex.split(remote_agent, posix=False)]
+        # Ensure the Rust agent uses the same session as Python
+        tokens.extend(["--session", session.id])
+        client = WireClient(tokens, client_name="kimi-shell", cwd=str(session.work_dir))
+        await client.connect()
+
+        instance = KimiCLI(RemoteSoul(client), runtime, {}, None)
+        instance._remote_client = client
+        return instance
+
     def __init__(
         self,
         _soul: KimiSoul,
@@ -387,6 +460,8 @@ class KimiCLI:
         self._runtime = _runtime
         self._env_overrides = _env_overrides
         self._bg_refresh_task = _bg_refresh_task
+        self._remote_client: Any | None = None
+        """Set when running against an external Wire agent (KIMI_AGENT_BIN)."""
 
     @property
     def soul(self) -> KimiSoul:
@@ -418,12 +493,14 @@ class KimiCLI:
 
         # Close MCP client connections so stdio/WebSocket transports do not
         # outlive the CLI process and trigger firewall warnings.
-        try:
-            toolset = self.soul.agent.toolset
-            if isinstance(toolset, KimiToolset):
-                await toolset.cleanup()
-        except (Exception, asyncio.CancelledError):
-            logger.warning("Error during toolset cleanup; continuing exit", exc_info=True)
+        # In remote mode there is no local toolset/MCP (the agent owns it).
+        if isinstance(self.soul, KimiSoul):
+            try:
+                toolset = self.soul.agent.toolset
+                if isinstance(toolset, KimiToolset):
+                    await toolset.cleanup()
+            except (Exception, asyncio.CancelledError):
+                logger.warning("Error during toolset cleanup; continuing exit", exc_info=True)
 
         bg_config = self._runtime.config.background
         if bg_config.keep_alive_on_exit:
@@ -700,6 +777,9 @@ class KimiCLI:
         """Run the Kimi Code CLI instance with shell UI."""
         from kimi_cli.ui.shell import Shell, WelcomeInfoItem
 
+        if self._remote_client is not None:
+            return await self._run_shell_remote(prefill_text=prefill_text, command=command)
+
         if command is None:
             from kimi_cli.ui.shell.update import check_update_gate
 
@@ -786,6 +866,40 @@ class KimiCLI:
         async with self._env():
             shell = Shell(self._soul, welcome_info=welcome_info, prefill_text=prefill_text)
             return await shell.run(command)
+
+    async def _run_shell_remote(
+        self,
+        *,
+        prefill_text: str | None,
+        command: str | None,
+    ) -> bool:
+        """
+        Run the shell UI against the external Wire agent connected in
+        `_create_remote` (`self._remote_client`). The agent process owns the
+        loop/session/LLM; locally there is only a `RemoteSoul` shim.
+        """
+        from kimi_cli.ui.shell import Shell, WelcomeInfoItem
+
+        client = self._remote_client
+        assert client is not None
+        server = client.server_info.get("name", "external agent")
+        version = client.server_info.get("version", "")
+        welcome_info = [
+            WelcomeInfoItem(
+                name="Directory", value=str(shorten_home(self._runtime.session.work_dir))
+            ),
+            WelcomeInfoItem(
+                name="Agent",
+                value=f"{server} {version}".strip() + " (remote / wire)",
+                level=WelcomeInfoItem.Level.INFO,
+            ),
+        ]
+        try:
+            async with self._env():
+                shell = Shell(self._soul, welcome_info=welcome_info, prefill_text=prefill_text)
+                return await shell.run(command)
+        finally:
+            await client.close()
 
     async def run_print(
         self,

@@ -22,8 +22,7 @@ _BASE_DESCRIPTION = load_desc(Path(__file__).parent / "write.md")
 class Params(BaseModel):
     path: str = Field(
         description=(
-            "The path to the file to write. Absolute paths are required when writing files "
-            "outside the working directory."
+            "The path to the file to write. Absolute paths only required when working outside the workdir."
         )
     )
     content: str = Field(description="The content to write to the file")

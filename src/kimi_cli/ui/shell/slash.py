@@ -185,6 +185,14 @@ def version(app: Shell, args: str):
 async def model(app: Shell, args: str):
     """Switch LLM model or thinking mode"""
     from kimi_cli.llm import derive_model_capabilities
+    from kimi_cli.soul.remote import RemoteSoul
+
+    # In remote mode, forward to the Rust agent which handles /model natively.
+    if isinstance(app.soul, RemoteSoul):
+        # Reconstruct the raw slash command and forward it.
+        raw = f"/model {args}".strip()
+        await app.run_soul_command(raw)
+        return
 
     soul = ensure_kimi_soul(app)
     if soul is None:
@@ -590,44 +598,6 @@ async def title(app: Shell, args: str):
     session.state.title_generated = True
     session.title = new_title
     console.print(f"[green]Session title set to: {new_title}[/green]")
-
-
-@registry.command(name="sessions", aliases=["resume"])
-async def list_sessions(app: Shell, args: str):
-    """List sessions and resume optionally"""
-    import shlex
-
-    from kimi_cli.ui.shell.session_picker import SessionPickerApp
-
-    soul = ensure_kimi_soul(app)
-    if soul is None:
-        return
-
-    current_session = soul.runtime.session
-    result = await SessionPickerApp(
-        work_dir=current_session.work_dir,
-        current_session=current_session,
-    ).run()
-
-    if result is None:
-        return
-
-    selection, selected_work_dir = result
-
-    if selection == current_session.id:
-        console.print("[yellow]You are already in this session.[/yellow]")
-        return
-
-    if selected_work_dir != current_session.work_dir:
-        cmd = f"kimi --work-dir {shlex.quote(str(selected_work_dir))} --session {selection}"
-        console.print(f"[yellow]Session is in a different directory. Run:[/yellow]\n  {cmd}")
-        return
-
-    from kimi_cli.telemetry import track
-
-    track("session_resume")
-    console.print(f"[green]Switching to session {selection}...[/green]")
-    raise Reload(session_id=selection)
 
 
 @registry.command(name="task")

@@ -433,6 +433,23 @@ class Shell:
                 show_thinking_stream=self.soul.runtime.config.show_thinking_stream,
             )
             await self.soul.start_background_mcp_loading()
+        else:
+            from kimi_cli.soul.remote import RemoteSoul, run_remote_replay
+
+            if isinstance(self.soul, RemoteSoul):
+                snap = self.soul.status
+                await run_remote_replay(
+                    self.soul.client,
+                    lambda wire: visualize(
+                        wire.ui_side(merge=False),
+                        initial_status=StatusUpdate(
+                            context_usage=snap.context_usage,
+                            context_tokens=snap.context_tokens,
+                            max_context_tokens=snap.max_context_tokens,
+                        ),
+                        prompt_session=None,
+                    ),
+                )
 
         async def _plan_mode_toggle() -> bool:
             if isinstance(self.soul, KimiSoul):
@@ -817,6 +834,61 @@ class Shell:
             console.print(f"[red]Unknown error: {e}[/red]")
             raise  # re-raise unknown error
 
+    async def _run_remote_command(self, user_input: str | list[ContentPart]) -> bool:
+        """
+        Run one turn against a remote Wire agent (when ``self.soul`` is a
+        ``RemoteSoul``). Uses the same real ``visualize`` view as the local path;
+        the only differences are the run function (``run_remote_soul``) and that
+        ``status``/``steer`` come from the ``WireClient`` shim.
+        """
+        from kimi_cli.soul import RunCancelled
+        from kimi_cli.soul.remote import RemoteSoul, run_remote_soul
+        from kimi_cli.wire.client import WireClientError
+
+        assert isinstance(self.soul, RemoteSoul)
+        client = self.soul.client
+
+        cancel_event = asyncio.Event()
+
+        def _handler() -> None:
+            cancel_event.set()
+
+        loop = asyncio.get_running_loop()
+        remove_sigint = install_sigint_handler(loop, _handler)
+
+        try:
+            snap = self.soul.status
+            await run_remote_soul(
+                client,
+                user_input,
+                lambda wire: visualize(
+                    wire.ui_side(merge=False),
+                    initial_status=StatusUpdate(
+                        context_usage=snap.context_usage,
+                        context_tokens=snap.context_tokens,
+                        max_context_tokens=snap.max_context_tokens,
+                    ),
+                    cancel_event=cancel_event,
+                    prompt_session=self._prompt_session,
+                    steer=self.soul.steer,
+                    btw_runner=None,
+                    bind_running_input=self._bind_running_input,
+                    unbind_running_input=self._unbind_running_input,
+                    on_view_ready=self._set_active_view,
+                    on_view_closed=self._clear_active_view,
+                    show_thinking_stream=False,
+                ),
+                cancel_event,
+            )
+            return True
+        except RunCancelled:
+            return True
+        except WireClientError as e:
+            console.print(f"[red]Agent connection error:[/red] {e}")
+            return False
+        finally:
+            remove_sigint()
+
     async def run_soul_command(self, user_input: str | list[ContentPart]) -> bool:
         """
         Run the soul and handle any known exceptions.
@@ -825,6 +897,11 @@ class Shell:
             bool: Whether the run is successful.
         """
         logger.info("Running soul with user input: {user_input}", user_input=user_input)
+
+        from kimi_cli.soul.remote import RemoteSoul
+
+        if isinstance(self.soul, RemoteSoul):
+            return await self._run_remote_command(user_input)
 
         cancel_event = asyncio.Event()
 

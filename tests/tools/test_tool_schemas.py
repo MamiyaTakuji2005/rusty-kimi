@@ -247,7 +247,7 @@ def test_read_file_params_schema(read_file_tool: ReadFile):
         {
             "properties": {
                 "path": {
-                    "description": "The path to the file to read. Absolute paths are required when reading files outside the working directory.",
+                    "description": "The path to the file to read. Absolute paths only required when working outside the workdir.",
                     "type": "string",
                 },
                 "line_offset": {
@@ -274,7 +274,7 @@ def test_read_media_file_params_schema(read_media_file_tool: ReadMediaFile):
         {
             "properties": {
                 "path": {
-                    "description": "The path to the file to read. Absolute paths are required when reading files outside the working directory.",
+                    "description": "The path to the file to read. Absolute paths only required when working outside the workdir.",
                     "type": "string",
                 }
             },
@@ -398,7 +398,7 @@ def test_write_file_params_schema(write_file_tool: WriteFile):
         {
             "properties": {
                 "path": {
-                    "description": "The path to the file to write. Absolute paths are required when writing files outside the working directory.",
+                    "description": "The path to the file to write. Absolute paths only required when working outside the workdir.",
                     "type": "string",
                 },
                 "content": {
@@ -424,7 +424,7 @@ def test_str_replace_file_params_schema(str_replace_file_tool: StrReplaceFile):
         {
             "properties": {
                 "path": {
-                    "description": "The path to the file to edit. Absolute paths are required when editing files outside the working directory.",
+                    "description": "The path to the file to edit. Absolute paths only required when working outside the workdir.",
                     "type": "string",
                 },
                 "edit": {

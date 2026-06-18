@@ -269,7 +269,7 @@ When `run_in_background=true`, the command is launched as a background task and 
 ### `WriteFile`
 
 - **Path**: `kimi_cli.tools.file:WriteFile`
-- **Description**: Write files. Requires user approval. Absolute paths are required when writing files outside the working directory.
+- **Description**: Write files. Requires user approval. Absolute paths only required when working outside the workdir.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -280,7 +280,7 @@ When `run_in_background=true`, the command is launched as a background task and 
 ### `StrReplaceFile`
 
 - **Path**: `kimi_cli.tools.file:StrReplaceFile`
-- **Description**: Edit files using string replacement. Requires user approval. Absolute paths are required when editing files outside the working directory.
+- **Description**: Edit files using string replacement. Requires user approval. Absolute paths only required when working outside the workdir.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -382,7 +382,7 @@ This tool takes no parameters.
 **Workspace scope**
 
 - File reading and writing are typically done within the working directory (and additional directories added via `--add-dir` or `/add-dir`)
-- Absolute paths are required when reading files outside the workspace
+- Absolute paths only required when working outside the workdir
 - Write and edit operations require user approval; absolute paths are required when operating on files outside the workspace
 
 **Approval mechanism**
