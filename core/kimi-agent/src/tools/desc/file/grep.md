@@ -1,5 +1,5 @@
-Ripgrep-compatible content search. Walks the working directory (ignore-aware, same rules as Glob) and matches each file against a regex pattern.
+Full ripgrep-compatible file search. Walks the working directory with the same ignore rules as Glob (gitignore, hidden files, heavy dirs pruned).
 
-Output modes: `files_with_matches` (default) returns one file path per match; `content` returns matching lines; `count_matches` returns per-file match counts.
+Supports: regex patterns (or `-F: true` for fixed strings), `-i` case-insensitive, `-n` line numbers, `-B`/`-A`/`-C` context lines, `type` file type filter (`rust`, `python`, `js`, `ts`, `go`, `java`, `cpp`, …), `glob` file filter, `multiline` mode, and `head_limit` to cap output.
 
-Use `-F: true` to search for literal text that contains regex metacharacters (e.g. `fn foo(`, `[ERROR]`).
+Output modes — `files_with_matches` (default): one path per matched file; `content`: matching lines with optional context; `count_matches`: per-file match count.
