@@ -47,7 +47,7 @@ LLM friendly version: https://moonshotai.github.io/kimi-cli/llms.txt""",
     help="Kimi, your next CLI agent.",
 )
 
-UIMode = Literal["shell", "print", "acp", "wire"]
+UIMode = Literal["shell", "print", "wire"]
 
 
 class ExitCode:
@@ -234,13 +234,6 @@ def kimi(
             ),
         ),
     ] = False,
-    acp_mode: Annotated[
-        bool,
-        typer.Option(
-            "--acp",
-            help="(Deprecated, use `kimi acp` instead) Run as ACP server.",
-        ),
-    ] = False,
     wire_mode: Annotated[
         bool,
         typer.Option(
@@ -418,7 +411,7 @@ def kimi(
             _picker_mode = True
 
     if quiet:
-        if acp_mode or wire_mode:
+        if wire_mode:
             raise typer.BadParameter(
                 "Quiet mode cannot be combined with ACP or Wire UI",
                 param_hint="--quiet",
@@ -435,7 +428,6 @@ def kimi(
     conflict_option_sets = [
         {
             "--print": print_mode,
-            "--acp": acp_mode,
             "--wire": wire_mode,
         },
         {
@@ -469,8 +461,6 @@ def kimi(
     ui: UIMode = "shell"
     if print_mode:
         ui = "print"
-    elif acp_mode:
-        ui = "acp"
     elif wire_mode:
         ui = "wire"
 
@@ -671,11 +661,6 @@ def kimi(
                             prompt,
                             final_only=final_message_only,
                         )
-                    case "acp":
-                        if prompt is not None:
-                            logger.warning("ACP server ignores prompt argument")
-                        await instance.run_acp()
-                        exit_code = ExitCode.SUCCESS
                     case "wire":
                         if prompt is not None:
                             logger.warning("Wire server ignores prompt argument")
@@ -1009,22 +994,12 @@ def logout(
         raise typer.Exit(code=1)
 
 
-@cli.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def term(
-    ctx: typer.Context,
-) -> None:
-    """Run Toad TUI backed by Kimi Code CLI ACP server."""
-    from .toad import run_term
-
-    run_term(ctx)
-
-
 @cli.command()
-def acp():
-    """Run Kimi Code CLI ACP server."""
-    from kimi_cli.acp import acp_main
+def vis():
+    """Open the Agent Tracing Visualizer (reads recorded session traces)."""
+    from kimi_cli.vis.app import run_vis_server
 
-    acp_main()
+    run_vis_server(open_browser=True)
 
 
 @cli.command(name="__background-task-worker", hidden=True)

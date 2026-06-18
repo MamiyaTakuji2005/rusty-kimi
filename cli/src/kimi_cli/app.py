@@ -922,14 +922,6 @@ class KimiCLI:
             )
             return await print_.run(command)
 
-    async def run_acp(self) -> None:
-        """Run the Kimi Code CLI instance as ACP server."""
-        from kimi_cli.ui.acp import ACP
-
-        async with self._env():
-            acp = ACP(self._soul)
-            await acp.run()
-
     async def run_wire_stdio(self) -> None:
         """Run the Kimi Code CLI instance as Wire server over stdio."""
         from kimi_cli.wire.server import WireServer

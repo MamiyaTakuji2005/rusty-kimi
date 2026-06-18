@@ -255,7 +255,12 @@ pub async fn create_llm(
             if !kwargs.is_empty() {
                 // Apply generation kwargs
             }
-            Box::new(openai_compatible)
+            if let Some(extra) = &provider.extra_body {
+                let openai_compatible = openai_compatible.with_extra_body(extra.clone());
+                Box::new(openai_compatible)
+            } else {
+                Box::new(openai_compatible)
+            }
         }
         ProviderType::Echo => Box::new(kosong::chat_provider::echo::echo::EchoChatProvider),
         ProviderType::ScriptedEcho => {

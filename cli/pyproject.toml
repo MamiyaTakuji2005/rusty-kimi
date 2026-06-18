@@ -55,14 +55,13 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = ["kimi_cli"]
-source-exclude = ["examples/**/*", "tests/**/*", "src/kimi_cli/deps/**/*"]
+source-exclude = ["src/kimi_cli/deps/**/*"]
 
 [tool.uv.workspace]
 members = [
     "packages/kosong",
     "packages/kaos",
     "packages/kimi-code",
-    "sdks/kimi-sdk",
 ]
 
 [tool.uv.sources]
@@ -88,8 +87,6 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["E501"]
-"tests_e2e/**/*.py" = ["E501"]
 "src/kimi_cli/web/api/**/*.py" = ["B008"]  # FastAPI Depends() is standard usage
 
 [tool.pyright]
@@ -97,9 +94,6 @@ typeCheckingMode = "standard"
 pythonVersion = "3.14"
 include = [
     "src/**/*.py",
-    "tests/**/*.py",
-    "tests_ai/scripts/**/*.py",
-    "tests_e2e/**/*.py",
 ]
 strict = ["src/kimi_cli/**/*.py"]
 
@@ -109,9 +103,6 @@ python-version = "3.14"
 [tool.ty.src]
 include = [
     "src/**/*.py",
-    "tests/**/*.py",
-    "tests_ai/scripts/**/*.py",
-    "tests_e2e/**/*.py",
 ]
 
 [tool.typos.files]

@@ -2,8 +2,11 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
+use std::borrow::Cow;
+
 use kaos::KaosPath;
 use kosong::tooling::{CallableTool2, DisplayBlock, ToolReturnValue, tool_error};
+use regex::Regex;
 
 use crate::soul::agent::Runtime;
 use crate::tools::utils::tool_rejected_error;
@@ -16,19 +19,22 @@ use super::{
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EditParams {
-    #[schemars(description = "The old string to replace. Can be multi-line.")]
+    #[schemars(description = "The string that you want to replace, suports multi-line.")]
     pub old: String,
-    #[schemars(description = "The new string to replace with. Can be multi-line.")]
+    #[schemars(description = "The replacement string, suports multi-line.")]
     pub new: String,
     #[serde(default)]
-    #[schemars(description = "Whether to replace all occurrences.", default)]
+    #[schemars(description = "Whether to replace all matches.", default)]
     pub replace_all: bool,
+    #[serde(default)]
+    #[schemars(description = "Whether to treat the old string as a regex pattern.", default)]
+    pub regex: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StrReplaceParams {
     #[schemars(
-        description = "The path to the file to edit. Absolute paths only required when working outside the workdir."
+        description = "The path to the target file. Relative unless outside the workdir."
     )]
     pub path: String,
     #[serde(deserialize_with = "deserialize_edit_list")]
@@ -135,11 +141,17 @@ impl CallableTool2 for StrReplaceFile {
         };
 
         let mut content = original.clone();
-        for edit in &params.edit {
-            if edit.replace_all {
-                content = content.replace(&edit.old, &edit.new);
-            } else {
-                content = content.replacen(&edit.old, &edit.new, 1);
+        match apply_edits(&mut content, &params.edit) {
+            Ok(true) => {}
+            Ok(false) => {
+                return tool_error(
+                    "",
+                    "No replacements were made. The old string was not found in the file.",
+                    "No replacements made",
+                );
+            }
+            Err(err) => {
+                return tool_error("", err, "Edit failed");
             }
         }
 
@@ -196,4 +208,127 @@ impl CallableTool2 for StrReplaceFile {
             extras: None,
         }
     }
+}
+
+
+fn replace_first_exact(text: &str, old: &str, new: &str) -> Option<String> {
+    let pos = text.find(old)?;
+    let mut result = String::with_capacity(text.len() - old.len() + new.len());
+    result.push_str(&text[..pos]);
+    result.push_str(new);
+    result.push_str(&text[pos + old.len()..]);
+    Some(result)
+}
+
+fn replace_all_exact(text: &str, old: &str, new: &str) -> Option<String> {
+    let r = text.replace(old, &new);
+    if r == text { None } else { Some(r) }
+}
+
+fn fuzzy_replace(text: &str, old: &str, new: &str) -> Option<String> {
+    let pattern_lines: Vec<&str> = old.lines().collect();
+    let content_lines: Vec<&str> = text.lines().collect();
+    if pattern_lines.is_empty() || pattern_lines.len() > content_lines.len() {
+        return None;
+    }
+    for start in 0..=content_lines.len() - pattern_lines.len() {
+        if pattern_lines
+            .iter()
+            .zip(&content_lines[start..start + pattern_lines.len()])
+            .all(|(p, c)| p.trim() == c.trim())
+        {
+            let mut combined: Vec<&str> = Vec::new();
+            combined.extend_from_slice(&content_lines[..start]);
+            combined.extend(new.lines());
+            combined.extend_from_slice(&content_lines[start + pattern_lines.len()..]);
+            return Some(combined.join("\n"));
+        }
+    }
+    None
+}
+
+fn template_needs_captures(new: &str) -> bool {
+    new.contains('$') || new.contains('\\')
+}
+
+fn replace_first_regex(text: &str, re: &Regex, new: &str) -> Option<String> {
+    if !template_needs_captures(new) {
+        return match re.replacen(text, 1, new) {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(s) => Some(s),
+        };
+    }
+    let caps = re.captures(text)?;
+    let m = caps.get(0).expect("capture 0 always exists");
+    let mut result = String::with_capacity(text.len() - m.len() + new.len());
+    result.push_str(&text[..m.start()]);
+    caps.expand(new, &mut result);
+    result.push_str(&text[m.end()..]);
+    Some(result)
+}
+
+fn replace_all_regex(text: &str, re: &Regex, new: &str) -> Option<String> {
+    if !template_needs_captures(new) {
+        return match re.replace_all(text, new) {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(s) => Some(s),
+        };
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut found = false;
+    for caps in re.captures_iter(text) {
+        found = true;
+        let m = caps.get(0).expect("capture 0 always exists");
+        result.push_str(&text[last..m.start()]);
+        caps.expand(new, &mut result);
+        last = m.end();
+    }
+    if !found { return None; }
+    result.push_str(&text[last..]);
+    Some(result)
+}
+
+fn apply_edits(content: &mut String, edits: &[EditParams]) -> Result<bool, String> {
+    let mut changed = false;
+    for e in edits {
+        if e.old.is_empty() {
+            return Err("empty search".into());
+        }
+
+        let maybe_new = if e.regex {
+            let re = Regex::new(&e.old)
+                .map_err(|err| format!("invalid regex: {err}"))?;
+            if e.replace_all {
+                replace_all_regex(content, &re, &e.new)
+            } else {
+                replace_first_regex(content, &re, &e.new)
+            }
+        } else if e.replace_all {
+            replace_all_exact(content, &e.old, &e.new)
+        } else {
+            replace_first_exact(content, &e.old, &e.new)
+        };
+
+        if let Some(new) = maybe_new {
+            *content = new;
+            changed = true;
+            continue;
+        }
+
+        // Fall back to fuzzy (whitespace-tolerant) match for single edits
+        if !e.replace_all && !e.regex {
+            if let Some(new) = fuzzy_replace(content, &e.old, &e.new) {
+                *content = new;
+                changed = true;
+                continue;
+            }
+        }
+
+        if changed {
+            return Err(format!("edit failed for '{}'", &e.old[..e.old.len().min(40)]));
+        }
+        return Ok(false);
+    }
+    Ok(changed)
 }

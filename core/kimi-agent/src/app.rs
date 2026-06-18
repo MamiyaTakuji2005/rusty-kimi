@@ -104,6 +104,7 @@ impl KimiCLI {
                 api_key: "".to_string(),
                 env: None,
                 custom_headers: None,
+                extra_body: None,
             });
         }
 

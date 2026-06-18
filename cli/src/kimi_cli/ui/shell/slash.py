@@ -684,8 +684,10 @@ def vis(app: Shell, args: str):
     from kimi_cli.telemetry import track
 
     track("vis_opened")
-    soul = ensure_kimi_soul(app)
-    session_id = soul.runtime.session.id if soul else None
+    # vis reads recorded session files from disk, so it works regardless of
+    # agent. Don't require a local KimiSoul (would print a spurious error in
+    # remote mode); just pin to the current session id when one is available.
+    session_id = app.soul.runtime.session.id if isinstance(app.soul, KimiSoul) else None
     raise SwitchToVis(session_id=session_id)
 
 

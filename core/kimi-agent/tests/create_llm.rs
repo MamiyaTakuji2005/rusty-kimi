@@ -59,6 +59,7 @@ fn test_augment_provider_with_env_vars_kimi() {
         api_key: "orig-key".to_string(),
         env: None,
         custom_headers: None,
+        extra_body: None,
     };
     let mut model = LLMModel {
         provider: "kimi".to_string(),
@@ -77,6 +78,7 @@ fn test_augment_provider_with_env_vars_kimi() {
             api_key: "env-key".to_string(),
             env: None,
             custom_headers: None,
+        extra_body: None,
         }
     );
     assert_eq!(
@@ -104,6 +106,7 @@ fn test_augment_provider_with_env_vars_invalid_max_context_size() {
         api_key: "orig-key".to_string(),
         env: None,
         custom_headers: None,
+        extra_body: None,
     };
     let mut model = LLMModel {
         provider: "kimi".to_string(),
@@ -135,6 +138,7 @@ async fn test_create_llm_kimi_model_parameters() {
         api_key: "test-key".to_string(),
         env: None,
         custom_headers: None,
+        extra_body: None,
     };
     let model = LLMModel {
         provider: "kimi".to_string(),
@@ -176,6 +180,7 @@ async fn test_create_llm_invalid_temperature_env() {
         api_key: "test-key".to_string(),
         env: None,
         custom_headers: None,
+        extra_body: None,
     };
     let model = LLMModel {
         provider: "kimi".to_string(),
@@ -202,6 +207,7 @@ async fn test_create_llm_echo_provider() {
         api_key: "".to_string(),
         env: None,
         custom_headers: None,
+        extra_body: None,
     };
     let model = LLMModel {
         provider: "_echo".to_string(),
@@ -227,6 +233,7 @@ async fn test_create_llm_requires_base_url_for_kimi() {
         api_key: "test-key".to_string(),
         env: None,
         custom_headers: None,
+        extra_body: None,
     };
     let model = LLMModel {
         provider: "kimi".to_string(),

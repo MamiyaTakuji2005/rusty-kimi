@@ -5,7 +5,6 @@ import contextlib
 import json
 from typing import Any, Literal, cast
 
-import acp  # type: ignore[reportMissingTypeStubs]
 import pydantic
 from kosong.chat_provider import APIStatusError, ChatProviderError
 from kosong.tooling import ToolError, ToolResult
