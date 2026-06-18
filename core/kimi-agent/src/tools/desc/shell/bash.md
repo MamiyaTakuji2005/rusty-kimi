@@ -1,4 +1,4 @@
-Execute a ${SHELL} command. Use this tool to explore the filesystem, edit files, run scripts, get system information, etc.
+Execute a ${SHELL} command. Use this tool to run scripts, build/test projects, manage processes, and perform operations that have no dedicated tool. For file reading, writing, searching, and editing use ReadFile, WriteFile, StrReplaceFile, Grep, and Glob instead.
 
 **Output:**
 The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command failed, the exit code will be provided in a system tag.
@@ -17,14 +17,12 @@ The stdout and stderr will be combined and returned as a string. The output may 
 - Use pipe operations (`|`) and redirections (`>`, `>>`) to chain input and output between commands
 - Always quote file paths containing spaces with double quotes (e.g., cd "/path with spaces/")
 - Use `if`, `case`, `for`, `while` control flows to execute complex logic in a single call.
-- Verify directory structure before create/edit/delete files or directories to reduce the risk of failure.
 
 **Commands available:**
 - Shell environment: cd, pwd, export, unset, env
 - File system operations: ls, find, mkdir, rm, cp, mv, touch, chmod, chown
-- File viewing/editing: cat, grep, head, tail, diff, patch
-- Text processing: awk, sed, sort, uniq, wc
+- Text processing: awk, sed, sort, uniq, wc, diff
 - System information/operations: ps, kill, top, df, free, uname, whoami, id, date
-- Network operations: curl, wget, ping, telnet, ssh
+- Network operations: curl, wget, ping, ssh
 - Archive operations: tar, zip, unzip
 - Other: Other commands available in the shell environment. Check the existence of a command by running `which <command>` before using it.

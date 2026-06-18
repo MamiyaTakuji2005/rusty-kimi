@@ -1,6 +1,4 @@
-Execute a ${SHELL} command. Use this tool to explore the filesystem, inspect or edit files, run Windows scripts, collect system information, etc., whenever the agent is running on Windows.
-
-Note that you are running on Windows, so make sure to use Windows commands, paths, and conventions.
+Execute a ${SHELL} command. Use this tool to run scripts, build/test projects, manage processes, and perform operations that have no dedicated tool. For file reading, writing, searching, and editing use ReadFile, WriteFile, StrReplaceFile, Grep, and Glob instead. Only use this tool on Windows.
 
 **Output:**
 The stdout and stderr streams are combined and returned as a single string. Extremely long output may be truncated. When a command fails, the exit code is provided in a system tag.
@@ -12,14 +10,13 @@ The stdout and stderr streams are combined and returned as a single string. Extr
 - Never attempt commands that require elevated (Administrator) privileges unless explicitly authorized.
 
 **Guidelines for efficiency:**
-- Chain related commands with `;` and use `if ($?)` or `if (-not $?)` to conditionally execute commands based on the success or failure of previous ones.
-- Redirect or pipe output with `>`, `>>`, `|`, and leverage `for /f`, `if`, and `set` to build richer one-liners instead of multiple tool calls.
-- Reuse built-in utilities (e.g., `findstr`, `where`) to filter, transform, or locate data in a single invocation.
+- Chain related commands with `&&` or `;` and use `if ($?)` / `if (-not $?)` for conditional execution.
+- Redirect or pipe output with `>`, `>>`, `|`.
+- Use PowerShell cmdlets (`Get-ChildItem`, `Select-String`, `Where-Object`) for filtering rather than separate tool calls.
 
 **Commands available:**
-- Shell environment: `cd`, `dir`, `set`, `setlocal`, `echo`, `call`, `where`
-- File operations: `type`, `copy`, `move`, `del`, `erase`, `mkdir`, `rmdir`, `attrib`, `mklink`
-- Text/search: `find`, `findstr`, `more`, `sort`, `Get-Content`
-- System info: `ver`, `systeminfo`, `tasklist`, `wmic`, `hostname`
-- Archives/scripts: `tar`, `Compress-Archive`, `powershell`, `python`, `node`
+- Shell environment: `Set-Location`, `Get-Location`, `$env:VAR`, `where`
+- File system operations: `Get-ChildItem`, `New-Item`, `Copy-Item`, `Move-Item`, `Remove-Item`, `mkdir`
+- System info: `Get-Process`, `Stop-Process`, `Get-Service`, `hostname`, `systeminfo`
+- Archives/scripts: `Compress-Archive`, `Expand-Archive`, `tar`, `python`, `node`
 - Other: Any other binaries available on the system PATH; run `where <command>` first if unsure.
