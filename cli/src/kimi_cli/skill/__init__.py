@@ -208,7 +208,6 @@ async def resolve_skills_roots(
 
     Non-existent entries are silently dropped. Duplicates collapse to one.
     """
-    from kimi_cli.plugin.manager import get_plugins_dir
     from kimi_cli.utils.path import find_project_root
 
     scoped: list[ScopedSkillsRoot] = []
@@ -272,16 +271,6 @@ async def resolve_skills_roots(
             if not is_dir:
                 continue
             _append(resolved, "extra")
-
-    # Plugins are always discoverable; treat as "extra" origin for prompt
-    # grouping but place them below config-declared extras (user intent wins).
-    plugins_path = get_plugins_dir()
-    try:
-        plugins_is_dir = plugins_path.is_dir()
-    except OSError:
-        plugins_is_dir = False
-    if plugins_is_dir:
-        _append(KaosPath.unsafe_from_local_path(plugins_path), "extra")
 
     if _supports_builtin_skills():
         _append(
