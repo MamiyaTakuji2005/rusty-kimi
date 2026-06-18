@@ -1,10 +1,12 @@
 //! KAOS (Kimi Agent Operating System) core abstractions.
 
+pub mod cached;
 pub mod local;
 pub mod path;
 
 mod current;
 
+pub use cached::CachedKaos;
 pub use current::{
     CurrentKaosToken, get_current_kaos, reset_current_kaos, set_current_kaos,
     with_current_kaos_scope,

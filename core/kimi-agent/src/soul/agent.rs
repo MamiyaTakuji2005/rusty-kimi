@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Local;
-use kaos::KaosPath;
+use kaos::{CachedKaos, KaosPath, set_current_kaos};
 use regex::Regex;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -86,11 +86,20 @@ impl Runtime {
         skills_dir: Option<KaosPath>,
     ) -> Runtime {
         let work_dir = session.work_dir.clone();
-        let (ls_output, agents_md, environment) = tokio::join!(
+
+        // Build the cached kaos index in parallel with the other startup I/O.
+        // CachedKaos::new does a blocking ignore-aware full scan of work_dir so
+        // the first Glob tool call hits memory instead of walking the disk.
+        let (cached_kaos, ls_output, agents_md, environment) = tokio::join!(
+            CachedKaos::new(work_dir.as_path().to_path_buf()),
             list_directory(&work_dir),
             load_agents_md(&work_dir),
             Environment::detect()
         );
+        // Install as global kaos. Runtime::create runs once at startup outside
+        // any task-local scope, so this sets the process-wide backend.
+        // CurrentKaosToken has no Drop impl — dropping it does not reset the global.
+        let _ = set_current_kaos(Arc::new(cached_kaos));
 
         let skills_roots = resolve_skills_roots(&work_dir, skills_dir).await;
         let skills = discover_skills_from_roots(&skills_roots).await;

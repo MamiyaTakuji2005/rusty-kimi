@@ -40,7 +40,7 @@ impl LocalKaos {
 
 /// Directory names always pruned when `respect_ignores` is on, so the walk
 /// stays fast and relevant even in a repo without a `.gitignore`.
-const ALWAYS_PRUNE_DIRS: &[&str] = &[
+pub(crate) const ALWAYS_PRUNE_DIRS: &[&str] = &[
     ".git",
     "node_modules",
     "target",
