@@ -9,6 +9,7 @@ use crate::tooling::Tool;
 
 pub mod echo;
 pub mod kimi;
+pub mod openai_compatible;
 
 #[async_trait]
 pub trait StreamedMessage: Send {

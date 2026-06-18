@@ -27,8 +27,8 @@ pub use file::{WireFile, WireFileMetadata, WireMessageRecord};
 pub use serde::{deserialize_wire_message, serialize_wire_message};
 pub use types::{
     ApprovalRequest, ApprovalResponse, ApprovalResponseKind, CompactionBegin, CompactionEnd,
-    StatusUpdate, StepBegin, StepInterrupted, SubagentEvent, ToolCallRequest, TurnBegin, TurnEnd,
-    UserInput, WireMessage, WireMessageEnvelope,
+    StatusUpdate, SteerInput, StepBegin, StepInterrupted, SubagentEvent, ToolCallRequest, TurnBegin,
+    TurnEnd, UserInput, WireMessage, WireMessageEnvelope,
 };
 
 pub use types::{is_event, is_request, is_wire_message};

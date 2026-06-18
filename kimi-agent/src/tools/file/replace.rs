@@ -28,7 +28,7 @@ pub struct EditParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StrReplaceParams {
     #[schemars(
-        description = "The path to the file to edit. Absolute paths are required when editing files outside the working directory."
+        description = "The path to the file to edit. Absolute paths only required when working outside the workdir."
     )]
     pub path: String,
     #[serde(deserialize_with = "deserialize_edit_list")]

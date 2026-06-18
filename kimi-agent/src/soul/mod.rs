@@ -81,7 +81,7 @@ pub struct StatusSnapshot {
 #[async_trait(?Send)]
 pub trait Soul: Send + Sync {
     fn name(&self) -> &str;
-    fn model_name(&self) -> &str;
+    fn model_name(&self) -> String;
     fn model_capabilities(&self) -> Option<&HashSet<ModelCapability>>;
     fn thinking(&self) -> Option<bool>;
     fn status(&self) -> StatusSnapshot;

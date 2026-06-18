@@ -25,7 +25,7 @@ use super::{
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadMediaParams {
     #[schemars(
-        description = "The path to the file to read. Absolute paths are required when reading files outside the working directory."
+        description = "The path to the file to read. Absolute paths only required when working outside the workdir."
     )]
     pub path: String,
 }
@@ -39,7 +39,7 @@ pub struct ReadMediaFile {
 
 impl ReadMediaFile {
     pub fn new(runtime: &Runtime) -> Result<Self, SkipThisTool> {
-        let llm = runtime.llm.clone();
+        let llm = runtime.llm.try_read().ok().and_then(|g| g.clone());
         let capabilities = llm
             .as_ref()
             .map(|llm| llm.capabilities.clone())

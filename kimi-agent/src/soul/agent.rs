@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::Local;
 use kaos::KaosPath;
 use regex::Regex;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::agentspec::load_agent_spec;
@@ -66,7 +67,7 @@ pub async fn load_agents_md(work_dir: &KaosPath) -> Option<String> {
 #[derive(Clone)]
 pub struct Runtime {
     pub config: Config,
-    pub llm: Option<Arc<LLM>>,
+    pub llm: Arc<RwLock<Option<Arc<LLM>>>>,
     pub session: Session,
     pub builtin_args: BuiltinSystemPromptArgs,
     pub denwa_renji: Arc<tokio::sync::Mutex<DenwaRenji>>,
@@ -114,7 +115,7 @@ impl Runtime {
 
         Runtime {
             config,
-            llm,
+            llm: Arc::new(RwLock::new(llm)),
             session,
             builtin_args: BuiltinSystemPromptArgs {
                 KIMI_NOW: Local::now().to_rfc3339(),

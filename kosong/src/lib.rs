@@ -11,6 +11,8 @@ pub use generate::{GenerateResult, generate};
 
 use std::collections::HashMap;
 
+use std::time::Instant;
+
 use chat_provider::{ChatProvider, TokenUsage};
 use message::{Message, StreamedMessagePart, ToolCall};
 use tokio::sync::{mpsc, oneshot};
@@ -36,12 +38,27 @@ pub async fn step(
         let tool_result_tx = tool_result_tx.clone();
 
         let mut on_tool_call = move |tool_call: ToolCall| {
+            let t0 = Instant::now();
+            let name = tool_call.function.name.clone();
+            eprintln!(
+                "[timing] {} start: {:.6}",
+                name,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0)
+            );
             tool_calls_ref.push(tool_call.clone());
             let (result_tx, result_rx) = oneshot::channel();
             tool_results_ref.insert(tool_call.id.clone(), result_rx);
             let result = toolset.handle(tool_call.clone());
             match result {
                 ToolResultFuture::Immediate(res) => {
+                    eprintln!(
+                        "[timing] {} exec: {:.3}ms",
+                        name,
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
                     if let Some(tx) = tool_result_tx.as_ref() {
                         let _ = tx.send(res.clone());
                     }
@@ -58,6 +75,11 @@ pub async fn step(
                                 return_value: tool_runtime_error(&err.to_string()),
                             },
                         };
+                        eprintln!(
+                            "[timing] {} exec: {:.3}ms",
+                            name,
+                            t0.elapsed().as_secs_f64() * 1000.0
+                        );
                         if let Some(tx) = tool_result_tx {
                             let _ = tx.send(result.clone());
                         }

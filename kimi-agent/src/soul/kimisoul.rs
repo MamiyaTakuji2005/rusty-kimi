@@ -12,7 +12,8 @@ use kosong::chat_provider::{ChatProviderError, ChatProviderErrorKind};
 use kosong::message::{ContentPart, Message, Role, StreamedMessagePart, TextPart};
 use kosong::{StepResult, step as kosong_step};
 
-use crate::config::ModelCapability;
+use crate::config::{ModelCapability, save_config};
+use crate::llm::create_llm;
 use crate::skill::flow::{Flow, FlowEdge, FlowLabel, FlowNode, FlowNodeKind, parse_choice};
 use crate::skill::{Skill, SkillType, read_skill_text};
 use crate::soul::agent::{Agent, Runtime};
@@ -27,8 +28,8 @@ use crate::soul::{
 use crate::tools::utils::is_tool_rejected;
 use crate::utils::{SlashCommandInfo, parse_slash_command_call};
 use crate::wire::{
-    ApprovalRequest, ApprovalResponse, CompactionBegin, CompactionEnd, StatusUpdate, StepBegin,
-    StepInterrupted, TurnBegin, TurnEnd, UserInput, WireMessage,
+    ApprovalRequest, ApprovalResponse, CompactionBegin, CompactionEnd, StatusUpdate, SteerInput,
+    StepBegin, StepInterrupted, TurnBegin, TurnEnd, UserInput, WireMessage,
 };
 
 use kosong::tooling::Toolset;
@@ -65,6 +66,9 @@ pub struct KimiSoul {
     checkpoint_with_user_message: bool,
     slash_commands: Vec<SlashCommandInfo>,
     slash_handlers: HashMap<String, SlashHandler>,
+    cached_model_name: std::sync::Mutex<String>,
+    /// User inputs injected mid-turn via `steer`, consumed between steps.
+    steer_queue: std::sync::Mutex<std::collections::VecDeque<UserInput>>,
 }
 
 enum SlashHandler {
@@ -79,6 +83,24 @@ enum BuiltinSlash {
     Compact,
     Clear,
     Yolo,
+    Model,
+}
+
+fn parse_model_args(args: &str) -> (&str, bool) {
+    let mut thinking = true; // default on
+    let mut model_name = args;
+
+    if let Some(idx) = args.find(" --thinking") {
+        let rest = &args[idx..];
+        model_name = args[..idx].trim();
+        if rest.contains("off") || rest.contains("false") {
+            thinking = false;
+        } else if rest.contains("on") || rest.contains("true") {
+            thinking = true;
+        }
+    }
+
+    (model_name, thinking)
 }
 
 impl KimiSoul {
@@ -89,6 +111,16 @@ impl KimiSoul {
             .map(|guard| guard.tools().iter().any(|tool| tool.name == "SendDMail"))
             .unwrap_or(false);
 
+        let cached_model_name = std::sync::Mutex::new(
+            agent
+                .runtime
+                .llm
+                .try_read()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|llm| llm.model_name().to_string()))
+                .unwrap_or_default(),
+        );
+
         let mut soul = KimiSoul {
             runtime: agent.runtime.clone(),
             agent,
@@ -97,6 +129,8 @@ impl KimiSoul {
             checkpoint_with_user_message,
             slash_commands: Vec::new(),
             slash_handlers: HashMap::new(),
+            cached_model_name,
+            steer_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
         };
         soul.build_slash_commands();
         soul
@@ -112,6 +146,48 @@ impl KimiSoul {
 
     pub fn context(&self) -> &tokio::sync::Mutex<Context> {
         &self.context
+    }
+
+    /// Queue a user input for injection into the running turn (Wire `steer`).
+    /// Consumed between steps; emits a `SteerInput` event when applied.
+    pub fn steer(&self, user_input: UserInput) {
+        self.steer_queue
+            .lock()
+            .expect("steer_queue poisoned")
+            .push_back(user_input);
+    }
+
+    fn clear_pending_steers(&self) {
+        self.steer_queue
+            .lock()
+            .expect("steer_queue poisoned")
+            .clear();
+    }
+
+    /// Drain queued steers, append each to context as a user message, and emit a
+    /// `SteerInput` event. Returns true if any were injected.
+    async fn consume_pending_steers(&self) -> Result<bool, anyhow::Error> {
+        let pending: Vec<UserInput> = {
+            let mut queue = self.steer_queue.lock().expect("steer_queue poisoned");
+            queue.drain(..).collect()
+        };
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        for user_input in pending {
+            let user_message = match user_input.clone() {
+                UserInput::Text(text) => {
+                    Message::new(Role::User, vec![ContentPart::Text(TextPart::new(text))])
+                }
+                UserInput::Parts(parts) => Message::new(Role::User, parts),
+            };
+            {
+                let mut context = self.context.lock().await;
+                context.append_messages(user_message).await?;
+            }
+            wire_send(WireMessage::SteerInput(SteerInput { user_input }));
+        }
+        Ok(true)
     }
 
     fn build_slash_commands(&mut self) {
@@ -141,6 +217,12 @@ impl KimiSoul {
                 "yolo",
                 "Toggle YOLO mode (auto-approve all actions)",
                 BuiltinSlash::Yolo,
+                vec![],
+            ),
+            (
+                "model",
+                "Switch the LLM model (e.g. /model deepseek/deepseek-v4-pro --thinking on)",
+                BuiltinSlash::Model,
                 vec![],
             ),
         ];
@@ -234,6 +316,7 @@ impl KimiSoul {
                 BuiltinSlash::Compact => self.slash_compact().await,
                 BuiltinSlash::Clear => self.slash_clear().await,
                 BuiltinSlash::Yolo => self.slash_yolo().await,
+                BuiltinSlash::Model => self.slash_model(args).await,
             },
             Some(SlashHandler::Skill(skill)) => self.run_skill(skill, args).await,
             Some(SlashHandler::Flow(runner)) => runner.run(self, args).await,
@@ -302,18 +385,33 @@ impl KimiSoul {
     }
 
     fn send_status_update(&self) {
-        let context_usage = if let Some(llm) = &self.runtime.llm {
-            match self.context.try_lock() {
-                Ok(context) => context.token_count() as f64 / llm.max_context_size as f64,
-                Err(_) => 0.0,
-            }
-        } else {
-            0.0
-        };
+        let (context_usage, context_tokens, max_context_tokens) =
+            if let Ok(guard) = self.runtime.llm.try_read() {
+                if let Some(llm) = guard.as_ref() {
+                    match self.context.try_lock() {
+                        Ok(context) => {
+                            let n = context.token_count();
+                            (
+                                n as f64 / llm.max_context_size as f64,
+                                Some(n as i64),
+                                Some(llm.max_context_size),
+                            )
+                        }
+                        Err(_) => (0.0, None, None),
+                    }
+                } else {
+                    (0.0, None, None)
+                }
+            } else {
+                (0.0, None, None)
+            };
         let status = StatusUpdate {
             context_usage: Some(context_usage),
+            context_tokens,
+            max_context_tokens,
             token_usage: None,
             message_id: None,
+            model: Some(self.cached_model_name.lock().unwrap().clone()),
         };
         wire_send(WireMessage::StatusUpdate(status));
     }
@@ -330,6 +428,70 @@ impl KimiSoul {
                 "You only live once! All actions will be auto-approved.",
             ))));
         }
+        Ok(())
+    }
+
+    async fn slash_model(&self, args: &str) -> anyhow::Result<()> {
+        let args = args.trim();
+        if args.is_empty() {
+            wire_send(WireMessage::ContentPart(ContentPart::Text(TextPart::new(
+                format!(
+                    "Current model: {} (thinking: {})",
+                    self.runtime.config.default_model,
+                    if self.runtime.config.default_thinking {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+            ))));
+            self.send_status_update();
+            return Ok(());
+        }
+
+        let (model_name, thinking) = parse_model_args(args);
+
+        let model = self
+            .runtime
+            .config
+            .models
+            .get(model_name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown model \"{}\"", model_name))?;
+        let provider = self
+            .runtime
+            .config
+            .providers
+            .get(&model.provider)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Provider \"{}\" not found for model", model.provider)
+            })?;
+
+        let new_llm = create_llm(provider, model, Some(thinking), Some(&self.runtime.session.id))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create LLM: {}", e))?;
+
+        let new_llm = new_llm.map(Arc::new);
+        let display_name = new_llm
+            .as_ref()
+            .map(|llm| llm.model_name().to_string())
+            .unwrap_or_else(|| model_name.to_string());
+
+        *self.runtime.llm.write().await = new_llm;
+        *self.cached_model_name.lock().unwrap() = display_name.clone();
+        {
+            let mut config = self.runtime.config.clone();
+            config.default_model = model_name.to_string();
+            config.default_thinking = thinking;
+            save_config(&config, None).await?;
+        }
+        self.send_status_update();
+        wire_send(WireMessage::ContentPart(ContentPart::Text(TextPart::new(
+            format!(
+                "Switched to {} (thinking: {})",
+                display_name,
+                if thinking { "on" } else { "off" }
+            ),
+        ))));
         Ok(())
     }
 
@@ -357,7 +519,10 @@ impl KimiSoul {
     }
 
     async fn turn(&self, user_message: Message) -> Result<TurnOutcome, anyhow::Error> {
-        let llm = self.runtime.llm.as_ref().ok_or_else(|| LLMNotSet)?;
+        // Drop any steers left over from a previous turn.
+        self.clear_pending_steers();
+        let llm_guard = self.runtime.llm.read().await;
+        let llm = llm_guard.as_ref().ok_or_else(|| LLMNotSet)?;
         let missing = check_message(&user_message, &llm.capabilities);
         if !missing.is_empty() {
             return Err(anyhow::Error::new(LLMNotSupported::new(
@@ -397,7 +562,7 @@ impl KimiSoul {
             let approval_task = spawn_approval_task(Arc::clone(&self.runtime.approval));
 
             let step_result = async {
-                if let Some(llm) = &self.runtime.llm {
+                if let Some(llm) = self.runtime.llm.read().await.as_ref() {
                     let context = self.context.lock().await;
                     if context.token_count()
                         + self.runtime.config.loop_control.reserved_context_size
@@ -444,6 +609,11 @@ impl KimiSoul {
             }
 
             if let Some(outcome) = step_outcome {
+                // Step produced a stop reason — but if the user steered, inject
+                // it and force another step instead of ending the turn.
+                if self.consume_pending_steers().await? {
+                    continue;
+                }
                 let final_message = if outcome.stop_reason == "no_tool_calls" {
                     Some(outcome.assistant_message)
                 } else {
@@ -467,11 +637,15 @@ impl KimiSoul {
                     context.append_messages(back_to_future.messages).await?;
                 }
             }
+
+            // Inject any steers queued during this step before the next one.
+            self.consume_pending_steers().await?;
         }
     }
 
     async fn step(&self) -> Result<Option<StepOutcome>, anyhow::Error> {
-        let llm = self.runtime.llm.as_ref().ok_or_else(|| LLMNotSet)?;
+        let llm_guard = self.runtime.llm.read().await;
+        let llm = llm_guard.as_ref().ok_or_else(|| LLMNotSet)?;
 
         let mut attempts = 0usize;
         let (result, forward_task) = loop {
@@ -570,8 +744,11 @@ impl KimiSoul {
 
         let mut status = StatusUpdate {
             context_usage: None,
+            context_tokens: None,
+            max_context_tokens: None,
             token_usage: usage.clone(),
             message_id: result.id.clone(),
+            model: None,
         };
         if usage.is_some() {
             status.context_usage = Some(self.status().context_usage);
@@ -626,7 +803,8 @@ impl KimiSoul {
             result.tool_calls.len(),
             result.usage.is_some()
         );
-        let llm = self.runtime.llm.as_ref().ok_or_else(|| LLMNotSet)?;
+        let llm_guard = self.runtime.llm.read().await;
+        let llm = llm_guard.as_ref().ok_or_else(|| LLMNotSet)?;
         let tool_messages: Vec<Message> = tool_results.iter().map(tool_result_to_message).collect();
         for message in &tool_messages {
             let missing = check_message(message, &llm.capabilities);
@@ -660,7 +838,8 @@ impl KimiSoul {
         let mut attempts = 0usize;
         let compacted = loop {
             attempts += 1;
-            let llm = self.runtime.llm.as_ref().ok_or_else(|| LLMNotSet)?;
+            let llm_guard = self.runtime.llm.read().await;
+        let llm = llm_guard.as_ref().ok_or_else(|| LLMNotSet)?;
             let history = { self.context.lock().await.history().to_vec() };
             match self.compaction.compact(&history, llm).await {
                 Ok(compacted) => break compacted,
@@ -699,35 +878,47 @@ impl Soul for KimiSoul {
         &self.agent.name
     }
 
-    fn model_name(&self) -> &str {
-        self.runtime
-            .llm
-            .as_ref()
-            .map(|llm| llm.model_name())
-            .unwrap_or("")
+    fn model_name(&self) -> String {
+        self.cached_model_name.lock().unwrap().clone()
     }
 
     fn model_capabilities(&self) -> Option<&std::collections::HashSet<ModelCapability>> {
-        self.runtime.llm.as_ref().map(|llm| &llm.capabilities)
+        // Returns None when the LLM is locked (e.g. during model swap).
+        // The async code paths that actually validate messages use
+        // self.runtime.llm.read().await directly.
+        None
     }
 
     fn thinking(&self) -> Option<bool> {
         self.runtime
             .llm
-            .as_ref()
-            .and_then(|llm| llm.chat_provider.thinking_effort())
-            .map(|effort| effort != kosong::chat_provider::ThinkingEffort::Off)
+            .try_read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .and_then(|llm| llm.chat_provider.thinking_effort())
+                    .map(|effort| effort != kosong::chat_provider::ThinkingEffort::Off)
+            })
     }
 
     fn status(&self) -> StatusSnapshot {
-        let context_usage = if let Some(llm) = &self.runtime.llm {
-            match self.context.try_lock() {
-                Ok(context) => context.token_count() as f64 / llm.max_context_size as f64,
-                Err(_) => 0.0,
-            }
-        } else {
-            0.0
-        };
+        let context_usage = self
+            .runtime
+            .llm
+            .try_read()
+            .ok()
+            .and_then(|guard| {
+                guard.as_ref().map(|llm| {
+                    match self.context.try_lock() {
+                        Ok(context) => {
+                            context.token_count() as f64 / llm.max_context_size as f64
+                        }
+                        Err(_) => 0.0,
+                    }
+                })
+            })
+            .unwrap_or(0.0);
         StatusSnapshot {
             context_usage,
             yolo_enabled: self.runtime.approval.is_yolo(),

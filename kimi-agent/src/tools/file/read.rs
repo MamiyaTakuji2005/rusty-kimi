@@ -17,7 +17,7 @@ use super::{
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadParams {
     #[schemars(
-        description = "The path to the file to read. Absolute paths are required when reading files outside the working directory."
+        description = "The path to the file to read. Absolute paths only required when working outside the workdir."
     )]
     pub path: String,
     #[serde(default = "default_line_offset")]

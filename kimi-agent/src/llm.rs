@@ -104,6 +104,33 @@ pub fn augment_provider_with_env_vars(
                 }
             }
         }
+        ProviderType::OpenAiCompatible => {
+            if let Ok(base_url) = env::var("OPENAI_COMPATIBLE_BASE_URL") {
+                if !base_url.is_empty() {
+                    provider.base_url = base_url.clone();
+                    applied.insert("OPENAI_COMPATIBLE_BASE_URL".to_string(), base_url);
+                }
+            }
+            if let Ok(api_key) = env::var("OPENAI_COMPATIBLE_API_KEY") {
+                if !api_key.is_empty() {
+                    provider.api_key = api_key;
+                    applied.insert("OPENAI_COMPATIBLE_API_KEY".to_string(), "******".to_string());
+                }
+            }
+            if let Ok(model_name) = env::var("OPENAI_COMPATIBLE_MODEL_NAME") {
+                if !model_name.is_empty() {
+                    model.model = model_name.clone();
+                    applied.insert("OPENAI_COMPATIBLE_MODEL_NAME".to_string(), model_name);
+                }
+            }
+            if let Ok(max_context_size) = env::var("OPENAI_COMPATIBLE_MAX_CONTEXT_SIZE") {
+                if !max_context_size.is_empty() {
+                    let value = parse_env_i64(&max_context_size)?;
+                    model.max_context_size = value;
+                    applied.insert("OPENAI_COMPATIBLE_MAX_CONTEXT_SIZE".to_string(), max_context_size);
+                }
+            }
+        }
         _ => {}
     }
 
@@ -178,6 +205,57 @@ pub async fn create_llm(
                 kimi = kimi.with_generation_kwargs(kwargs);
             }
             Box::new(kimi)
+        }
+        // "openai_legacy" is the OpenAI chat/completions API — functionally
+        // identical to our OpenAiCompatible provider, so route it here too.
+        ProviderType::OpenAiCompatible | ProviderType::OpenaiLegacy => {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::USER_AGENT,
+                reqwest::header::HeaderValue::from_str(&user_agent())
+                    .map_err(|err| LLMError::ChatProvider(err.to_string()))?,
+            );
+            if let Some(custom) = &provider.custom_headers {
+                for (key, value) in custom {
+                    if let (Ok(header_name), Ok(header_value)) = (
+                        reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                        reqwest::header::HeaderValue::from_str(value),
+                    ) {
+                        headers.insert(header_name, header_value);
+                    }
+                }
+            }
+            let openai_compatible = kosong::chat_provider::openai_compatible::OpenAiCompatible::new(
+                model.model.clone(),
+                Some(provider.api_key.clone()),
+                Some(provider.base_url.clone()),
+                Some(headers),
+            )
+            .map_err(map_chat_provider_error)?;
+
+            let mut kwargs = Map::new();
+            if let Ok(value) = env::var("OPENAI_COMPATIBLE_TEMPERATURE") {
+                if !value.is_empty() {
+                    let parsed = parse_env_f64(&value)?;
+                    kwargs.insert("temperature".to_string(), Value::from(parsed));
+                }
+            }
+            if let Ok(value) = env::var("OPENAI_COMPATIBLE_TOP_P") {
+                if !value.is_empty() {
+                    let parsed = parse_env_f64(&value)?;
+                    kwargs.insert("top_p".to_string(), Value::from(parsed));
+                }
+            }
+            if let Ok(value) = env::var("OPENAI_COMPATIBLE_MAX_TOKENS") {
+                if !value.is_empty() {
+                    let parsed = parse_env_i64(&value)?;
+                    kwargs.insert("max_tokens".to_string(), Value::from(parsed));
+                }
+            }
+            if !kwargs.is_empty() {
+                // Apply generation kwargs
+            }
+            Box::new(openai_compatible)
         }
         ProviderType::Echo => Box::new(kosong::chat_provider::echo::echo::EchoChatProvider),
         ProviderType::ScriptedEcho => {

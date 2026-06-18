@@ -169,6 +169,8 @@ impl WireServer {
                 "initialize" => self.handle_initialize(msg).await,
                 "prompt" => self.handle_prompt(msg).await,
                 "cancel" => self.handle_cancel(msg).await,
+                "replay" => self.handle_replay(msg).await,
+                "steer" => self.handle_steer(msg).await,
                 _ => {
                     if let Some(id) = msg.id.clone() {
                         self.send_error(
@@ -250,7 +252,11 @@ impl WireServer {
 
         let mut result = json!({
             "protocol_version": WIRE_PROTOCOL_VERSION,
-            "server": {"name": NAME, "version": VERSION},
+            "server": {
+                "name": NAME,
+                "version": VERSION,
+                "model": self.soul.model_name(),
+            },
             "slash_commands": slash_commands,
         });
         if !accepted.is_empty() || !rejected.is_empty() {
@@ -419,6 +425,143 @@ impl WireServer {
                 }
             }
         });
+    }
+
+    async fn handle_replay(&mut self, msg: JsonRpcMessage) {
+        use futures::StreamExt;
+
+        let Some(id) = msg.id.clone() else {
+            return;
+        };
+        if self.cancel_token.lock().await.is_some() {
+            self.send_error(
+                id,
+                error_codes::INVALID_STATE,
+                "An agent turn is already in progress",
+            )
+            .await;
+            return;
+        }
+
+        // Mark busy and allow a concurrent `cancel` to stop the replay.
+        let cancel_token = CancellationToken::new();
+        *self.cancel_token.lock().await = Some(cancel_token.clone());
+
+        let wire_file = self.soul.runtime().session.wire_file();
+        let mut events: u64 = 0;
+        let mut requests: u64 = 0;
+
+        // iter_records() no-ops if the file is missing, so no existence check needed.
+        let mut records = wire_file.iter_records();
+        while let Some(record) = records.next().await {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+            let wire_msg = match record.to_wire_message() {
+                Ok(wire_msg) => wire_msg,
+                Err(err) => {
+                    error!(
+                        error = ?err,
+                        "Failed to deserialize wire record for replay: {}",
+                        wire_file.path().display()
+                    );
+                    continue;
+                }
+            };
+            // Replayed requests are read-only: re-emit for display, but do NOT
+            // register them as pending (they were already answered in the past).
+            let out = match wire_msg {
+                WireMessage::ApprovalRequest(req) => {
+                    requests += 1;
+                    build_request_message(req.id.clone(), WireMessage::ApprovalRequest(req))
+                }
+                WireMessage::ToolCallRequest(req) => {
+                    requests += 1;
+                    build_request_message(req.id.clone(), WireMessage::ToolCallRequest(req))
+                }
+                other => {
+                    events += 1;
+                    let event = build_event_message(other);
+                    if self
+                        .write_queue
+                        .put_nowait(serde_json::to_value(&event).unwrap_or(Value::Null))
+                        .is_err()
+                    {
+                        error!("Send queue shut down; dropping replay event");
+                    }
+                    continue;
+                }
+            };
+            if self
+                .write_queue
+                .put_nowait(serde_json::to_value(&out).unwrap_or(Value::Null))
+                .is_err()
+            {
+                error!("Send queue shut down; dropping replay request");
+            }
+        }
+
+        let cancelled = cancel_token.is_cancelled();
+        *self.cancel_token.lock().await = None;
+
+        let status = if cancelled {
+            statuses::CANCELLED
+        } else {
+            statuses::FINISHED
+        };
+        let response = JsonRpcSuccessResponse {
+            jsonrpc: "2.0",
+            id,
+            result: json!({
+                "status": status,
+                "events": events,
+                "requests": requests,
+            }),
+        };
+        let _ = self
+            .write_queue
+            .put_nowait(serde_json::to_value(response).unwrap_or(Value::Null));
+    }
+
+    async fn handle_steer(&mut self, msg: JsonRpcMessage) {
+        let Some(id) = msg.id.clone() else {
+            return;
+        };
+        // Steering only makes sense during an in-progress turn.
+        if self.cancel_token.lock().await.is_none() {
+            self.send_error(
+                id,
+                error_codes::INVALID_STATE,
+                "No agent turn is in progress",
+            )
+            .await;
+            return;
+        }
+        let params: PromptParams = match msg
+            .params
+            .clone()
+            .and_then(|params| serde_json::from_value(params).ok())
+        {
+            Some(params) => params,
+            None => {
+                self.send_error(
+                    id,
+                    error_codes::INVALID_PARAMS,
+                    "Invalid parameters for method `steer`",
+                )
+                .await;
+                return;
+            }
+        };
+        self.soul.steer(params.user_input);
+        let response = JsonRpcSuccessResponse {
+            jsonrpc: "2.0",
+            id,
+            result: json!({"status": statuses::STEERED}),
+        };
+        let _ = self
+            .write_queue
+            .put_nowait(serde_json::to_value(response).unwrap_or(Value::Null));
     }
 
     async fn handle_cancel(&mut self, msg: JsonRpcMessage) {

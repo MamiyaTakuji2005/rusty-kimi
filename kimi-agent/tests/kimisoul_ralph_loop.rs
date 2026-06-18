@@ -159,7 +159,7 @@ fn make_llm(
 }
 
 fn runtime_with_llm(mut runtime: Runtime, llm: LLM) -> Runtime {
-    runtime.llm = Some(Arc::new(llm));
+    *runtime.llm.try_write().expect("llm lock uncontended") = Some(Arc::new(llm));
     runtime
 }
 

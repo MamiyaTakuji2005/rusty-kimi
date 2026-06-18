@@ -130,4 +130,5 @@ pub mod statuses {
     pub const FINISHED: &str = "finished";
     pub const CANCELLED: &str = "cancelled";
     pub const MAX_STEPS_REACHED: &str = "max_steps_reached";
+    pub const STEERED: &str = "steered";
 }

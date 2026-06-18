@@ -63,9 +63,15 @@ pub struct StatusUpdate {
     #[serde(default)]
     pub context_usage: Option<f64>,
     #[serde(default)]
+    pub context_tokens: Option<i64>,
+    #[serde(default)]
+    pub max_context_tokens: Option<i64>,
+    #[serde(default)]
     pub token_usage: Option<TokenUsage>,
     #[serde(default)]
     pub message_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,10 +309,16 @@ impl<'de> Deserialize<'de> for SubagentEvent {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SteerInput {
+    pub user_input: UserInput,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum WireMessage {
     TurnBegin(TurnBegin),
     TurnEnd(TurnEnd),
+    SteerInput(SteerInput),
     StepBegin(StepBegin),
     StepInterrupted(StepInterrupted),
     CompactionBegin(CompactionBegin),
@@ -327,6 +339,7 @@ impl WireMessage {
         match self {
             WireMessage::TurnBegin(_) => "TurnBegin",
             WireMessage::TurnEnd(_) => "TurnEnd",
+            WireMessage::SteerInput(_) => "SteerInput",
             WireMessage::StepBegin(_) => "StepBegin",
             WireMessage::StepInterrupted(_) => "StepInterrupted",
             WireMessage::CompactionBegin(_) => "CompactionBegin",
@@ -472,6 +485,7 @@ impl WireMessageEnvelope {
         let payload = match msg {
             WireMessage::TurnBegin(value) => payload_from(value)?,
             WireMessage::TurnEnd(value) => payload_from(value)?,
+            WireMessage::SteerInput(value) => payload_from(value)?,
             WireMessage::StepBegin(value) => payload_from(value)?,
             WireMessage::StepInterrupted(value) => payload_from(value)?,
             WireMessage::CompactionBegin(value) => payload_from(value)?,
@@ -497,6 +511,7 @@ impl WireMessageEnvelope {
         match self.type_name.as_str() {
             "TurnBegin" => Ok(WireMessage::TurnBegin(parse_payload(payload_value)?)),
             "TurnEnd" => Ok(WireMessage::TurnEnd(parse_payload(payload_value)?)),
+            "SteerInput" => Ok(WireMessage::SteerInput(parse_payload(payload_value)?)),
             "StepBegin" => Ok(WireMessage::StepBegin(parse_payload(payload_value)?)),
             "StepInterrupted" => Ok(WireMessage::StepInterrupted(parse_payload(payload_value)?)),
             "CompactionBegin" => Ok(WireMessage::CompactionBegin(parse_payload(payload_value)?)),

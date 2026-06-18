@@ -11,6 +11,10 @@ use crate::share::{ensure_share_dir, get_share_dir};
 #[serde(rename_all = "snake_case")]
 pub enum ProviderType {
     Kimi,
+    // snake_case renders this as "open_ai_compatible"; accept the natural
+    // "openai_compatible" spelling too.
+    #[serde(alias = "openai_compatible")]
+    OpenAiCompatible,
     OpenaiLegacy,
     OpenaiResponses,
     Anthropic,

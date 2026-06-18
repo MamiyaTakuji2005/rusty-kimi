@@ -101,7 +101,7 @@ impl RuntimeFixture {
 
         let runtime = Runtime {
             config,
-            llm: Some(Arc::new(llm)),
+            llm: Arc::new(tokio::sync::RwLock::new(Some(Arc::new(llm)))),
             session: session.clone(),
             builtin_args: BuiltinSystemPromptArgs {
                 KIMI_NOW: "1970-01-01T00:00:00+00:00".to_string(),
