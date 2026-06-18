@@ -416,6 +416,97 @@ async fn test_replace_mixed_multiple_edits() {
 }
 
 #[tokio::test]
+async fn test_fuzzy_preserves_crlf_and_trailing_newline() {
+    let fixture = RuntimeFixture::new();
+    let tool = StrReplaceFile::new(&fixture.runtime);
+    let file_path = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone() / "test.txt";
+    // CRLF file with a trailing newline. `old` is multi-line, LF, and lacks the
+    // file's indentation, so the exact substring match misses and the fuzzy
+    // (trim-per-line) path is taken.
+    let original = "fn a() {\r\n    keep();\r\n    target();\r\n}\r\n";
+    file_path.write_text(original).await.expect("write file");
+
+    let result = call_with_tool_call(
+        "StrReplaceFile",
+        tool.call_typed(StrReplaceParams {
+            path: file_path.to_string_lossy(),
+            edit: vec![EditParams {
+                regex: false,
+                old: "keep();\ntarget();".to_string(),
+                new: "keep();\nchanged();".to_string(),
+                replace_all: false,
+            }],
+        }),
+    )
+    .await;
+
+    assert!(!result.is_error, "msg: {}", result.message);
+    // CRLF around the block and the trailing newline survive; only the matched
+    // span is rewritten (with the verbatim `new`).
+    assert_eq!(
+        file_path.read_text().await.expect("read file"),
+        "fn a() {\r\nkeep();\nchanged();\r\n}\r\n"
+    );
+}
+
+#[tokio::test]
+async fn test_fuzzy_lf_keeps_unmatched_lines_and_trailing_newline() {
+    let fixture = RuntimeFixture::new();
+    let tool = StrReplaceFile::new(&fixture.runtime);
+    let file_path = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone() / "test.txt";
+    let original = "fn main() {\n    a();\n    b();\n}\n";
+    file_path.write_text(original).await.expect("write file");
+
+    let result = call_with_tool_call(
+        "StrReplaceFile",
+        tool.call_typed(StrReplaceParams {
+            path: file_path.to_string_lossy(),
+            edit: vec![EditParams {
+                regex: false,
+                old: "a();\nb();".to_string(), // unindented -> exact miss -> fuzzy
+                new: "a();\nc();".to_string(),
+                replace_all: false,
+            }],
+        }),
+    )
+    .await;
+
+    assert!(!result.is_error, "msg: {}", result.message);
+    assert_eq!(
+        file_path.read_text().await.expect("read file"),
+        "fn main() {\na();\nc();\n}\n"
+    );
+}
+
+#[tokio::test]
+async fn test_regex_capture_expansion() {
+    let fixture = RuntimeFixture::new();
+    let tool = StrReplaceFile::new(&fixture.runtime);
+    let file_path = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone() / "test.txt";
+    file_path.write_text("user@example").await.expect("write file");
+
+    let result = call_with_tool_call(
+        "StrReplaceFile",
+        tool.call_typed(StrReplaceParams {
+            path: file_path.to_string_lossy(),
+            edit: vec![EditParams {
+                regex: true,
+                old: r"(\w+)@(\w+)".to_string(),
+                new: "$2.$1".to_string(),
+                replace_all: false,
+            }],
+        }),
+    )
+    .await;
+
+    assert!(!result.is_error, "msg: {}", result.message);
+    assert_eq!(
+        file_path.read_text().await.expect("read file"),
+        "example.user"
+    );
+}
+
+#[tokio::test]
 async fn test_replace_empty_strings() {
     let fixture = RuntimeFixture::new();
     let tool = StrReplaceFile::new(&fixture.runtime);

@@ -225,23 +225,55 @@ fn replace_all_exact(text: &str, old: &str, new: &str) -> Option<String> {
     if r == text { None } else { Some(r) }
 }
 
+/// Whitespace-tolerant fallback: match `old` against `text` line-by-line
+/// comparing trimmed lines, then splice `new` back in using the original byte
+/// ranges. Everything outside the matched block — including the file's line
+/// endings (CRLF), its trailing newline, and unmatched lines — is preserved
+/// verbatim, so a single fuzzy edit never rewrites the whole file.
 fn fuzzy_replace(text: &str, old: &str, new: &str) -> Option<String> {
     let pattern_lines: Vec<&str> = old.lines().collect();
-    let content_lines: Vec<&str> = text.lines().collect();
-    if pattern_lines.is_empty() || pattern_lines.len() > content_lines.len() {
+    if pattern_lines.is_empty() {
         return None;
     }
-    for start in 0..=content_lines.len() - pattern_lines.len() {
-        if pattern_lines
-            .iter()
-            .zip(&content_lines[start..start + pattern_lines.len()])
-            .all(|(p, c)| p.trim() == c.trim())
-        {
-            let mut combined: Vec<&str> = Vec::new();
-            combined.extend_from_slice(&content_lines[..start]);
-            combined.extend(new.lines());
-            combined.extend_from_slice(&content_lines[start + pattern_lines.len()..]);
-            return Some(combined.join("\n"));
+
+    // Byte spans of each line in `text` (content only, excluding the line
+    // terminator), matching `str::lines()` segmentation so a trailing newline
+    // does not produce a phantom empty final line.
+    let bytes = text.as_bytes();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut line_start = 0;
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\n' {
+            let mut end = i;
+            if end > line_start && bytes[end - 1] == b'\r' {
+                end -= 1;
+            }
+            spans.push((line_start, end));
+            line_start = i + 1;
+        }
+    }
+    if line_start < bytes.len() {
+        spans.push((line_start, bytes.len()));
+    }
+
+    let plen = pattern_lines.len();
+    if plen > spans.len() {
+        return None;
+    }
+    for start in 0..=spans.len() - plen {
+        let matched = pattern_lines.iter().enumerate().all(|(k, p)| {
+            let (s, e) = spans[start + k];
+            p.trim() == text[s..e].trim()
+        });
+        if matched {
+            let replace_start = spans[start].0;
+            let replace_end = spans[start + plen - 1].1;
+            let mut result =
+                String::with_capacity(text.len() - (replace_end - replace_start) + new.len());
+            result.push_str(&text[..replace_start]);
+            result.push_str(new);
+            result.push_str(&text[replace_end..]);
+            return Some(result);
         }
     }
     None
