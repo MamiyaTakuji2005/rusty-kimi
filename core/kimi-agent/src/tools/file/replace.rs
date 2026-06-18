@@ -329,6 +329,19 @@ fn ref_exists(name: &str, group_count: usize, names: &[Option<&str>]) -> bool {
     }
 }
 
+/// Build the error for an undefined capture reference. `group_count` includes
+/// the implicit whole-match group 0, so user-defined groups = `group_count - 1`.
+/// Naming the real group count makes the common "I forgot to escape `[]`, so my
+/// `(...)` became a character class with no group" mistake self-diagnosable.
+fn undefined_ref_error(reference: &str, group_count: usize) -> String {
+    let n = group_count - 1;
+    format!(
+        "regex replacement references undefined capture group `{reference}`; \
+         the pattern defines {n} capture group(s). Escape brackets (`\\[`, `\\]`) \
+         if you meant a literal match, or write `$$` for a literal '$'."
+    )
+}
+
 /// Validate that every capture reference in a regex replacement template
 /// (`$N`, `${name}`) refers to a group that exists in `re`.
 ///
@@ -361,10 +374,7 @@ fn validate_capture_refs(re: &Regex, new: &str) -> Result<(), String> {
             };
             let name = &new[i + 2..close];
             if !ref_exists(name, group_count, &names) {
-                return Err(format!(
-                    "regex replacement references undefined capture group `${{{name}}}`; \
-                     write `$$` for a literal '$'"
-                ));
+                return Err(undefined_ref_error(&format!("${{{name}}}"), group_count));
             }
             i = close + 1;
             continue;
@@ -382,10 +392,7 @@ fn validate_capture_refs(re: &Regex, new: &str) -> Result<(), String> {
         }
         let name = &new[start..end];
         if !ref_exists(name, group_count, &names) {
-            return Err(format!(
-                "regex replacement references undefined capture group `${name}`; \
-                 write `$$` for a literal '$'"
-            ));
+            return Err(undefined_ref_error(&format!("${name}"), group_count));
         }
         i = end;
     }
