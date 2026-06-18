@@ -1,0 +1,21 @@
+# Rust build artifacts
+/core/target/
+target/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Editor / env
+.vscode/
+.idea/
+.env
+.env.local
+
+# Scratch / local test artifacts
+*.log

@@ -1,0 +1,33 @@
+rusty-kimi
+Copyright 2026 the rusty-kimi authors
+
+This product is a derivative work that combines and modifies two projects
+originally developed at Moonshot AI, both licensed under the Apache License,
+Version 2.0:
+
+  - Kimi Code CLI (formerly Kimi CLI)
+    https://github.com/MoonshotAI/kimi-cli
+    Copyright 2025 Moonshot AI
+    -> vendored and modified under cli/
+
+  - Kimi Agent (Rust), a Rust rewrite of Kimi Code CLI
+    https://github.com/MoonshotAI/kimi-agent-rs
+    Copyright 2025 Moonshot AI
+    -> vendored and modified under core/
+
+The files under cli/ and core/ have been modified from their originals.
+See the project git history for the specific changes.
+
+Both upstream projects contain or reuse code licensed under the Apache 2.0
+license from:
+
+  - OpenAI Codex (https://github.com/openai/codex)
+    Copyright 2025 OpenAI
+
+This product includes software developed at Moonshot AI
+(https://www.moonshot.ai/).
+
+NOTE ON TRADEMARKS: This is an independent fork and is not affiliated with,
+sponsored by, or endorsed by Moonshot AI. "Kimi" and "Moonshot" are
+trademarks of their respective owners; this project's use of the upstream
+code under Apache-2.0 does not grant any rights to those marks.
