@@ -263,6 +263,8 @@ impl CallableTool2 for AgentTool {
         let task_id_clone = task_id.clone();
 
         tokio::spawn(async move {
+            // Keep stderr_reader alive until child exits so the child's stderr pipe stays open.
+            let _stderr = stderr_reader;
             let mut line = String::new();
             loop {
                 line.clear();

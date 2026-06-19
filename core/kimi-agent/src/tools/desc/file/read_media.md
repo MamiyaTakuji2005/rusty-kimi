@@ -1,7 +1,6 @@
 Read Image or video content from a file.
 - A `<system>` tag will be given before the read file content.
 - The maximum size that can be read is ${MAX_MEDIA_MEGABYTES}MB. An error will be returned if the file is larger than this limit.
-- The media content will be returned in a form that you can directly view and understand.
 **Capabilities**
 {% if "image_in" in capabilities and "video_in" in capabilities %}
 - This tool supports image and video files for the current model.
