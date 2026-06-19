@@ -6,7 +6,7 @@ use futures::StreamExt;
 
 use kaos::KaosPath;
 use kosong::message::{Message, Role};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::metadata::{WorkDirMeta, load_metadata, save_metadata};
 use crate::wire::{TurnBegin, UserInput, WireFile, WireMessage};
@@ -90,32 +90,21 @@ impl Session {
             .unwrap_or_else(|| metadata.new_work_dir_meta(&work_dir));
 
         let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let sessions_dir = work_dir_meta.ensure_sessions_dir().await;
-        let session_dir = sessions_dir.join(&session_id);
-        tokio::fs::create_dir_all(&session_dir)
-            .await
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Failed to create session dir {}: {err}",
-                    session_dir.display()
-                )
-            });
 
-        let context_file = if let Some(context_file) = context_file {
-            warn!("Using provided context file: {}", context_file.display());
-            let parent = context_file
+        // When a context_file is explicitly provided (subagent spawn), use its parent
+        // as the session directory so wire.jsonl, tasks/, state.json land alongside it.
+        // Otherwise use the standard sessions directory layout.
+        let (session_dir, context_file) = if let Some(context_file) = context_file {
+            let session_dir = context_file
                 .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            tokio::fs::create_dir_all(parent)
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf();
+            tokio::fs::create_dir_all(&session_dir)
                 .await
                 .unwrap_or_else(|err| {
-                    panic!("Failed to create context dir {}: {err}", parent.display())
+                    panic!("Failed to create session dir {}: {err}", session_dir.display())
                 });
             if tokio::fs::metadata(&context_file).await.is_ok() {
-                warn!(
-                    "Context file already exists, truncating: {}",
-                    context_file.display()
-                );
                 tokio::fs::remove_file(&context_file)
                     .await
                     .unwrap_or_else(|err| {
@@ -125,10 +114,19 @@ impl Session {
                         )
                     });
             }
-            context_file
+            (session_dir, context_file)
         } else {
-            session_dir.join("context.jsonl")
+            let sessions_dir = work_dir_meta.ensure_sessions_dir().await;
+            let session_dir = sessions_dir.join(&session_id);
+            tokio::fs::create_dir_all(&session_dir)
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("Failed to create session dir {}: {err}", session_dir.display())
+                });
+            let context_file = session_dir.join("context.jsonl");
+            (session_dir, context_file)
         };
+
         tokio::fs::File::create(&context_file)
             .await
             .unwrap_or_else(|err| {

@@ -167,6 +167,7 @@ pub fn load_agent<'a>(
     agent_file: &'a Path,
     runtime: Runtime,
     mcp_configs: &'a [serde_json::Value],
+    extra_args: &'a HashMap<String, String>,
 ) -> futures::future::BoxFuture<'a, Result<Agent, anyhow::Error>> {
     Box::pin(async move {
         info!("Loading agent: {}", agent_file.display());
@@ -175,6 +176,7 @@ pub fn load_agent<'a>(
             &agent_spec.system_prompt_path,
             &agent_spec.system_prompt_args,
             &runtime.builtin_args,
+            extra_args,
         )
         .await?;
 
@@ -210,6 +212,7 @@ async fn load_system_prompt(
     path: &Path,
     args: &HashMap<String, String>,
     builtin_args: &BuiltinSystemPromptArgs,
+    extra_args: &HashMap<String, String>,
 ) -> Result<String, anyhow::Error> {
     info!("Loading system prompt: {}", path.display());
     let system_prompt = tokio::fs::read_to_string(path).await.map_err(|err| {
@@ -219,14 +222,19 @@ async fn load_system_prompt(
         ))
     })?;
 
+    // Merge order: builtins → spec args → extra args (extra wins).
     let mut values = builtin_args.as_map();
     for (key, value) in args {
         values.insert(key.clone(), value.clone());
     }
+    for (key, value) in extra_args {
+        values.insert(key.clone(), value.clone());
+    }
     debug!(
-        "Substituting system prompt with builtin args: {:?}, spec args: {:?}",
+        "Substituting system prompt with builtin args: {:?}, spec args: {:?}, extra args: {:?}",
         builtin_args.as_map(),
-        args
+        args,
+        extra_args
     );
 
     let rendered = substitute_template(system_prompt.trim(), &values).map_err(|missing| {

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use kaos::KaosPath;
@@ -133,6 +135,22 @@ pub struct Cli {
     mcp_config: Vec<String>,
 
     #[arg(
+        long = "context-file",
+        value_name = "PATH",
+        help = "Explicit path for the session context.jsonl. Used by subagent spawning to place session files in a specific directory.",
+        hide = true,
+    )]
+    context_file: Option<PathBuf>,
+
+    #[arg(
+        long = "system-prompt-arg",
+        value_name = "KEY=VALUE",
+        help = "Extra system prompt template argument. Repeatable. Overrides args from the agent spec.",
+        hide = true,
+    )]
+    system_prompt_arg: Vec<String>,
+
+    #[arg(
         long = "skills-dir",
         value_name = "PATH",
         help = "Path to the skills directory. Overrides discovery."
@@ -219,10 +237,17 @@ pub async fn run() -> Result<()> {
         None => KaosPath::cwd(),
     };
 
-    let session = resolve_session(&work_dir, cli.session_id.as_ref(), cli.continue_session).await?;
+    let session = resolve_session(
+        &work_dir,
+        cli.session_id.as_ref(),
+        cli.continue_session,
+        cli.context_file.clone(),
+    )
+    .await?;
 
     let agent_file = resolve_agent_file(cli.agent, cli.agent_file.as_ref())?;
     let thinking = resolve_thinking(cli.thinking, cli.no_thinking)?;
+    let extra_system_prompt_args = parse_system_prompt_args(&cli.system_prompt_arg)?;
 
     let instance = KimiCLI::create(
         session,
@@ -236,6 +261,7 @@ pub async fn run() -> Result<()> {
         cli.max_steps_per_turn,
         cli.max_retries_per_step,
         cli.max_ralph_iterations,
+        extra_system_prompt_args,
     )
     .await?;
 
@@ -375,11 +401,30 @@ fn resolve_thinking(thinking: bool, no_thinking: bool) -> Result<Option<bool>> {
     }
 }
 
+fn parse_system_prompt_args(raw: &[String]) -> Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for entry in raw {
+        let (key, value) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("--system-prompt-arg must be KEY=VALUE, got: {entry}")
+        })?;
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
 async fn resolve_session(
     work_dir: &KaosPath,
     session_id: Option<&String>,
     continue_session: bool,
+    context_file: Option<PathBuf>,
 ) -> Result<Session> {
+    // --context-file bypasses all session-resume logic: the caller owns the path.
+    if let Some(context_file) = context_file {
+        let session = Session::create(work_dir.clone(), session_id.map(|s| s.trim().to_string()), Some(context_file)).await;
+        info!("Created subagent session: {}", session.id);
+        return Ok(session);
+    }
+
     if let Some(session_id) = session_id {
         let trimmed = session_id.trim();
         let found = Session::find(work_dir.clone(), trimmed).await;

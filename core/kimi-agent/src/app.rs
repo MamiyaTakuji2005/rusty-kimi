@@ -54,6 +54,7 @@ impl KimiCLI {
         max_steps_per_turn: Option<i64>,
         max_retries_per_step: Option<i64>,
         max_ralph_iterations: Option<i64>,
+        extra_system_prompt_args: HashMap<String, String>,
     ) -> anyhow::Result<KimiCLI> {
         let mut config = match config {
             Some(config) => config.load().await?,
@@ -136,7 +137,7 @@ impl KimiCLI {
         let agent_file = agent_file
             .map(|p| p.to_path_buf())
             .unwrap_or_else(default_agent_file);
-        let agent = load_agent(&agent_file, runtime.clone(), &mcp_configs).await?;
+        let agent = load_agent(&agent_file, runtime.clone(), &mcp_configs, &extra_system_prompt_args).await?;
 
         let mut context = Context::new(runtime.session.context_file.clone());
         let _ = context.restore().await;

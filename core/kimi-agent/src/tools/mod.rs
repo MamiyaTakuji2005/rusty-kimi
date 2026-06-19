@@ -12,6 +12,7 @@ use kosong::tooling::CallableTool;
 
 pub mod utils;
 
+pub mod agent;
 pub mod dmail;
 pub mod file;
 pub mod shell;
@@ -74,8 +75,10 @@ pub fn load_tool(
         "kimi_cli.tools.test:Plus" => Ok(Some(Arc::new(test::Plus))),
         "kimi_cli.tools.test:Compare" => Ok(Some(Arc::new(test::Compare))),
         "kimi_cli.tools.test:Panic" => Ok(Some(Arc::new(test::Panic))),
+        "kimi_cli.tools.agent:Agent" => {
+            Ok(Some(Arc::new(agent::AgentTool::new(deps.runtime))))
+        }
         "kimi_cli.tools.multiagent:Task"
-        | "kimi_cli.tools.agent:Agent"
         | "kimi_cli.tools.multiagent:CreateSubagent" => {
             Err(InvalidToolError::new(format!("Tool removed: {tool_path}")))
         }
@@ -86,7 +89,8 @@ pub fn load_tool(
 pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<String> {
     let is_known = matches!(
         tool_name,
-        "SendDMail"
+        "Agent"
+            | "SendDMail"
             | "Think"
             | "SetTodoList"
             | "Shell"
@@ -112,6 +116,7 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
         return None;
     }
     let key_argument = match tool_name {
+        "Agent" => value.get("agent_file")?.as_str()?.to_string(),
         "SendDMail" => return None,
         "Think" => value.get("thought")?.as_str()?.to_string(),
         "SetTodoList" => return None,
