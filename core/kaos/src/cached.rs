@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use tokio::sync::RwLock;
 
 use crate::local::{ALWAYS_PRUNE_DIRS, LocalKaos};
-use crate::snapshot::{KaosSnapshot, RestoreReport};
+use crate::snapshot::{KaosSnapshot, RestoreReport, UndoReport, WriteEntry};
 use crate::{Kaos, KaosPath, KaosProcess, LineStream, StatResult, StrOrKaosPath};
 
 /// Files larger than this are excluded from snapshots.
@@ -30,6 +30,9 @@ pub struct CachedKaos {
     inner: Arc<dyn Kaos>,
     work_dir: PathBuf,
     index: Arc<RwLock<IndexState>>,
+    /// Sequential log of pre-write content for every write_bytes/write_text call.
+    /// Supports undo in reverse order.
+    write_history: Arc<tokio::sync::Mutex<Vec<WriteEntry>>>,
 }
 
 fn scan_workdir(root: &Path) -> Result<Vec<PathBuf>> {
@@ -84,6 +87,7 @@ impl CachedKaos {
             inner: Arc::new(LocalKaos::new()),
             work_dir,
             index: Arc::new(RwLock::new(IndexState::Ready(Arc::new(initial)))),
+            write_history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -114,6 +118,49 @@ impl CachedKaos {
     async fn mark_dirty(&self) {
         let mut guard = self.index.write().await;
         *guard = IndexState::Dirty;
+    }
+
+    /// Undo the last `steps` writes made through this `CachedKaos` instance.
+    ///
+    /// Each `write_bytes`/`write_text` call pushed the pre-write content to the
+    /// history.  This method pops up to `steps` entries (or all available) and
+    /// restores them in reverse order.  Shell-written files are NOT tracked.
+    pub async fn undo(&self, steps: usize) -> Result<UndoReport> {
+        let mut history = self.write_history.lock().await;
+        let steps_available = history.len();
+        let steps_to_apply = steps.min(steps_available);
+        let mut report = UndoReport {
+            steps_available,
+            steps_applied: steps_to_apply,
+            ..Default::default()
+        };
+
+        for _ in 0..steps_to_apply {
+            let entry = history.pop().unwrap();
+            match entry.original {
+                Some(bytes) => {
+                    if let Some(parent) = entry.path.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    match tokio::fs::write(&entry.path, bytes.as_ref()).await {
+                        Ok(_) => report.restored += 1,
+                        Err(e) => report.errors.push(format!("{}: {e}", entry.path.display())),
+                    }
+                }
+                None => {
+                    // File was created by the write — delete it on undo.
+                    match tokio::fs::remove_file(&entry.path).await {
+                        Ok(_) => report.deleted += 1,
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+
+        if steps_to_apply > 0 {
+            self.mark_dirty().await;
+        }
+        Ok(report)
     }
 
     /// Capture a point-in-time snapshot of all non-ignored files in `work_dir`.
@@ -296,11 +343,17 @@ impl Kaos for CachedKaos {
     }
 
     async fn write_bytes(&self, path: &KaosPath, data: &[u8]) -> Result<usize> {
+        let abs = path.as_path().to_path_buf();
+        let original = tokio::fs::read(&abs).await.ok().map(|b| Arc::from(b.as_slice()));
+        self.write_history.lock().await.push(WriteEntry { path: abs, original });
         self.mark_dirty().await;
         self.inner.write_bytes(path, data).await
     }
 
     async fn write_text(&self, path: &KaosPath, data: &str, append: bool) -> Result<usize> {
+        let abs = path.as_path().to_path_buf();
+        let original = tokio::fs::read(&abs).await.ok().map(|b| Arc::from(b.as_slice()));
+        self.write_history.lock().await.push(WriteEntry { path: abs, original });
         self.mark_dirty().await;
         self.inner.write_text(path, data, append).await
     }

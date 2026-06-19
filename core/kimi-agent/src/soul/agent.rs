@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Local;
-use kaos::{CachedKaos, KaosPath, KaosSnapshot, set_current_kaos};
+use kaos::{CachedKaos, KaosPath, set_current_kaos};
 use regex::Regex;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -80,7 +80,6 @@ pub struct Runtime {
     pub background_tasks: BackgroundTaskManager,
     pub todos: Arc<std::sync::Mutex<Vec<TodoItem>>>,
     pub cached_kaos: Arc<CachedKaos>,
-    pub snapshots: Arc<tokio::sync::Mutex<HashMap<String, KaosSnapshot>>>,
 }
 
 impl Runtime {
@@ -154,7 +153,6 @@ impl Runtime {
             background_tasks: BackgroundTaskManager::new(tasks_dir, session_id),
             todos: Arc::new(std::sync::Mutex::new(Vec::new())),
             cached_kaos,
-            snapshots: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
