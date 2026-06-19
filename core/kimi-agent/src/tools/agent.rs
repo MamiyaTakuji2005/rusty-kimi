@@ -54,6 +54,21 @@ impl AgentTool {
     }
 }
 
+/// Format a subagent wire event for inclusion in the TaskOutput buffer.
+/// Returns None for events that should not appear in output (think blocks,
+/// structural events, tool results, etc.).
+fn format_event_for_output(event: &WireMessage) -> Option<Vec<u8>> {
+    match event {
+        WireMessage::ContentPart(ContentPart::Text(part)) => {
+            Some(part.text.as_bytes().to_vec())
+        }
+        WireMessage::ToolCall(call) => {
+            Some(format!("\n• {}\n", call.function.name).into_bytes())
+        }
+        _ => None,
+    }
+}
+
 fn send_notification(
     bt: &BackgroundTaskManager,
     id: &str,
@@ -287,10 +302,9 @@ impl CallableTool2 for AgentTool {
                             if let Some(params_val) = msg_json.get("params") {
                                 match deserialize_wire_message(params_val.clone()) {
                                     Ok(event) => {
-                                        // Collect text output into the task buffer.
-                                        if let WireMessage::ContentPart(ContentPart::Text(ref part)) = event {
+                                        if let Some(bytes) = format_event_for_output(&event) {
                                             if let Ok(mut buf) = stdout_buf.lock() {
-                                                buf.extend_from_slice(part.text.as_bytes());
+                                                buf.extend_from_slice(&bytes);
                                             }
                                         }
                                     }
