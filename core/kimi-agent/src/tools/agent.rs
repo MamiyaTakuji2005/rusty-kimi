@@ -12,11 +12,10 @@ use kosong::tooling::{CallableTool2, ToolReturnValue};
 use crate::soul::agent::Runtime;
 use crate::soul::approval::Approval;
 use crate::soul::get_current_wire_or_none;
-use crate::soul::toolset::get_current_tool_call_or_none;
 use crate::tasks::{BackgroundTaskManager, TaskSpec, TaskStatus};
 use crate::tools::utils::{ToolResultBuilder, tool_rejected_error};
 use crate::wire::{
-    ContentPart, SubagentEvent, WIRE_PROTOCOL_VERSION, Wire, WireMessage,
+    ContentPart, WIRE_PROTOCOL_VERSION, Wire, WireMessage,
     deserialize_wire_message,
 };
 
@@ -253,11 +252,7 @@ impl CallableTool2 for AgentTool {
         let bt = self.background_tasks.clone();
         let (stdout_buf, _stderr_buf) = bt.register(spec, kill_tx);
 
-        // Grab parent wire and tool call ID while task-locals are still live.
         let parent_wire = get_current_wire_or_none();
-        let tool_call_id = get_current_tool_call_or_none()
-            .map(|tc| tc.id)
-            .unwrap_or_default();
 
         let bt_clone = self.background_tasks.clone();
         let task_id_clone = task_id.clone();
@@ -296,12 +291,6 @@ impl CallableTool2 for AgentTool {
                                         if let WireMessage::ContentPart(ContentPart::Text(ref part)) = event {
                                             if let Ok(mut buf) = stdout_buf.lock() {
                                                 buf.extend_from_slice(part.text.as_bytes());
-                                            }
-                                        }
-                                        // Forward to parent wire for the progress card.
-                                        if let Some(ref wire) = parent_wire {
-                                            if let Ok(ev) = SubagentEvent::new(&tool_call_id, event) {
-                                                wire.soul_side().send(WireMessage::SubagentEvent(ev));
                                             }
                                         }
                                     }
