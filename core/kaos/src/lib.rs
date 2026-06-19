@@ -3,6 +3,7 @@
 pub mod cached;
 pub mod local;
 pub mod path;
+pub mod snapshot;
 
 mod current;
 
@@ -13,6 +14,7 @@ pub use current::{
 };
 pub use local::LocalKaos;
 pub use path::KaosPath;
+pub use snapshot::{KaosSnapshot, RestoreReport};
 
 use std::path::PathBuf;
 use std::pin::Pin;

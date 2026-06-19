@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Local;
-use kaos::{CachedKaos, KaosPath, set_current_kaos};
+use kaos::{CachedKaos, KaosPath, KaosSnapshot, set_current_kaos};
 use regex::Regex;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -79,6 +79,8 @@ pub struct Runtime {
     pub skills: HashMap<String, Skill>,
     pub background_tasks: BackgroundTaskManager,
     pub todos: Arc<std::sync::Mutex<Vec<TodoItem>>>,
+    pub cached_kaos: Arc<CachedKaos>,
+    pub snapshots: Arc<tokio::sync::Mutex<HashMap<String, KaosSnapshot>>>,
 }
 
 impl Runtime {
@@ -94,16 +96,17 @@ impl Runtime {
         // Build the cached kaos index in parallel with the other startup I/O.
         // CachedKaos::new does a blocking ignore-aware full scan of work_dir so
         // the first Glob tool call hits memory instead of walking the disk.
-        let (cached_kaos, ls_output, agents_md, environment) = tokio::join!(
+        let (cached_kaos_built, ls_output, agents_md, environment) = tokio::join!(
             CachedKaos::new(work_dir.as_path().to_path_buf()),
             list_directory(&work_dir),
             load_agents_md(&work_dir),
             Environment::detect()
         );
+        let cached_kaos = Arc::new(cached_kaos_built);
         // Install as global kaos. Runtime::create runs once at startup outside
         // any task-local scope, so this sets the process-wide backend.
         // CurrentKaosToken has no Drop impl — dropping it does not reset the global.
-        let _ = set_current_kaos(Arc::new(cached_kaos));
+        let _ = set_current_kaos(Arc::clone(&cached_kaos) as Arc<dyn kaos::Kaos>);
 
         let skills_roots = resolve_skills_roots(&work_dir, skills_dir).await;
         let skills = discover_skills_from_roots(&skills_roots).await;
@@ -150,6 +153,8 @@ impl Runtime {
             skills: skills_by_name,
             background_tasks: BackgroundTaskManager::new(tasks_dir, session_id),
             todos: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cached_kaos,
+            snapshots: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 

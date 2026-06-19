@@ -16,6 +16,7 @@ pub mod agent;
 pub mod dmail;
 pub mod file;
 pub mod shell;
+pub mod snapshot;
 pub mod task;
 pub mod test;
 pub mod think;
@@ -78,6 +79,18 @@ pub fn load_tool(
         "kimi_cli.tools.agent:Agent" => {
             Ok(Some(Arc::new(agent::AgentTool::new(deps.runtime))))
         }
+        "kimi_cli.tools.snapshot:SnapshotCreate" => {
+            Ok(Some(Arc::new(snapshot::SnapshotCreate::new(deps.runtime))))
+        }
+        "kimi_cli.tools.snapshot:SnapshotList" => {
+            Ok(Some(Arc::new(snapshot::SnapshotList::new(deps.runtime))))
+        }
+        "kimi_cli.tools.snapshot:SnapshotRestore" => {
+            Ok(Some(Arc::new(snapshot::SnapshotRestore::new(deps.runtime))))
+        }
+        "kimi_cli.tools.snapshot:SnapshotDrop" => {
+            Ok(Some(Arc::new(snapshot::SnapshotDrop::new(deps.runtime))))
+        }
         "kimi_cli.tools.multiagent:Task"
         | "kimi_cli.tools.multiagent:CreateSubagent" => {
             Err(InvalidToolError::new(format!("Tool removed: {tool_path}")))
@@ -105,6 +118,10 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
             | "TaskList"
             | "TaskOutput"
             | "TaskStop"
+            | "SnapshotCreate"
+            | "SnapshotList"
+            | "SnapshotRestore"
+            | "SnapshotDrop"
     );
 
     if !is_known {
@@ -138,6 +155,11 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
         ),
         "TaskOutput" => value.get("task_id")?.as_str()?.to_string(),
         "TaskStop" => value.get("task_id")?.as_str()?.to_string(),
+        "SnapshotCreate" => {
+            value.get("label").and_then(|v| v.as_str()).unwrap_or("(none)").to_string()
+        }
+        "SnapshotList" => return None,
+        "SnapshotRestore" | "SnapshotDrop" => value.get("id")?.as_str()?.to_string(),
         _ => json_content.to_string(),
     };
 

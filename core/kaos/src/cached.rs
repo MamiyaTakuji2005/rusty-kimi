@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -5,7 +6,11 @@ use anyhow::{Result, anyhow};
 use tokio::sync::RwLock;
 
 use crate::local::{ALWAYS_PRUNE_DIRS, LocalKaos};
+use crate::snapshot::{KaosSnapshot, RestoreReport};
 use crate::{Kaos, KaosPath, KaosProcess, LineStream, StatResult, StrOrKaosPath};
+
+/// Files larger than this are excluded from snapshots.
+const MAX_SNAPSHOT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 enum IndexState {
     /// Full sorted list of paths relative to `work_dir`.
@@ -109,6 +114,91 @@ impl CachedKaos {
     async fn mark_dirty(&self) {
         let mut guard = self.index.write().await;
         *guard = IndexState::Dirty;
+    }
+
+    /// Capture a point-in-time snapshot of all non-ignored files in `work_dir`.
+    ///
+    /// Reads every eligible file from disk, so the snapshot is accurate
+    /// regardless of Shell commands or subagent writes that the cache never saw.
+    pub async fn take_snapshot(
+        &self,
+        id: String,
+        label: Option<String>,
+    ) -> Result<KaosSnapshot> {
+        let root = self.work_dir.clone();
+        let rel_paths =
+            tokio::task::spawn_blocking(move || scan_workdir(&root)).await.map_err(|e| anyhow!(e))??;
+
+        let mut files = HashMap::new();
+
+        for rel in &rel_paths {
+            let abs = self.work_dir.join(rel);
+            let meta = match tokio::fs::metadata(&abs).await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !meta.is_file() || meta.len() > MAX_SNAPSHOT_FILE_BYTES {
+                continue;
+            }
+            match tokio::fs::read(&abs).await {
+                Ok(bytes) => {
+                    files.insert(abs, Arc::from(bytes.as_slice()));
+                }
+                Err(_) => {}
+            }
+        }
+
+        Ok(KaosSnapshot {
+            id,
+            created_at: chrono::Local::now().to_rfc3339(),
+            label,
+            files,
+        })
+    }
+
+    /// Restore `work_dir` to the state captured in `snapshot`.
+    ///
+    /// Files in the snapshot are written back to disk.  Files that exist now
+    /// but were not in the snapshot are deleted.  The path index is marked
+    /// dirty so the next `glob()` call rescans.
+    pub async fn restore_snapshot(&self, snapshot: &KaosSnapshot) -> Result<RestoreReport> {
+        let mut report = RestoreReport::default();
+
+        // Write back snapshot files.
+        for (abs_path, bytes) in &snapshot.files {
+            if let Some(parent) = abs_path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            match tokio::fs::write(abs_path, bytes.as_ref()).await {
+                Ok(_) => report.restored += 1,
+                Err(e) => report.errors.push(format!("{}: {e}", abs_path.display())),
+            }
+        }
+
+        // Delete files that exist now but were absent from the snapshot.
+        let root = self.work_dir.clone();
+        let current_rels =
+            tokio::task::spawn_blocking(move || scan_workdir(&root)).await.map_err(|e| anyhow!(e))??;
+
+        for rel in current_rels {
+            let abs = self.work_dir.join(&rel);
+            match tokio::fs::metadata(&abs).await {
+                Ok(m) if m.is_file() => {
+                    if !snapshot.files.contains_key(&abs) {
+                        match tokio::fs::remove_file(&abs).await {
+                            Ok(_) => report.deleted += 1,
+                            Err(e) => {
+                                report.errors.push(format!("delete {}: {e}", abs.display()))
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.mark_dirty().await;
+        Ok(report)
     }
 }
 
