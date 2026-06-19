@@ -11,8 +11,13 @@ use kosong::tooling::{CallableTool2, ToolReturnValue};
 
 use crate::soul::agent::Runtime;
 use crate::soul::approval::Approval;
+use crate::soul::get_current_wire_or_none;
+use crate::soul::toolset::get_current_tool_call_or_none;
 use crate::tools::utils::{ToolResultBuilder, tool_rejected_error};
-use crate::wire::{ContentPart, WIRE_PROTOCOL_VERSION, WireMessage, deserialize_wire_message};
+use crate::wire::{
+    ContentPart, SubagentEvent, WIRE_PROTOCOL_VERSION, Wire, WireMessage,
+    deserialize_wire_message,
+};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AgentParams {
@@ -54,6 +59,8 @@ async fn run_subagent(
     system_prompt_args: Vec<String>,
     prompt: String,
     work_dir: String,
+    parent_wire: Option<Arc<Wire>>,
+    tool_call_id: String,
 ) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new(&binary);
     cmd.arg("--yolo")
@@ -108,9 +115,7 @@ async fn run_subagent(
             continue;
         }
         let msg: Value = serde_json::from_str(trimmed)?;
-        if msg.get("id").and_then(|v| v.as_str()) == Some("1")
-            && msg.get("method").is_none()
-        {
+        if msg.get("id").and_then(|v| v.as_str()) == Some("1") && msg.get("method").is_none() {
             if msg.get("error").is_some() {
                 let err_msg = msg["error"]["message"]
                     .as_str()
@@ -133,7 +138,7 @@ async fn run_subagent(
     stdin.write_all(b"\n").await?;
     stdin.flush().await?;
 
-    // Read events until prompt response (id="2")
+    // Read events until prompt response (id="2"), forwarding each to the parent wire.
     let mut output_parts: Vec<String> = Vec::new();
     loop {
         line.clear();
@@ -159,17 +164,22 @@ async fn run_subagent(
             break;
         }
         // Event notification: method="event"
-        if msg_json
-            .get("method")
-            .and_then(|v| v.as_str())
-            == Some("event")
-        {
+        if msg_json.get("method").and_then(|v| v.as_str()) == Some("event") {
             if let Some(params_val) = msg_json.get("params") {
                 match deserialize_wire_message(params_val.clone()) {
-                    Ok(WireMessage::ContentPart(ContentPart::Text(part))) => {
-                        output_parts.push(part.text);
+                    Ok(event) => {
+                        if let WireMessage::ContentPart(ContentPart::Text(ref part)) = event {
+                            output_parts.push(part.text.clone());
+                        }
+                        if let Some(ref wire) = parent_wire {
+                            if let Ok(subagent_event) =
+                                SubagentEvent::new(&tool_call_id, event)
+                            {
+                                wire.soul_side()
+                                    .send(WireMessage::SubagentEvent(subagent_event));
+                            }
+                        }
                     }
-                    Ok(_) => {}
                     Err(e) => {
                         debug!("Failed to deserialize subagent event: {e}");
                     }
@@ -235,6 +245,12 @@ impl CallableTool2 for AgentTool {
             return tool_rejected_error();
         }
 
+        // Capture parent wire and tool call ID now, while task-locals are still in scope.
+        let parent_wire = get_current_wire_or_none();
+        let tool_call_id = get_current_tool_call_or_none()
+            .map(|tc| tc.id)
+            .unwrap_or_default();
+
         let subagent_id = uuid::Uuid::new_v4().to_string();
         let subagent_dir = self.session_dir.join("subagents").join(&subagent_id);
         if let Err(err) = tokio::fs::create_dir_all(&subagent_dir).await {
@@ -267,21 +283,17 @@ impl CallableTool2 for AgentTool {
             params.system_prompt_args,
             params.prompt,
             self.work_dir.clone(),
+            parent_wire,
+            tool_call_id,
         )
         .await
         {
             Ok(output) => {
                 if output.is_empty() {
-                    return builder.error(
-                        "Subagent produced no text output",
-                        "Empty response",
-                    );
+                    return builder.error("Subagent produced no text output", "Empty response");
                 }
                 builder.write(&output);
-                builder.ok(
-                    "Subagent completed",
-                    &format!("subagent={subagent_id}"),
-                )
+                builder.ok("Subagent completed", &format!("subagent={subagent_id}"))
             }
             Err(err) => builder.error(&err.to_string(), "Subagent error"),
         }
