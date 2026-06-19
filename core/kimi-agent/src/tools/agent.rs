@@ -13,6 +13,7 @@ use crate::soul::agent::Runtime;
 use crate::soul::approval::Approval;
 use crate::soul::get_current_wire_or_none;
 use crate::soul::toolset::get_current_tool_call_or_none;
+use crate::tasks::{BackgroundTaskManager, TaskSpec, TaskStatus};
 use crate::tools::utils::{ToolResultBuilder, tool_rejected_error};
 use crate::wire::{
     ContentPart, SubagentEvent, WIRE_PROTOCOL_VERSION, Wire, WireMessage,
@@ -34,6 +35,7 @@ pub struct AgentTool {
     session_dir: PathBuf,
     approval: Arc<Approval>,
     work_dir: String,
+    background_tasks: BackgroundTaskManager,
 }
 
 impl AgentTool {
@@ -48,151 +50,21 @@ impl AgentTool {
             session_dir,
             approval: runtime.approval.clone(),
             work_dir: runtime.builtin_args.KIMI_WORK_DIR.to_string_lossy(),
+            background_tasks: runtime.background_tasks.clone(),
         }
     }
 }
 
-async fn run_subagent(
-    binary: PathBuf,
-    agent_file: PathBuf,
-    context_file: PathBuf,
-    system_prompt_args: Vec<String>,
-    prompt: String,
-    work_dir: String,
-    parent_wire: Option<Arc<Wire>>,
-    tool_call_id: String,
-) -> anyhow::Result<String> {
-    let mut cmd = tokio::process::Command::new(&binary);
-    cmd.arg("--yolo")
-        .arg("--agent-file")
-        .arg(&agent_file)
-        .arg("--context-file")
-        .arg(&context_file)
-        .arg("--work-dir")
-        .arg(&work_dir);
-    for arg in &system_prompt_args {
-        cmd.arg("--system-prompt-arg").arg(arg);
-    }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-    let mut stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
-    let mut reader = BufReader::new(stdout);
-    let mut stderr_reader = BufReader::new(stderr);
-
-    // Send initialize
-    let init = serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": "1",
-        "method": "initialize",
-        "params": { "protocol_version": WIRE_PROTOCOL_VERSION }
-    }))?;
-    stdin.write_all(init.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-
-    // Wait for initialize response (id="1")
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            let mut err_output = String::new();
-            let _ = stderr_reader.read_to_string(&mut err_output).await;
-            let err_output = err_output.trim().to_string();
-            if err_output.is_empty() {
-                anyhow::bail!("Subagent closed stdout before initialize response (no stderr)");
-            } else {
-                anyhow::bail!("Subagent died before initialize response:\n{err_output}");
-            }
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let msg: Value = serde_json::from_str(trimmed)?;
-        if msg.get("id").and_then(|v| v.as_str()) == Some("1") && msg.get("method").is_none() {
-            if msg.get("error").is_some() {
-                let err_msg = msg["error"]["message"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
-                anyhow::bail!("Subagent initialize failed: {err_msg}");
-            }
-            break;
+fn send_notification(
+    bt: &BackgroundTaskManager,
+    id: &str,
+    wire: &Option<Arc<Wire>>,
+) {
+    if let Some(notification) = bt.build_notification(id) {
+        if let Some(w) = wire {
+            w.soul_side().send(WireMessage::Notification(notification));
         }
     }
-
-    // Send prompt
-    let prompt_msg = serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": "2",
-        "method": "prompt",
-        "params": { "user_input": prompt }
-    }))?;
-    stdin.write_all(prompt_msg.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-
-    // Read events until prompt response (id="2"), forwarding each to the parent wire.
-    let mut output_parts: Vec<String> = Vec::new();
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await.unwrap_or(0);
-        if n == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let msg_json: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("Subagent invalid JSON: {e}");
-                continue;
-            }
-        };
-        // Prompt response: has id="2" and no method field
-        if msg_json.get("id").and_then(|v| v.as_str()) == Some("2")
-            && msg_json.get("method").is_none()
-        {
-            break;
-        }
-        // Event notification: method="event"
-        if msg_json.get("method").and_then(|v| v.as_str()) == Some("event") {
-            if let Some(params_val) = msg_json.get("params") {
-                match deserialize_wire_message(params_val.clone()) {
-                    Ok(event) => {
-                        if let WireMessage::ContentPart(ContentPart::Text(ref part)) = event {
-                            output_parts.push(part.text.clone());
-                        }
-                        if let Some(ref wire) = parent_wire {
-                            if let Ok(subagent_event) =
-                                SubagentEvent::new(&tool_call_id, event)
-                            {
-                                wire.soul_side()
-                                    .send(WireMessage::SubagentEvent(subagent_event));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Failed to deserialize subagent event: {e}");
-                    }
-                }
-            }
-        }
-    }
-
-    drop(stdin);
-    drop(stderr_reader);
-    let _ = child.wait().await;
-
-    Ok(output_parts.join(""))
 }
 
 #[async_trait::async_trait]
@@ -245,12 +117,6 @@ impl CallableTool2 for AgentTool {
             return tool_rejected_error();
         }
 
-        // Capture parent wire and tool call ID now, while task-locals are still in scope.
-        let parent_wire = get_current_wire_or_none();
-        let tool_call_id = get_current_tool_call_or_none()
-            .map(|tc| tc.id)
-            .unwrap_or_default();
-
         let subagent_id = uuid::Uuid::new_v4().to_string();
         let subagent_dir = self.session_dir.join("subagents").join(&subagent_id);
         if let Err(err) = tokio::fs::create_dir_all(&subagent_dir).await {
@@ -271,31 +137,211 @@ impl CallableTool2 for AgentTool {
             }
         };
 
-        info!(
-            "Spawning subagent {} agent_file={}",
-            subagent_id, params.agent_file
-        );
-
-        match run_subagent(
-            binary,
-            agent_file_path,
-            context_file,
-            params.system_prompt_args,
-            params.prompt,
-            self.work_dir.clone(),
-            parent_wire,
-            tool_call_id,
-        )
-        .await
-        {
-            Ok(output) => {
-                if output.is_empty() {
-                    return builder.error("Subagent produced no text output", "Empty response");
-                }
-                builder.write(&output);
-                builder.ok("Subagent completed", &format!("subagent={subagent_id}"))
-            }
-            Err(err) => builder.error(&err.to_string(), "Subagent error"),
+        // Spawn child process.
+        let mut cmd = tokio::process::Command::new(&binary);
+        cmd.arg("--yolo")
+            .arg("--agent-file")
+            .arg(&agent_file_path)
+            .arg("--context-file")
+            .arg(&context_file)
+            .arg("--work-dir")
+            .arg(&self.work_dir);
+        for arg in &params.system_prompt_args {
+            cmd.arg("--system-prompt-arg").arg(arg);
         }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return builder.error(&format!("Failed to spawn subagent: {e}"), "Spawn failed"),
+        };
+
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr_handle = child.stderr.take().expect("stderr piped");
+        let mut reader = BufReader::new(stdout);
+        let mut stderr_reader = BufReader::new(stderr_handle);
+
+        // Do the initialize handshake synchronously so startup failures surface immediately.
+        let init = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "initialize",
+            "params": { "protocol_version": WIRE_PROTOCOL_VERSION }
+        }))
+        .unwrap();
+        if let Err(e) = stdin.write_all(init.as_bytes()).await {
+            return builder.error(&format!("Failed to write initialize: {e}"), "Write error");
+        }
+        let _ = stdin.write_all(b"\n").await;
+        let _ = stdin.flush().await;
+
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).await.unwrap_or(0);
+            if n == 0 {
+                let mut err_output = String::new();
+                let _ = stderr_reader.read_to_string(&mut err_output).await;
+                let err_output = err_output.trim().to_string();
+                let detail = if err_output.is_empty() {
+                    "(no stderr)".to_string()
+                } else {
+                    format!("\n{err_output}")
+                };
+                return builder.error(
+                    &format!("Subagent died before initialize response{detail}"),
+                    "Startup failed",
+                );
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let msg: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if msg.get("id").and_then(|v| v.as_str()) == Some("1")
+                && msg.get("method").is_none()
+            {
+                if msg.get("error").is_some() {
+                    let err_msg = msg["error"]["message"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    return builder.error(
+                        &format!("Subagent initialize failed: {err_msg}"),
+                        "Initialize error",
+                    );
+                }
+                break;
+            }
+        }
+
+        // Send prompt.
+        let prompt_msg = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": "2",
+            "method": "prompt",
+            "params": { "user_input": params.prompt }
+        }))
+        .unwrap();
+        if let Err(e) = stdin.write_all(prompt_msg.as_bytes()).await {
+            return builder.error(&format!("Failed to send prompt: {e}"), "Write error");
+        }
+        let _ = stdin.write_all(b"\n").await;
+        let _ = stdin.flush().await;
+
+        // Register as a background task so TaskOutput / TaskStop work.
+        let task_id = self.background_tasks.generate_id();
+        info!("Spawning subagent {} task={}", subagent_id, task_id);
+
+        let spec = TaskSpec {
+            id: task_id.clone(),
+            description: format!("Subagent: {}", params.agent_file),
+            command: agent_file_path.to_string_lossy().to_string(),
+            shell_path: binary.to_string_lossy().to_string(),
+            cwd: self.work_dir.clone(),
+            timeout_s: 3600,
+            child_pid: child.id(),
+        };
+
+        let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
+        let bt = self.background_tasks.clone();
+        let (stdout_buf, _stderr_buf) = bt.register(spec, kill_tx);
+
+        // Grab parent wire and tool call ID while task-locals are still live.
+        let parent_wire = get_current_wire_or_none();
+        let tool_call_id = get_current_tool_call_or_none()
+            .map(|tc| tc.id)
+            .unwrap_or_default();
+
+        let bt_clone = self.background_tasks.clone();
+        let task_id_clone = task_id.clone();
+
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                tokio::select! {
+                    result = reader.read_line(&mut line) => {
+                        let n = result.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let msg_json: Value = match serde_json::from_str(trimmed) {
+                            Ok(v) => v,
+                            Err(e) => { warn!("Subagent invalid JSON: {e}"); continue; }
+                        };
+                        // Prompt response signals end of turn.
+                        if msg_json.get("id").and_then(|v| v.as_str()) == Some("2")
+                            && msg_json.get("method").is_none()
+                        {
+                            break;
+                        }
+                        if msg_json.get("method").and_then(|v| v.as_str()) == Some("event") {
+                            if let Some(params_val) = msg_json.get("params") {
+                                match deserialize_wire_message(params_val.clone()) {
+                                    Ok(event) => {
+                                        // Collect text output into the task buffer.
+                                        if let WireMessage::ContentPart(ContentPart::Text(ref part)) = event {
+                                            if let Ok(mut buf) = stdout_buf.lock() {
+                                                buf.extend_from_slice(part.text.as_bytes());
+                                            }
+                                        }
+                                        // Forward to parent wire for the progress card.
+                                        if let Some(ref wire) = parent_wire {
+                                            if let Ok(ev) = SubagentEvent::new(&tool_call_id, event) {
+                                                wire.soul_side().send(WireMessage::SubagentEvent(ev));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => { debug!("Failed to deserialize subagent event: {e}"); }
+                                }
+                            }
+                        }
+                    }
+                    _ = &mut kill_rx => {
+                        let _ = child.kill().await;
+                        bt_clone.complete(&task_id_clone, TaskStatus::Killed, None);
+                        send_notification(&bt_clone, &task_id_clone, &parent_wire);
+                        return;
+                    }
+                }
+            }
+
+            drop(stdin);
+            let exit_status = child.wait().await;
+            let (status, code) = match exit_status {
+                Ok(s) => {
+                    let code = s.code();
+                    if code == Some(0) { (TaskStatus::Completed, code) }
+                    else { (TaskStatus::Failed, code) }
+                }
+                Err(_) => (TaskStatus::Failed, None),
+            };
+            bt_clone.complete(&task_id_clone, status, code);
+            send_notification(&bt_clone, &task_id_clone, &parent_wire);
+        });
+
+        builder.write(&format!(
+            "\
+Task ID: {task_id}
+Description: Subagent: {agent_file}
+automatic_notification: true
+next_step: You will be automatically notified when it completes.
+next_step: Call TaskOutput with task_id={task_id} and block=true to wait for the result.
+next_step: Use TaskStop only if the task must be cancelled.
+",
+            agent_file = params.agent_file,
+        ));
+        builder.ok("Subagent started", &format!("task={task_id}"))
     }
 }
