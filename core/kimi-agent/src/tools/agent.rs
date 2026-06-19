@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 use kosong::tooling::{CallableTool2, ToolReturnValue};
 
+use crate::agentspec::get_agents_dir;
 use crate::soul::agent::Runtime;
 use crate::soul::approval::Approval;
 use crate::soul::get_current_wire_or_none;
@@ -31,6 +32,7 @@ pub struct AgentParams {
 }
 
 pub struct AgentTool {
+    description: String,
     session_dir: PathBuf,
     approval: Arc<Approval>,
     work_dir: String,
@@ -46,12 +48,69 @@ impl AgentTool {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         Self {
+            description: build_agent_description(),
             session_dir,
             approval: runtime.approval.clone(),
             work_dir: runtime.builtin_args.KIMI_WORK_DIR.to_string_lossy(),
             background_tasks: runtime.background_tasks.clone(),
         }
     }
+}
+
+/// Build the Agent tool description, injecting the list of available built-in
+/// agents from the agents/default/agent.yaml subagents map.
+fn build_agent_description() -> String {
+    let agents_dir = get_agents_dir().join("default");
+    let base_yaml = agents_dir.join("agent.yaml");
+
+    let mut desc = "Run a separate agent process to handle a task and return its text output. \
+         The child agent gets its own session and tool access. \
+         Prefer this only when the task genuinely benefits from isolation; \
+         for most things, just do it directly."
+        .to_string();
+
+    if let Some(agents) = read_subagents_from_yaml(&base_yaml, &agents_dir) {
+        if !agents.is_empty() {
+            desc.push_str("\n\nAvailable agents (pass the path as agent_file):");
+            for (name, path, description) in agents {
+                desc.push_str(&format!("\n- {name} ({path}): {description}"));
+            }
+        }
+    }
+
+    desc
+}
+
+/// Synchronously read the subagents map from a base agent YAML and return
+/// (name, resolved_path, description) tuples.
+fn read_subagents_from_yaml(
+    base_yaml: &std::path::Path,
+    agents_dir: &std::path::Path,
+) -> Option<Vec<(String, String, String)>> {
+    let content = std::fs::read_to_string(base_yaml).ok()?;
+    let data: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let mapping = data.get("agent")?.get("subagents")?.as_mapping()?;
+
+    let mut result = Vec::new();
+    for (key, value) in mapping {
+        let name = key.as_str().unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let rel_path = value.get("path").and_then(|p| p.as_str()).unwrap_or("");
+        let description = value
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        let resolved = if std::path::Path::new(rel_path).is_absolute() {
+            rel_path.to_string()
+        } else {
+            agents_dir.join(rel_path).to_string_lossy().into_owned()
+        };
+        result.push((name, resolved, description));
+    }
+    Some(result)
 }
 
 /// Format a subagent wire event for inclusion in the TaskOutput buffer.
@@ -90,10 +149,7 @@ impl CallableTool2 for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Run a separate agent process to handle a task and return its text output. \
-         The child agent gets its own session and tool access. \
-         Prefer this only when the task genuinely benefits from isolation; \
-         for most things, just do it directly."
+        &self.description
     }
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
