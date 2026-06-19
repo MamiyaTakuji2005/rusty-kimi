@@ -273,7 +273,7 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
         match cfg.output_mode.as_str() {
             "files_with_matches" => {
                 if re.is_match(&text) {
-                    out.push(path.to_string_lossy().to_string());
+                    out.push(relative_path(path, &cfg.root));
                     if out.len() >= limit {
                         truncated = true;
                         break 'walk;
@@ -283,7 +283,7 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
             "count_matches" => {
                 let count = re.find_iter(&text).count();
                 if count > 0 {
-                    out.push(format!("{}:{count}", path.display()));
+                    out.push(format!("{}:{count}", relative_path(path, &cfg.root)));
                     if out.len() >= limit {
                         truncated = true;
                         break 'walk;
@@ -296,7 +296,7 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
                     // Multiline: match across lines, output each matched span.
                     for m in re.find_iter(&text) {
                         let snippet = m.as_str().replace('\n', "↵");
-                        out.push(format!("{}:{snippet}", path.display()));
+                        out.push(format!("{}:{snippet}", relative_path(path, &cfg.root)));
                         if out.len() >= limit {
                             truncated = true;
                             break 'walk;
@@ -317,7 +317,7 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
                                 let formatted = if cfg.line_number {
                                     format!("{}-{pre}", display_path(path, &cfg.root, n))
                                 } else {
-                                    format!("{}-{pre}", path.display())
+                                    format!("{}-{pre}", relative_path(path, &cfg.root))
                                 };
                                 out.push(formatted);
                                 if out.len() >= limit {
@@ -329,7 +329,7 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
                             let formatted = if cfg.line_number {
                                 format!("{}:{line}", display_path(path, &cfg.root, line_no))
                             } else {
-                                format!("{}:{line}", path.display())
+                                format!("{}:{line}", relative_path(path, &cfg.root))
                             };
                             out.push(formatted);
                             if out.len() >= limit {
@@ -341,7 +341,7 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
                             let formatted = if cfg.line_number {
                                 format!("{}-{line}", display_path(path, &cfg.root, line_no))
                             } else {
-                                format!("{}-{line}", path.display())
+                                format!("{}-{line}", relative_path(path, &cfg.root))
                             };
                             out.push(formatted);
                             if out.len() >= limit {
@@ -367,16 +367,20 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
     Ok(GrepOutput { lines: out, truncated })
 }
 
-/// Format `path:line_no` using a path relative to root when possible.
-fn display_path(path: &Path, root: &Path, line_no: usize) -> String {
-    let display = if root.is_file() {
+/// Return a path string relative to the search root when possible.
+fn relative_path(path: &Path, root: &Path) -> String {
+    if root.is_file() {
         path.to_string_lossy().into_owned()
     } else {
         path.strip_prefix(root)
             .map(|r| r.to_string_lossy().into_owned())
             .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-    };
-    format!("{display}:{line_no}")
+    }
+}
+
+/// Format `path:line_no` using a path relative to root when possible.
+fn display_path(path: &Path, root: &Path, line_no: usize) -> String {
+    format!("{}:{line_no}", relative_path(path, root))
 }
 
 /// Returns true if `bytes` looks like binary data (contains a null byte in the first 8 KB).

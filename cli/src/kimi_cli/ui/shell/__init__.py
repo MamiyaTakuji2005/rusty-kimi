@@ -187,8 +187,11 @@ class Shell:
         soul: Soul,
         welcome_info: list[WelcomeInfoItem] | None = None,
         prefill_text: str | None = None,
+        *,
+        show_thinking_stream: bool = True,
     ):
         self.soul = soul
+        self._show_thinking_stream = show_thinking_stream
         self._welcome_info = list(welcome_info or [])
         self._prefill_text = prefill_text
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -448,6 +451,7 @@ class Shell:
                             max_context_tokens=snap.max_context_tokens,
                         ),
                         prompt_session=None,
+                        show_thinking_stream=self._show_thinking_stream,
                     ),
                 )
 
@@ -876,7 +880,7 @@ class Shell:
                     unbind_running_input=self._unbind_running_input,
                     on_view_ready=self._set_active_view,
                     on_view_closed=self._clear_active_view,
-                    show_thinking_stream=False,
+                    show_thinking_stream=self._show_thinking_stream,
                 ),
                 cancel_event,
             )
@@ -923,7 +927,7 @@ class Shell:
         try:
             snap = self.soul.status
             runtime = self.soul.runtime if isinstance(self.soul, KimiSoul) else None
-            show_thinking_stream = runtime.config.show_thinking_stream if runtime else False
+            show_thinking_stream = runtime.config.show_thinking_stream if runtime else self._show_thinking_stream
             # Capture view reference via closure — _clear_active_view sets
             # _active_view=None inside visualize()'s finally (before run_soul
             # returns), so we must capture the view object independently.

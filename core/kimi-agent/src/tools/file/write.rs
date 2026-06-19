@@ -69,7 +69,6 @@ impl CallableTool2 for WriteFile {
     }
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
-        let _t0 = std::time::Instant::now();
         if params.path.is_empty() {
             return tool_error("", "File path cannot be empty.", "Empty file path");
         }
@@ -79,7 +78,6 @@ impl CallableTool2 for WriteFile {
             return err;
         }
         path = resolve_tool_path(&path, &self.work_dir);
-        let _t1 = std::time::Instant::now();
 
         if !path.parent().exists(true).await {
             return tool_error(
@@ -88,7 +86,6 @@ impl CallableTool2 for WriteFile {
                 "Parent directory not found",
             );
         }
-        let _t2 = std::time::Instant::now();
 
         let append = matches!(params.mode, WriteMode::Append);
 
@@ -98,7 +95,6 @@ impl CallableTool2 for WriteFile {
         } else {
             None
         };
-        let _t3 = std::time::Instant::now();
 
         let new_text = if append {
             format!("{}{}", old_text.clone().unwrap_or_default(), params.content)
@@ -114,7 +110,6 @@ impl CallableTool2 for WriteFile {
         .into_iter()
         .map(DisplayBlock::Diff)
         .collect();
-        let _t4 = std::time::Instant::now();
 
         let action = if is_within_directory(&path, &self.work_dir) {
             FILE_ACTION_EDIT
@@ -135,7 +130,6 @@ impl CallableTool2 for WriteFile {
             Ok(value) => value,
             Err(_) => false,
         };
-        let _t5 = std::time::Instant::now();
         if !approved {
             return tool_rejected_error();
         }

@@ -23,6 +23,7 @@ use crate::soul::{
     compaction::{Compaction, SimpleCompaction},
     context::Context,
     message::{check_message, system, tool_result_to_message},
+    state::write_state,
     wire_send,
 };
 use crate::tools::utils::is_tool_rejected;
@@ -412,6 +413,7 @@ impl KimiSoul {
             token_usage: None,
             message_id: None,
             model: Some(self.cached_model_name.lock().unwrap().clone()),
+            yolo_enabled: Some(self.runtime.approval.is_yolo()),
         };
         wire_send(WireMessage::StatusUpdate(status));
     }
@@ -428,6 +430,8 @@ impl KimiSoul {
                 "You only live once! All actions will be auto-approved.",
             ))));
         }
+        self.send_status_update();
+        write_state(&self.runtime.session, &self.runtime).await;
         Ok(())
     }
 
@@ -749,6 +753,7 @@ impl KimiSoul {
             token_usage: usage.clone(),
             message_id: result.id.clone(),
             model: None,
+            yolo_enabled: Some(self.runtime.approval.is_yolo()),
         };
         if usage.is_some() {
             status.context_usage = Some(self.status().context_usage);
@@ -953,6 +958,7 @@ impl Soul for KimiSoul {
             let _ = self.turn(user_message).await?;
         }
         wire_send(WireMessage::TurnEnd(TurnEnd::default()));
+        write_state(&self.runtime.session, &self.runtime).await;
         Ok(())
     }
 }

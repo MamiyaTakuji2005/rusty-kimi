@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use reqwest::header::HeaderMap;
 use schemars::JsonSchema;
@@ -19,17 +20,11 @@ pub struct SearchParams {
     pub query: String,
     #[serde(default = "default_search_limit")]
     #[schemars(
-        description = "The number of results to return. Typically you do not need to set this value. When the results do not contain what you need, you probably want to give a more concrete query.",
+        description = "The optional maximum returned results.",
         range(min = 1, max = 20),
         default = "default_search_limit"
     )]
     pub limit: i64,
-    #[serde(default)]
-    #[schemars(
-        description = "Whether to include the content of the web pages in the results. It can consume a large amount of tokens when this is set to True. You should avoid enabling this when `limit` is set to a large value.",
-        default
-    )]
-    pub include_content: bool,
 }
 
 fn default_search_limit() -> i64 {
@@ -41,8 +36,6 @@ struct SearchResult {
     title: String,
     url: String,
     snippet: String,
-    #[serde(default)]
-    content: String,
     #[serde(default)]
     date: String,
 }
@@ -110,12 +103,28 @@ impl CallableTool2 for SearchWeb {
         };
 
         let mut headers = HeaderMap::new();
-        headers.insert(reqwest::header::USER_AGENT, user_agent().parse().unwrap());
-        headers.insert(
+        if let Err(err) = insert_header(&mut headers, reqwest::header::USER_AGENT, &user_agent()) {
+            return builder.error(
+                &format!("Invalid user agent header: {err}"),
+                "Invalid header",
+            );
+        }
+        if let Err(err) = insert_header(
+            &mut headers,
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.api_key).parse().unwrap(),
-        );
-        headers.insert("X-Msh-Tool-Call-Id", tool_call.id.parse().unwrap());
+            &format!("Bearer {}", self.api_key),
+        ) {
+            return builder.error(
+                &format!("Invalid authorization header: {err}"),
+                "Invalid header",
+            );
+        }
+        if let Err(err) = insert_header(&mut headers, "X-Msh-Tool-Call-Id", &tool_call.id) {
+            return builder.error(
+                &format!("Invalid tool call id header: {err}"),
+                "Invalid header",
+            );
+        }
         for (key, value) in &self.custom_headers {
             if let (Ok(name), Ok(val)) = (
                 reqwest::header::HeaderName::from_bytes(key.as_bytes()),
@@ -125,14 +134,24 @@ impl CallableTool2 for SearchWeb {
             }
         }
 
-        let client = reqwest::Client::new();
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                return builder.error(
+                    &format!("Failed to build HTTP client: {err}"),
+                    "HTTP client error",
+                );
+            }
+        };
         let resp = match client
             .post(&self.base_url)
             .headers(headers)
             .json(&serde_json::json!({
                 "text_query": params.query,
                 "limit": params.limit,
-                "enable_page_crawling": params.include_content,
                 "timeout_seconds": 30,
             }))
             .send()
@@ -179,11 +198,18 @@ impl CallableTool2 for SearchWeb {
                 "Title: {}\nDate: {}\nURL: {}\nSummary: {}\n\n",
                 result.title, result.date, result.url, result.snippet
             ));
-            if !result.content.is_empty() {
-                builder.write(&format!("{}\n\n", result.content));
-            }
         }
 
         builder.ok("", "")
     }
+}
+
+fn insert_header(headers: &mut HeaderMap, name: impl AsRef<str>, value: &str) -> Result<(), String> {
+    let name = reqwest::header::HeaderName::from_bytes(name.as_ref().as_bytes())
+        .map_err(|err| format!("invalid header name: {err}"))?;
+    let val = value
+        .parse::<reqwest::header::HeaderValue>()
+        .map_err(|err| format!("invalid header value: {err}"))?;
+    headers.insert(name, val);
+    Ok(())
 }

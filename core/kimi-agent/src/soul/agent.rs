@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,7 +16,11 @@ use crate::skill::{Skill, discover_skills_from_roots, index_skills, resolve_skil
 use crate::soul::approval::Approval;
 use crate::soul::denwarenji::DenwaRenji;
 use crate::soul::toolset::KimiToolset;
+use crate::tasks::BackgroundTaskManager;
+use crate::tools::todo::TodoItem;
 use crate::utils::{Environment, list_directory};
+
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 #[allow(non_snake_case)]
@@ -72,9 +75,10 @@ pub struct Runtime {
     pub builtin_args: BuiltinSystemPromptArgs,
     pub denwa_renji: Arc<tokio::sync::Mutex<DenwaRenji>>,
     pub approval: Arc<Approval>,
-    pub labor_market: Arc<tokio::sync::Mutex<LaborMarket>>,
     pub environment: Environment,
     pub skills: HashMap<String, Skill>,
+    pub background_tasks: BackgroundTaskManager,
+    pub todos: Arc<std::sync::Mutex<Vec<TodoItem>>>,
 }
 
 impl Runtime {
@@ -122,6 +126,13 @@ impl Runtime {
                 .join("\n")
         };
 
+        let tasks_dir = session
+            .context_file
+            .parent()
+            .map(|d| d.join("tasks"))
+            .unwrap_or_else(|| std::path::PathBuf::from("tasks"));
+        let session_id = session.id.clone();
+
         Runtime {
             config,
             llm: Arc::new(RwLock::new(llm)),
@@ -135,39 +146,13 @@ impl Runtime {
             },
             denwa_renji: Arc::new(tokio::sync::Mutex::new(DenwaRenji::new())),
             approval: Arc::new(Approval::new(yolo)),
-            labor_market: Arc::new(tokio::sync::Mutex::new(LaborMarket::new())),
             environment,
             skills: skills_by_name,
+            background_tasks: BackgroundTaskManager::new(tasks_dir, session_id),
+            todos: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
-    pub fn copy_for_fixed_subagent(&self) -> Runtime {
-        Runtime {
-            config: self.config.clone(),
-            llm: self.llm.clone(),
-            session: self.session.clone(),
-            builtin_args: self.builtin_args.clone(),
-            denwa_renji: Arc::new(tokio::sync::Mutex::new(DenwaRenji::new())),
-            approval: Arc::new(self.approval.share()),
-            labor_market: Arc::new(tokio::sync::Mutex::new(LaborMarket::new())),
-            environment: self.environment.clone(),
-            skills: self.skills.clone(),
-        }
-    }
-
-    pub fn copy_for_dynamic_subagent(&self) -> Runtime {
-        Runtime {
-            config: self.config.clone(),
-            llm: self.llm.clone(),
-            session: self.session.clone(),
-            builtin_args: self.builtin_args.clone(),
-            denwa_renji: Arc::new(tokio::sync::Mutex::new(DenwaRenji::new())),
-            approval: Arc::new(self.approval.share()),
-            labor_market: Arc::clone(&self.labor_market),
-            environment: self.environment.clone(),
-            skills: self.skills.clone(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -176,46 +161,6 @@ pub struct Agent {
     pub system_prompt: String,
     pub toolset: Arc<tokio::sync::Mutex<KimiToolset>>,
     pub runtime: Runtime,
-}
-
-#[derive(Default)]
-pub struct LaborMarket {
-    fixed_subagents: HashMap<String, Agent>,
-    fixed_subagent_descs: HashMap<String, String>,
-    dynamic_subagents: HashMap<String, Agent>,
-}
-
-impl LaborMarket {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add_fixed_subagent(&mut self, name: String, agent: Agent, description: String) {
-        self.fixed_subagents.insert(name.clone(), agent);
-        self.fixed_subagent_descs.insert(name, description);
-    }
-
-    pub fn add_dynamic_subagent(&mut self, name: String, agent: Agent) {
-        self.dynamic_subagents.insert(name, agent);
-    }
-
-    pub fn fixed_subagents(&self) -> &HashMap<String, Agent> {
-        &self.fixed_subagents
-    }
-
-    pub fn dynamic_subagents(&self) -> &HashMap<String, Agent> {
-        &self.dynamic_subagents
-    }
-
-    pub fn all_subagents(&self) -> HashMap<String, Agent> {
-        let mut combined = self.fixed_subagents.clone();
-        combined.extend(self.dynamic_subagents.clone());
-        combined
-    }
-
-    pub fn fixed_subagent_descs(&self) -> &HashMap<String, String> {
-        &self.fixed_subagent_descs
-    }
 }
 
 pub fn load_agent<'a>(
@@ -232,21 +177,6 @@ pub fn load_agent<'a>(
             &runtime.builtin_args,
         )
         .await?;
-
-        for (subagent_name, subagent_spec) in agent_spec.subagents.iter() {
-            debug!("Loading subagent: {}", subagent_name);
-            let subagent = load_agent(
-                &subagent_spec.path,
-                runtime.copy_for_fixed_subagent(),
-                mcp_configs,
-            )
-            .await?;
-            runtime.labor_market.lock().await.add_fixed_subagent(
-                subagent_name.clone(),
-                subagent,
-                subagent_spec.description.clone(),
-            );
-        }
 
         let toolset = Arc::new(tokio::sync::Mutex::new(KimiToolset::new()));
         {

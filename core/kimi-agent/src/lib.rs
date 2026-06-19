@@ -11,6 +11,7 @@ pub mod session;
 pub mod share;
 pub mod skill;
 pub mod soul;
+pub mod tasks;
 pub mod tools;
 pub mod utils;
 pub mod wire;

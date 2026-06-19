@@ -189,6 +189,8 @@ class StatusUpdate(BaseModel):
     """The token usage statistics of the current step."""
     message_id: str | None = None
     """The message ID of the current step."""
+    yolo_enabled: bool | None = None
+    """Whether YOLO (auto-approve) mode is active. None means no change."""
     plan_mode: bool | None = None
     """Whether plan mode (read-only) is active. None means no change."""
     mcp_status: MCPStatusSnapshot | None = None

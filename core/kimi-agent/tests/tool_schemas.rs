@@ -468,15 +468,10 @@ fn test_search_web_params_schema() {
                 },
                 "limit": {
                     "default": 5,
-                    "description": "The number of results to return. Typically you do not need to set this value. When the results do not contain what you need, you probably want to give a more concrete query.",
+                    "description": "The optional maximum returned results.",
                     "maximum": 20,
                     "minimum": 1,
                     "type": "integer",
-                },
-                "include_content": {
-                    "default": false,
-                    "description": "Whether to include the content of the web pages in the results. It can consume a large amount of tokens when this is set to True. You should avoid enabling this when `limit` is set to a large value.",
-                    "type": "boolean",
                 },
             },
             "required": ["query"],

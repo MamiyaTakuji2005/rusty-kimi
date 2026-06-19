@@ -882,7 +882,12 @@ class KimiCLI:
         ]
         try:
             async with self._env():
-                shell = Shell(self._soul, welcome_info=welcome_info, prefill_text=prefill_text)
+                shell = Shell(
+                    self._soul,
+                    welcome_info=welcome_info,
+                    prefill_text=prefill_text,
+                    show_thinking_stream=self._runtime.config.show_thinking_stream,
+                )
                 return await shell.run(command)
         finally:
             await client.close()

@@ -156,6 +156,16 @@ impl Approval {
         }
     }
 
+    pub fn auto_approve_actions(&self) -> Vec<String> {
+        self.state
+            .auto_approve_actions
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn resolve_request(
         &self,
         request_id: &str,

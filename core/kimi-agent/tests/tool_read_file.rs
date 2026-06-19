@@ -52,7 +52,7 @@ async fn test_read_entire_file() {
     );
     assert_eq!(
         result.message,
-        "5 lines read from file starting from line 1. End of file reached."
+        "5 lines read from file starting from line 1. Total lines in file: 5. End of file reached."
     );
 }
 
@@ -77,7 +77,7 @@ async fn test_read_with_line_offset() {
     );
     assert_eq!(
         result.message,
-        "3 lines read from file starting from line 3. End of file reached."
+        "3 lines read from file starting from line 3. Total lines in file: 5. End of file reached."
     );
 }
 
@@ -98,11 +98,11 @@ async fn test_read_with_n_lines() {
     assert!(!result.is_error);
     assert_eq!(
         output_text(&result),
-        "     1\tLine 1: Hello World\n     2\tLine 2: This is a test file\n"
+        "     1\tLine 1: Hello World\n     2\tLine 2: This is a test file"
     );
     assert_eq!(
         result.message,
-        "2 lines read from file starting from line 1."
+        "2 lines read from file starting from line 1. Total lines in file: 5."
     );
 }
 
@@ -123,11 +123,11 @@ async fn test_read_with_line_offset_and_n_lines() {
     assert!(!result.is_error);
     assert_eq!(
         output_text(&result),
-        "     2\tLine 2: This is a test file\n     3\tLine 3: With multiple lines\n"
+        "     2\tLine 2: This is a test file\n     3\tLine 3: With multiple lines"
     );
     assert_eq!(
         result.message,
-        "2 lines read from file starting from line 2."
+        "2 lines read from file starting from line 2. Total lines in file: 5."
     );
 }
 
@@ -191,7 +191,7 @@ async fn test_read_with_relative_path() {
         assert!(!result.is_error);
         assert_eq!(
             result.message,
-            "5 lines read from file starting from line 1. End of file reached."
+            "5 lines read from file starting from line 1. Total lines in file: 5. End of file reached."
         );
         assert_eq!(
             output_text(&result),
@@ -251,7 +251,7 @@ async fn test_read_empty_file() {
     assert_eq!(output_text(&result), "");
     assert_eq!(
         result.message,
-        "No lines read from file. End of file reached."
+        "No lines read from file. Total lines in file: 0. End of file reached."
     );
 }
 
@@ -371,7 +371,7 @@ async fn test_read_line_offset_beyond_file_length() {
     assert_eq!(output_text(&result), "");
     assert_eq!(
         result.message,
-        "No lines read from file. End of file reached."
+        "No lines read from file. Total lines in file: 5. End of file reached."
     );
 }
 
@@ -401,7 +401,7 @@ async fn test_read_unicode_file() {
     );
     assert_eq!(
         result.message,
-        "2 lines read from file starting from line 1. End of file reached."
+        "2 lines read from file starting from line 1. Total lines in file: 2. End of file reached."
     );
 }
 
@@ -426,7 +426,7 @@ async fn test_read_edge_cases() {
     );
     assert_eq!(
         result.message,
-        "5 lines read from file starting from line 1. End of file reached."
+        "5 lines read from file starting from line 1. Total lines in file: 5. End of file reached."
     );
 
     let result = tool
@@ -441,7 +441,7 @@ async fn test_read_edge_cases() {
     assert_eq!(output_text(&result), "     5\tLine 5: End of file");
     assert_eq!(
         result.message,
-        "1 lines read from file starting from line 5. End of file reached."
+        "1 lines read from file starting from line 5. Total lines in file: 5. End of file reached."
     );
 
     let result = tool
@@ -455,11 +455,11 @@ async fn test_read_edge_cases() {
     assert!(!result.is_error);
     assert_eq!(
         output_text(&result),
-        "     2\tLine 2: This is a test file\n"
+        "     2\tLine 2: This is a test file"
     );
     assert_eq!(
         result.message,
-        "1 lines read from file starting from line 2."
+        "1 lines read from file starting from line 2. Total lines in file: 5."
     );
 }
 
@@ -516,7 +516,7 @@ async fn test_line_truncation_and_messaging() {
     assert!(!result.is_error);
     assert_eq!(
         result.message,
-        "3 lines read from file starting from line 1. End of file reached. Lines [1, 3] were truncated."
+        "3 lines read from file starting from line 1. Total lines in file: 3. End of file reached. Lines [1, 3] were truncated."
     );
 
     let lines: Vec<&str> = output_text(&result).lines().collect();
@@ -554,11 +554,36 @@ async fn test_parameter_validation_line_offset() {
     assert_eq!(result.brief(), "Invalid arguments");
 
     let result = tool
-        .call(json!({"path": file_path.to_string_lossy(), "line_offset": -1}))
+        .call(json!({"path": file_path.to_string_lossy(), "line_offset": -(MAX_LINES as i64) - 1}))
         .await;
     assert!(result.is_error);
     assert!(result.message.contains("line_offset"));
     assert_eq!(result.brief(), "Invalid arguments");
+}
+
+#[tokio::test]
+async fn test_read_with_negative_line_offset() {
+    let fixture = RuntimeFixture::new();
+    let tool = ReadFile::new(&fixture.runtime);
+    let file_path = write_sample_file(&fixture.runtime.builtin_args.KIMI_WORK_DIR).await;
+
+    let result = tool
+        .call_typed(ReadParams {
+            path: file_path.to_string_lossy(),
+            line_offset: -2,
+            n_lines: MAX_LINES as i64,
+        })
+        .await;
+
+    assert!(!result.is_error);
+    assert_eq!(
+        output_text(&result),
+        "     4\tLine 4: For testing purposes\n     5\tLine 5: End of file"
+    );
+    assert_eq!(
+        result.message,
+        "2 lines read from file starting from line 4. Total lines in file: 5."
+    );
 }
 
 #[tokio::test]
@@ -669,7 +694,7 @@ async fn test_read_with_tilde_path_expansion() {
     assert!(output_text(&result).contains(test_content));
     assert_eq!(
         result.message,
-        "1 lines read from file starting from line 1. End of file reached."
+        "1 lines read from file starting from line 1. Total lines in file: 1. End of file reached."
     );
 
     let _ = std::fs::remove_file(&test_file);

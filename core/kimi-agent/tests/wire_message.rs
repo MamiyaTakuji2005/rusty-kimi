@@ -88,12 +88,21 @@ fn test_wire_message_serde() {
         token_usage: None,
         message_id: None,
         model: None,
+        yolo_enabled: None,
     });
     assert_eq!(
         serialize_wire_message(&msg).unwrap(),
         json!({
             "type": "StatusUpdate",
-            "payload": {"context_usage": 0.5, "token_usage": null, "message_id": null}
+            "payload": {
+                "context_usage": 0.5,
+                "context_tokens": null,
+                "max_context_tokens": null,
+                "token_usage": null,
+                "message_id": null,
+                "model": null,
+                "yolo_enabled": null
+            }
         })
     );
     assert_roundtrip(msg);

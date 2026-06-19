@@ -72,6 +72,8 @@ pub struct StatusUpdate {
     pub message_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub yolo_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +312,22 @@ impl<'de> Deserialize<'de> for SubagentEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Notification {
+    pub id: String,
+    pub category: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub title: String,
+    pub body: String,
+    pub severity: String,
+    pub created_at: f64,
+    #[serde(default)]
+    pub payload: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SteerInput {
     pub user_input: UserInput,
 }
@@ -332,6 +350,7 @@ pub enum WireMessage {
     SubagentEvent(SubagentEvent),
     ApprovalRequest(ApprovalRequest),
     ToolCallRequest(ToolCallRequest),
+    Notification(Notification),
 }
 
 impl WireMessage {
@@ -353,6 +372,7 @@ impl WireMessage {
             WireMessage::SubagentEvent(_) => "SubagentEvent",
             WireMessage::ApprovalRequest(_) => "ApprovalRequest",
             WireMessage::ToolCallRequest(_) => "ToolCallRequest",
+            WireMessage::Notification(_) => "Notification",
         }
     }
 
@@ -499,6 +519,7 @@ impl WireMessageEnvelope {
             WireMessage::SubagentEvent(value) => payload_from(value)?,
             WireMessage::ApprovalRequest(value) => payload_from(value)?,
             WireMessage::ToolCallRequest(value) => payload_from(value)?,
+            WireMessage::Notification(value) => payload_from(value)?,
         };
         Ok(Self {
             type_name: msg.type_name().to_string(),
@@ -528,6 +549,7 @@ impl WireMessageEnvelope {
             "SubagentEvent" => Ok(WireMessage::SubagentEvent(parse_payload(payload_value)?)),
             "ApprovalRequest" => Ok(WireMessage::ApprovalRequest(parse_payload(payload_value)?)),
             "ToolCallRequest" => Ok(WireMessage::ToolCallRequest(parse_payload(payload_value)?)),
+            "Notification" => Ok(WireMessage::Notification(parse_payload(payload_value)?)),
             other => Err(WireError::UnknownMessageType(other.to_string())),
         }
     }

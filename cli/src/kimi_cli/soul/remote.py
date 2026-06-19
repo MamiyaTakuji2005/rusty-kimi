@@ -131,6 +131,7 @@ class RemoteSoul:
             context_usage=s.context_usage or 0.0,
             context_tokens=s.context_tokens or 0,
             max_context_tokens=s.max_context_tokens or 0,
+            yolo_enabled=bool(s.yolo_enabled),
             plan_mode=bool(s.plan_mode),
         )
 

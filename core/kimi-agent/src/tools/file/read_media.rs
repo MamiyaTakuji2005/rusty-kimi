@@ -25,7 +25,7 @@ use super::{
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadMediaParams {
     #[schemars(
-        description = "The path to the file to read. Absolute paths only required when working outside the workdir."
+        description = "The path to the file to read. Relative unless when targeting a file outside of the workdir."
     )]
     pub path: String,
 }

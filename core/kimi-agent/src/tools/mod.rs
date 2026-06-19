@@ -14,8 +14,8 @@ pub mod utils;
 
 pub mod dmail;
 pub mod file;
-pub mod multiagent;
 pub mod shell;
+pub mod task;
 pub mod test;
 pub mod think;
 pub mod todo;
@@ -60,17 +60,25 @@ pub fn load_tool(
         "kimi_cli.tools.todo:SetTodoList" => {
             Ok(Some(Arc::new(todo::SetTodoList::new(deps.runtime))))
         }
-        "kimi_cli.tools.multiagent:Task" => {
-            Ok(Some(Arc::new(multiagent::TaskTool::new(deps.runtime))))
-        }
-        "kimi_cli.tools.multiagent:CreateSubagent" => Ok(Some(Arc::new(
-            multiagent::CreateSubagent::new(Arc::clone(&deps.toolset), deps.runtime),
-        ))),
         "kimi_cli.tools.dmail:SendDMail" => Ok(Some(Arc::new(dmail::SendDMail::new(deps.runtime)))),
         "kimi_cli.tools.think:Think" => Ok(Some(Arc::new(think::Think::new(deps.runtime)))),
+        "kimi_cli.tools.background:TaskList" => {
+            Ok(Some(Arc::new(task::TaskList::new(deps.runtime))))
+        }
+        "kimi_cli.tools.background:TaskOutput" => {
+            Ok(Some(Arc::new(task::TaskOutput::new(deps.runtime))))
+        }
+        "kimi_cli.tools.background:TaskStop" => {
+            Ok(Some(Arc::new(task::TaskStop::new(deps.runtime))))
+        }
         "kimi_cli.tools.test:Plus" => Ok(Some(Arc::new(test::Plus))),
         "kimi_cli.tools.test:Compare" => Ok(Some(Arc::new(test::Compare))),
         "kimi_cli.tools.test:Panic" => Ok(Some(Arc::new(test::Panic))),
+        "kimi_cli.tools.multiagent:Task"
+        | "kimi_cli.tools.agent:Agent"
+        | "kimi_cli.tools.multiagent:CreateSubagent" => {
+            Err(InvalidToolError::new(format!("Tool removed: {tool_path}")))
+        }
         _ => Err(InvalidToolError::new(format!("Invalid tool: {tool_path}"))),
     }
 }
@@ -78,9 +86,7 @@ pub fn load_tool(
 pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<String> {
     let is_known = matches!(
         tool_name,
-        "Task"
-            | "CreateSubagent"
-            | "SendDMail"
+        "SendDMail"
             | "Think"
             | "SetTodoList"
             | "Shell"
@@ -92,6 +98,9 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
             | "Grep"
             | "SearchWeb"
             | "FetchURL"
+            | "TaskList"
+            | "TaskOutput"
+            | "TaskStop"
     );
 
     if !is_known {
@@ -103,8 +112,6 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
         return None;
     }
     let key_argument = match tool_name {
-        "Task" => value.get("description")?.as_str()?.to_string(),
-        "CreateSubagent" => value.get("name")?.as_str()?.to_string(),
         "SendDMail" => return None,
         "Think" => value.get("thought")?.as_str()?.to_string(),
         "SetTodoList" => return None,
@@ -117,6 +124,15 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
         "Grep" => value.get("pattern")?.as_str()?.to_string(),
         "SearchWeb" => value.get("query")?.as_str()?.to_string(),
         "FetchURL" => value.get("url")?.as_str()?.to_string(),
+        "TaskList" => format!(
+            "active_only={}",
+            value
+                .get("active_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+        ),
+        "TaskOutput" => value.get("task_id")?.as_str()?.to_string(),
+        "TaskStop" => value.get("task_id")?.as_str()?.to_string(),
         _ => json_content.to_string(),
     };
 

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use html2md::parse_html;
 use reqwest::header::HeaderMap;
@@ -61,13 +62,26 @@ impl FetchURL {
         };
 
         let mut headers = HeaderMap::new();
-        headers.insert(reqwest::header::USER_AGENT, user_agent().parse().unwrap());
-        headers.insert(
+        if let Err(err) = insert_header(&mut headers, reqwest::header::USER_AGENT, &user_agent()) {
+            return tool_error("", format!("Invalid user agent header: {err}"), "Invalid header");
+        }
+        if let Err(err) = insert_header(
+            &mut headers,
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", service.api_key).parse().unwrap(),
-        );
-        headers.insert("X-Msh-Tool-Call-Id", tool_call.id.parse().unwrap());
-        headers.insert(reqwest::header::ACCEPT, "text/markdown".parse().unwrap());
+            &format!("Bearer {}", service.api_key),
+        ) {
+            return tool_error(
+                "",
+                format!("Invalid authorization header: {err}"),
+                "Invalid header",
+            );
+        }
+        if let Err(err) = insert_header(&mut headers, "X-Msh-Tool-Call-Id", &tool_call.id) {
+            return tool_error("", format!("Invalid tool call id header: {err}"), "Invalid header");
+        }
+        if let Err(err) = insert_header(&mut headers, reqwest::header::ACCEPT, "text/markdown") {
+            return tool_error("", format!("Invalid accept header: {err}"), "Invalid header");
+        }
         if let Some(custom) = &service.custom_headers {
             for (key, value) in custom {
                 if let (Ok(name), Ok(val)) = (
@@ -110,7 +124,16 @@ impl FetchURL {
             );
         }
 
-        let text = resp.text().await.unwrap_or_default();
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                return tool_error(
+                    "",
+                    format!("Failed to read fetch response body: {err}"),
+                    "Failed to read response",
+                );
+            }
+        };
         let mut builder = ToolResultBuilder::new(DEFAULT_MAX_CHARS, None);
         builder.write(&text);
         builder.ok(
@@ -121,7 +144,18 @@ impl FetchURL {
 
     async fn fetch_with_http_get(&self, params: &FetchParams) -> ToolReturnValue {
         let mut builder = ToolResultBuilder::new(DEFAULT_MAX_CHARS, None);
-        let client = reqwest::Client::new();
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                return builder.error(
+                    &format!("Failed to build HTTP client: {err}"),
+                    "HTTP client error",
+                );
+            }
+        };
         let resp = match client
             .get(&params.url)
             .header(
@@ -164,9 +198,9 @@ impl FetchURL {
             Err(err) => {
                 return builder.error(
                     &format!(
-                        "Failed to fetch URL due to network error: {err}. This may indicate the URL is invalid or the server is unreachable."
+                        "Failed to read response body: {err}. This may indicate the server closed the connection or the response was too large."
                     ),
-                    "Network error",
+                    "Failed to read response",
                 )
             }
         };
@@ -332,6 +366,16 @@ fn extract_metadata(
         date,
         categories,
     }
+}
+
+fn insert_header(headers: &mut HeaderMap, name: impl AsRef<str>, value: &str) -> Result<(), String> {
+    let name = reqwest::header::HeaderName::from_bytes(name.as_ref().as_bytes())
+        .map_err(|err| format!("invalid header name: {err}"))?;
+    let val = value
+        .parse::<reqwest::header::HeaderValue>()
+        .map_err(|err| format!("invalid header value: {err}"))?;
+    headers.insert(name, val);
+    Ok(())
 }
 
 fn extract_title(document: &Html) -> Option<String> {

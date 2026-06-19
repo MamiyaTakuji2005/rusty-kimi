@@ -17,6 +17,7 @@ use kimi_agent::soul::agent::{Agent, BuiltinSystemPromptArgs, LaborMarket, Runti
 use kimi_agent::soul::approval::Approval;
 use kimi_agent::soul::denwarenji::DenwaRenji;
 use kimi_agent::soul::toolset::KimiToolset;
+use kimi_agent::tasks::BackgroundTaskManager;
 use kimi_agent::utils::Environment;
 use kimi_agent::wire::WireFile;
 use kosong::chat_provider::echo::echo::EchoChatProvider;
@@ -115,6 +116,7 @@ impl RuntimeFixture {
             labor_market: Arc::new(tokio::sync::Mutex::new(LaborMarket::new())),
             environment,
             skills: Default::default(),
+            background_tasks: BackgroundTaskManager::new(),
         };
 
         let agent = Agent {

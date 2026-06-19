@@ -10,7 +10,7 @@ use tool_test_utils::RuntimeFixture;
 fn base_params(pattern: &str, path: &str, output_mode: &str) -> GrepParams {
     GrepParams {
         pattern: pattern.to_string(),
-        path: path.to_string(),
+        path: Some(path.to_string()),
         glob: None,
         output_mode: output_mode.to_string(),
         before_context: None,
@@ -18,6 +18,7 @@ fn base_params(pattern: &str, path: &str, output_mode: &str) -> GrepParams {
         context: None,
         line_number: false,
         ignore_case: false,
+        fixed_strings: false,
         file_type: None,
         head_limit: None,
         multiline: false,
@@ -257,7 +258,7 @@ async fn test_grep_head_limit() {
         .filter(|line| !line.trim().is_empty() && !line.starts_with("..."))
         .collect();
     assert!(lines.len() <= 2);
-    assert!(output.contains("results truncated to 2 lines"));
+    assert!(result.message.contains("Results truncated to first 2 lines"));
 }
 
 #[tokio::test]
