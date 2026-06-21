@@ -844,13 +844,20 @@ class Shell:
         ``RemoteSoul``). Uses the same real ``visualize`` view as the local path;
         the only differences are the run function (``run_remote_soul``) and that
         ``status``/``steer`` come from the ``WireClient`` shim.
+
+        Queued messages typed while a turn is streaming are drained after the
+        turn finishes and sent as additional turns, mirroring the local path.
         """
         from kimi_cli.soul import RunCancelled
         from kimi_cli.soul.remote import RemoteSoul, run_remote_soul
+        from kimi_cli.ui.shell.visualize import (
+            _PromptLiveView,  # pyright: ignore[reportPrivateUsage]
+        )
         from kimi_cli.wire.client import WireClientError
 
         assert isinstance(self.soul, RemoteSoul)
-        client = self.soul.client
+        soul = self.soul
+        client = soul.client
 
         cancel_event = asyncio.Event()
 
@@ -860,8 +867,18 @@ class Shell:
         loop = asyncio.get_running_loop()
         remove_sigint = install_sigint_handler(loop, _handler)
 
+        captured_view: _PromptLiveView | None = None
+        pending: list[UserInput] = []
+
         try:
             snap = self.soul.status
+
+            def _on_view_ready(view: Any) -> None:
+                nonlocal captured_view
+                self._set_active_view(view)
+                if isinstance(view, _PromptLiveView):
+                    captured_view = view
+
             await run_remote_soul(
                 client,
                 user_input,
@@ -871,19 +888,82 @@ class Shell:
                         context_usage=snap.context_usage,
                         context_tokens=snap.context_tokens,
                         max_context_tokens=snap.max_context_tokens,
+                        mcp_status=snap.mcp_status,
                     ),
                     cancel_event=cancel_event,
                     prompt_session=self._prompt_session,
-                    steer=self.soul.steer,
+                    steer=soul.steer,
                     btw_runner=None,
                     bind_running_input=self._bind_running_input,
                     unbind_running_input=self._unbind_running_input,
-                    on_view_ready=self._set_active_view,
+                    on_view_ready=_on_view_ready,
                     on_view_closed=self._clear_active_view,
                     show_thinking_stream=self._show_thinking_stream,
                 ),
                 cancel_event,
             )
+
+            # If btw is still showing, wait for user dismiss BEFORE draining
+            # queue.  Remote mode has no local btw runner, but keep the same
+            # lifecycle as the local path for consistency.
+            if captured_view is not None:
+                await captured_view.wait_for_btw_dismiss()
+
+            # Clear cancel_event so queued turns aren't tainted by a Ctrl+C that
+            # fired during btw dismiss wait.
+            cancel_event.clear()
+
+            # Drain queued messages and send each as a new turn.
+            _MAX_DRAIN_GENERATIONS = 20
+            pending.clear()
+            drain_generation = 0
+            while captured_view is not None and drain_generation < _MAX_DRAIN_GENERATIONS:
+                new_messages = captured_view.drain_queued_messages()
+                if new_messages:
+                    drain_generation += 1
+                pending.extend(new_messages)
+                if not pending:
+                    break
+                queued = pending.pop(0)
+                console.print(render_user_echo_text(queued.command))
+                console.print()
+                await run_remote_soul(
+                    client,
+                    queued.content,
+                    lambda wire: visualize(
+                        wire.ui_side(merge=False),
+                        initial_status=StatusUpdate(
+                            context_usage=soul.status.context_usage,
+                            context_tokens=soul.status.context_tokens,
+                            max_context_tokens=soul.status.max_context_tokens,
+                            mcp_status=soul.status.mcp_status,
+                        ),
+                        cancel_event=cancel_event,
+                        prompt_session=self._prompt_session,
+                        steer=soul.steer,
+                        btw_runner=None,
+                        bind_running_input=self._bind_running_input,
+                        unbind_running_input=self._unbind_running_input,
+                        on_view_ready=_on_view_ready,
+                        on_view_closed=self._clear_active_view,
+                        show_thinking_stream=self._show_thinking_stream,
+                    ),
+                    cancel_event,
+                )
+                # Wait for btw dismiss if one was triggered during this queued turn.
+                if captured_view is not None:
+                    await captured_view.wait_for_btw_dismiss()
+                cancel_event.clear()
+                # captured_view is now the view from this turn; next iteration
+                # drains it for any new messages.
+            if drain_generation >= _MAX_DRAIN_GENERATIONS:
+                logger.warning(
+                    "Remote queue drain hit safety limit ({n} generations)",
+                    n=_MAX_DRAIN_GENERATIONS,
+                )
+                for msg in pending:
+                    console.print(f"[yellow]Queued message dropped: {msg.command}[/yellow]")
+                pending.clear()
             return True
         except RunCancelled:
             return True
@@ -891,6 +971,16 @@ class Shell:
             console.print(f"[red]Agent connection error:[/red] {e}")
             return False
         finally:
+            # Clean up btw modal if it's still attached.
+            if captured_view is not None:
+                captured_view._dismiss_btw()  # pyright: ignore[reportPrivateUsage]
+            # Warn about queued messages lost due to error/cancel.
+            all_lost: list[UserInput] = list(pending)
+            pending.clear()
+            if captured_view is not None:
+                all_lost.extend(captured_view.drain_queued_messages())
+            for msg in all_lost:
+                console.print(f"[yellow]Queued message dropped: {msg.command}[/yellow]")
             remove_sigint()
 
     async def run_soul_command(self, user_input: str | list[ContentPart]) -> bool:
