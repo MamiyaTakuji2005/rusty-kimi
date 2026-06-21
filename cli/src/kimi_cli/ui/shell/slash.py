@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, cast
 from prompt_toolkit.shortcuts.choice_input import ChoiceInput
 
 from kimi_cli import logger
-from kimi_cli.auth.platforms import get_platform_name_for_provider, refresh_managed_models
 from kimi_cli.cli import Reload, SwitchToVis
 from kimi_cli.config import load_config, save_config
 from kimi_cli.exception import ConfigError
@@ -158,165 +157,12 @@ def help(app: Shell, args: str):
 
 
 @registry.command
-async def btw(app: Shell, args: str):
-    """Ask a side question without interrupting the main conversation"""
-    question = args.strip()
-    if not question:
-        console.print('[yellow]Usage: "/btw <question>"[/yellow]')
-        return
-    if ensure_kimi_soul(app) is None:
-        return
-    if app._prompt_session is None:  # pyright: ignore[reportPrivateUsage]
-        console.print("[yellow]/btw is only available in interactive shell mode.[/yellow]")
-        return
-    await app._run_btw_modal(question, app._prompt_session)  # pyright: ignore[reportPrivateUsage]
-
-
-@registry.command
 @shell_mode_registry.command
 def version(app: Shell, args: str):
     """Show version information"""
     from kimi_cli.constant import VERSION
 
     console.print(f"kimi, version {VERSION}")
-
-
-@registry.command
-async def model(app: Shell, args: str):
-    """Switch LLM model or thinking mode"""
-    from kimi_cli.llm import derive_model_capabilities
-    from kimi_cli.soul.remote import RemoteSoul
-
-    # In remote mode, forward to the Rust agent which handles /model natively.
-    if isinstance(app.soul, RemoteSoul):
-        # Reconstruct the raw slash command and forward it.
-        raw = f"/model {args}".strip()
-        await app.run_soul_command(raw)
-        return
-
-    soul = ensure_kimi_soul(app)
-    if soul is None:
-        return
-    config = soul.runtime.config
-
-    await refresh_managed_models(config)
-
-    if not config.models:
-        console.print('[yellow]No models configured, send "/login" to login.[/yellow]')
-        return
-
-    if not config.is_from_default_location:
-        console.print(
-            "[yellow]Model switching requires the default config file; "
-            "restart without --config/--config-file.[/yellow]"
-        )
-        return
-
-    # Find current model/thinking from runtime (may be overridden by --model/--thinking)
-    curr_model_cfg = soul.runtime.llm.model_config if soul.runtime.llm else None
-    curr_model_name: str | None = None
-    if curr_model_cfg is not None:
-        for name, model_cfg in config.models.items():
-            if model_cfg == curr_model_cfg:
-                curr_model_name = name
-                break
-    curr_thinking = soul.thinking
-
-    # Step 1: Select model
-    model_choices: list[tuple[str, str]] = []
-    for name in sorted(config.models):
-        model_cfg = config.models[name]
-        provider_label = get_platform_name_for_provider(model_cfg.provider) or model_cfg.provider
-        marker = " (current)" if name == curr_model_name else ""
-        display = model_cfg.display_name or model_cfg.model
-        label = f"{display} ({provider_label}){marker}"
-        model_choices.append((name, label))
-
-    try:
-        selected_model_name = await ChoiceInput(
-            message="Select a model (↑↓ navigate, Enter select, Ctrl+C cancel):",
-            options=model_choices,
-            default=curr_model_name or model_choices[0][0],
-        ).prompt_async()
-    except (EOFError, KeyboardInterrupt):
-        return
-
-    if not selected_model_name:
-        return
-
-    selected_model_cfg = config.models[selected_model_name]
-    selected_provider = config.providers.get(selected_model_cfg.provider)
-    if selected_provider is None:
-        console.print(f"[red]Provider not found: {selected_model_cfg.provider}[/red]")
-        return
-
-    # Step 2: Determine thinking mode
-    capabilities = derive_model_capabilities(selected_model_cfg)
-    new_thinking: bool
-
-    if "always_thinking" in capabilities:
-        new_thinking = True
-    elif "thinking" in capabilities:
-        thinking_choices: list[tuple[str, str]] = [
-            ("off", "off" + (" (current)" if not curr_thinking else "")),
-            ("on", "on" + (" (current)" if curr_thinking else "")),
-        ]
-        try:
-            thinking_selection = await ChoiceInput(
-                message="Enable thinking mode? (↑↓ navigate, Enter select, Ctrl+C cancel):",
-                options=thinking_choices,
-                default="on" if curr_thinking else "off",
-            ).prompt_async()
-        except (EOFError, KeyboardInterrupt):
-            return
-
-        if not thinking_selection:
-            return
-
-        new_thinking = thinking_selection == "on"
-    else:
-        new_thinking = False
-
-    # Check if anything changed
-    model_changed = curr_model_name != selected_model_name
-    thinking_changed = curr_thinking != new_thinking
-    selected_display = selected_model_cfg.display_name or selected_model_cfg.model
-
-    if not model_changed and not thinking_changed:
-        console.print(
-            f"[yellow]Already using {selected_display} "
-            f"with thinking {'on' if new_thinking else 'off'}.[/yellow]"
-        )
-        return
-
-    # Save and reload
-    prev_model = config.default_model
-    prev_thinking = config.default_thinking
-    config.default_model = selected_model_name
-    config.default_thinking = new_thinking
-    try:
-        config_for_save = load_config()
-        config_for_save.default_model = selected_model_name
-        config_for_save.default_thinking = new_thinking
-        save_config(config_for_save)
-    except (ConfigError, OSError) as exc:
-        config.default_model = prev_model
-        config.default_thinking = prev_thinking
-        console.print(f"[red]Failed to save config: {exc}[/red]")
-        return
-
-    from kimi_cli.telemetry import track
-
-    if model_changed:
-        track("model_switch", model=selected_model_name)
-    if thinking_changed:
-        track("thinking_toggle", enabled=new_thinking)
-    console.print(
-        f"[green]Switched to {selected_display} "
-        f"with thinking {'on' if new_thinking else 'off'}. "
-        "Reloading...[/green]"
-    )
-    raise Reload(session_id=soul.runtime.session.id)
 
 
 @registry.command
@@ -561,12 +407,6 @@ async def _do_new_session(app: Shell, args: str) -> None:
     track("session_new")
     console.print("[green]New session created. Switching...[/green]")
     raise Reload(session_id=session.id)
-
-
-@registry.command(aliases=["reset"])
-async def clear(app: Shell, args: str) -> None:
-    """Start a new session (alias for /new)"""
-    await _do_new_session(app, args)
 
 
 @registry.command

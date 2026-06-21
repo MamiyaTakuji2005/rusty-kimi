@@ -10,28 +10,19 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
-from kosong.chat_provider import (
-    APIConnectionError,
-    APIEmptyResponseError,
-    APIStatusError,
-    APITimeoutError,
-    ChatProviderError,
-)
 from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
 from kimi_cli import logger
-from kimi_cli.background import list_task_views
 from kimi_cli.llm import model_display_name
-from kimi_cli.notifications import NotificationManager, NotificationWatcher
-from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, Soul, run_soul
+from kimi_cli.notifications import NotificationManager
+from kimi_cli.soul import Soul
 from kimi_cli.soul.kimisoul import FLOW_COMMAND_PREFIX, KimiSoul
 from kimi_cli.ui.shell import update as _update_mod
 from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.echo import render_user_echo_text
-from kimi_cli.ui.shell.mcp_status import render_mcp_prompt
 from kimi_cli.ui.shell.migration_nudge import print_migration_goodbye
 from kimi_cli.ui.shell.prompt import (
     BgTaskCounts,
@@ -41,7 +32,6 @@ from kimi_cli.ui.shell.prompt import (
     UserInput,
     toast,
 )
-from kimi_cli.ui.shell.replay import replay_recent_history
 from kimi_cli.ui.shell.slash import SKILL_COMMAND_PREFIX, shell_mode_registry
 from kimi_cli.ui.shell.slash import registry as shell_slash_registry
 from kimi_cli.ui.shell.update import LATEST_VERSION_FILE, UpdateResult, do_update, semver_tuple
@@ -49,7 +39,6 @@ from kimi_cli.ui.shell.visualize import (
     ApprovalPromptDelegate,
     visualize,
 )
-from kimi_cli.utils.aioqueue import QueueShutDown
 from kimi_cli.utils.envvar import get_env_bool
 from kimi_cli.utils.logging import open_original_stderr
 from kimi_cli.utils.signals import install_sigint_handler
@@ -61,7 +50,6 @@ from kimi_cli.wire.types import (
     ApprovalResponse,
     ContentPart,
     StatusUpdate,
-    WireMessage,
 )
 
 
@@ -239,9 +227,8 @@ class Shell:
 
     def _print_cwd_lost_crash(self) -> None:
         """Print a crash report when the working directory is no longer accessible."""
-        runtime = self.soul.runtime if isinstance(self.soul, KimiSoul) else None
-        session_id = runtime.session.id if runtime else "unknown"
-        work_dir = str(runtime.session.work_dir) if runtime else "unknown"
+        session_id = "unknown"
+        work_dir = "unknown"
 
         info = Table.grid(padding=(0, 1))
         info.add_row("Session:", session_id)
@@ -385,17 +372,9 @@ class Shell:
     async def run(self, command: str | None = None) -> bool:
         _run_start_time = time.monotonic()
 
-        # Initialize theme from config
-        if isinstance(self.soul, KimiSoul):
-            from kimi_cli.ui.theme import set_active_theme
-
-            set_active_theme(self.soul.runtime.config.theme)
-
         if command is not None:
             # run single command and exit
             logger.info("Running agent with command: {command}", command=command)
-            if isinstance(self.soul, KimiSoul):
-                self._start_background_task(self._watch_root_wire_hub())
             try:
                 return await self.run_soul_command(command)
             finally:
@@ -417,82 +396,35 @@ class Shell:
             _telemetry_sink.start_periodic_flush()
             self._start_background_task(_telemetry_sink.retry_disk_events())
 
-        if isinstance(self.soul, KimiSoul):
-            watcher = NotificationWatcher(
-                self.soul.runtime.notifications,
-                sink="shell",
-                before_poll=self.soul.runtime.background_tasks.reconcile,
-                on_notification=lambda notification: toast(
-                    f"[{notification.event.type}] {notification.event.title}",
-                    topic="notification",
-                    duration=10.0,
-                ),
-            )
-            self._start_background_task(watcher.run_forever())
-            self._start_background_task(self._watch_root_wire_hub())
-            await replay_recent_history(
-                self.soul.context.history,
-                wire_file=self.soul.wire_file,
-                show_thinking_stream=self.soul.runtime.config.show_thinking_stream,
-            )
-            await self.soul.start_background_mcp_loading()
-        else:
-            from kimi_cli.soul.remote import RemoteSoul, run_remote_replay
+        from kimi_cli.soul.remote import RemoteSoul, run_remote_replay
 
-            if isinstance(self.soul, RemoteSoul):
-                snap = self.soul.status
-                await run_remote_replay(
-                    self.soul.client,
-                    lambda wire: visualize(
-                        wire.ui_side(merge=False),
-                        initial_status=StatusUpdate(
-                            context_usage=snap.context_usage,
-                            context_tokens=snap.context_tokens,
-                            max_context_tokens=snap.max_context_tokens,
-                        ),
-                        prompt_session=None,
-                        show_thinking_stream=self._show_thinking_stream,
-                    ),
-                )
+        assert isinstance(self.soul, RemoteSoul)
+        snap = self.soul.status
+        await run_remote_replay(
+            self.soul.client,
+            lambda wire: visualize(
+                wire.ui_side(merge=False),
+                initial_status=StatusUpdate(
+                    context_usage=snap.context_usage,
+                    context_tokens=snap.context_tokens,
+                    max_context_tokens=snap.max_context_tokens,
+                ),
+                prompt_session=None,
+                show_thinking_stream=self._show_thinking_stream,
+            ),
+        )
 
         async def _plan_mode_toggle() -> bool:
-            if isinstance(self.soul, KimiSoul):
-                return await self.soul.toggle_plan_mode_from_manual()
             return False
 
         def _mcp_status_block(columns: int):
-            if not isinstance(self.soul, KimiSoul):
-                return None
-            snapshot = self.soul.status.mcp_status
-            if snapshot is None:
-                return None
-            return render_mcp_prompt(snapshot)
+            return None
 
         def _mcp_status_loading() -> bool:
-            if not isinstance(self.soul, KimiSoul):
-                return False
-            snapshot = self.soul.status.mcp_status
-            return bool(snapshot and snapshot.loading)
-
-        @dataclass
-        class _BgCountCache:
-            time: float = 0.0
-            counts: BgTaskCounts = BgTaskCounts()
-
-        _bg_cache = _BgCountCache()
+            return False
 
         def _bg_task_counts() -> BgTaskCounts:
-            if not isinstance(self.soul, KimiSoul):
-                return BgTaskCounts()
-            now = time.monotonic()
-            if now - _bg_cache.time < 1.0:
-                return _bg_cache.counts
-            views = list_task_views(self.soul.runtime.background_tasks, active_only=True)
-            bash_n = sum(1 for v in views if v.spec.kind == "bash")
-            agent_n = sum(1 for v in views if v.spec.kind == "agent")
-            _bg_cache.counts = BgTaskCounts(bash=bash_n, agent=agent_n)
-            _bg_cache.time = now
-            return _bg_cache.counts
+            return BgTaskCounts()
 
         with CustomPromptSession(
             status_provider=lambda: self.soul.status,
@@ -500,38 +432,17 @@ class Shell:
             fast_refresh_provider=_mcp_status_loading,
             background_task_count_provider=_bg_task_counts,
             model_capabilities=self.soul.model_capabilities or set(),
-            model_name_provider=lambda: model_display_name(
-                self.soul.model_name,
-                self.soul.runtime.llm.model_config
-                if isinstance(self.soul, KimiSoul) and self.soul.runtime.llm
-                else None,
-            ),
+            model_name_provider=lambda: model_display_name(self.soul.model_name, None),
             thinking_provider=lambda: self.soul.thinking or False,
             agent_mode_slash_commands=list(self._available_slash_commands.values()),
             shell_mode_slash_commands=shell_mode_registry.list_commands(),
-            editor_command_provider=lambda: (
-                self.soul.runtime.config.default_editor if isinstance(self.soul, KimiSoul) else ""
-            ),
+            editor_command_provider=lambda: "",
             plan_mode_toggle_callback=_plan_mode_toggle,
         ) as prompt_session:
             self._prompt_session = prompt_session
             if self._prefill_text:
                 prompt_session.set_prefill_text(self._prefill_text)
                 self._prefill_text = None
-            if isinstance(self.soul, KimiSoul):
-                kimi_soul = self.soul
-                snapshot = kimi_soul.status.mcp_status
-                if snapshot and snapshot.loading:
-
-                    async def _invalidate_after_mcp_loading() -> None:
-                        try:
-                            await kimi_soul.wait_for_background_mcp_loading()
-                        except Exception:
-                            logger.debug("MCP loading finished with error while refreshing prompt")
-                        if self._prompt_session is prompt_session:
-                            prompt_session.invalidate()
-
-                    self._start_background_task(_invalidate_after_mcp_loading())
             self._exit_after_run = False
             idle_events: asyncio.Queue[_PromptEvent] = asyncio.Queue()
             # resume_prompt controls whether the prompt router reads input.
@@ -657,18 +568,12 @@ class Shell:
                     # before they reach the soul/wire.
                     from kimi_cli.ui.shell.visualize import InputAction, classify_input
 
-                    # Use resolved_command (placeholder-expanded) so /btw
-                    # receives the actual pasted content, not "[Pasted text #1]".
                     input_text = (
                         user_input.resolved_command
                         if hasattr(user_input, "resolved_command")
                         else str(user_input)
                     )
                     action = classify_input(input_text, is_streaming=False)
-                    if action.kind == InputAction.BTW and isinstance(self.soul, KimiSoul):
-                        await self._run_btw_modal(action.args, prompt_session)
-                        resume_prompt.set()
-                        continue
                     if action.kind == InputAction.IGNORED:
                         console.print(f"[dim]{action.args}[/dim]")
                         resume_prompt.set()
@@ -991,216 +896,7 @@ class Shell:
             bool: Whether the run is successful.
         """
         logger.info("Running soul with user input: {user_input}", user_input=user_input)
-
-        from kimi_cli.soul.remote import RemoteSoul
-
-        if isinstance(self.soul, RemoteSoul):
-            return await self._run_remote_command(user_input)
-
-        cancel_event = asyncio.Event()
-
-        def _handler():
-            logger.debug("SIGINT received.")
-            cancel_event.set()
-
-        loop = asyncio.get_running_loop()
-        remove_sigint = install_sigint_handler(loop, _handler)
-
-        # Declare before try so finally can always access it.
-        from kimi_cli.ui.shell.visualize import (
-            _PromptLiveView,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        captured_view: _PromptLiveView | None = None
-        pending: list[UserInput] = []  # queued messages being drained
-
-        try:
-            snap = self.soul.status
-            runtime = self.soul.runtime if isinstance(self.soul, KimiSoul) else None
-            show_thinking_stream = (
-                runtime.config.show_thinking_stream if runtime else self._show_thinking_stream
-            )
-            # Capture view reference via closure — _clear_active_view sets
-            # _active_view=None inside visualize()'s finally (before run_soul
-            # returns), so we must capture the view object independently.
-
-            def _on_view_ready(view: Any) -> None:
-                nonlocal captured_view
-                self._set_active_view(view)
-                if isinstance(view, _PromptLiveView):
-                    captured_view = view
-
-            await run_soul(
-                self.soul,
-                user_input,
-                lambda wire: visualize(
-                    wire.ui_side(merge=False),  # shell UI maintain its own merge buffer
-                    initial_status=StatusUpdate(
-                        context_usage=snap.context_usage,
-                        context_tokens=snap.context_tokens,
-                        max_context_tokens=snap.max_context_tokens,
-                        mcp_status=snap.mcp_status,
-                    ),
-                    cancel_event=cancel_event,
-                    prompt_session=self._prompt_session,
-                    steer=self.soul.steer if isinstance(self.soul, KimiSoul) else None,
-                    btw_runner=self._make_btw_runner(),
-                    bind_running_input=self._bind_running_input,
-                    unbind_running_input=self._unbind_running_input,
-                    on_view_ready=_on_view_ready,
-                    on_view_closed=self._clear_active_view,
-                    show_thinking_stream=show_thinking_stream,
-                ),
-                cancel_event,
-                runtime.session.wire_file if runtime else None,
-                runtime,
-            )
-            # If btw is still showing, wait for user dismiss BEFORE draining
-            # queue.  This runs AFTER visualize_loop returns (within run_soul's
-            # 0.5s ui_task timeout), so the btw modal is still attached to
-            # prompt_session and key events continue to work.
-            if captured_view is not None:
-                await captured_view.wait_for_btw_dismiss()
-
-            # Clear cancel_event so queued turns aren't tainted by a
-            # Ctrl+C that fired during btw dismiss wait.
-            cancel_event.clear()
-
-            # Drain queued messages and send each as a new turn.
-            # Safety valve: cap at 20 "generations" (new batches of messages
-            # from the view). A one-time backlog of 25 messages = 1 generation,
-            # but a user adding new messages every turn = 1 generation per turn.
-            _MAX_DRAIN_GENERATIONS = 20
-            pending.clear()
-            drain_generation = 0
-            while captured_view is not None and drain_generation < _MAX_DRAIN_GENERATIONS:
-                new_messages = captured_view.drain_queued_messages()
-                if new_messages:
-                    drain_generation += 1
-                pending.extend(new_messages)
-                if not pending:
-                    break
-                queued = pending.pop(0)
-                console.print(render_user_echo_text(queued.command))
-                console.print()
-                await run_soul(
-                    self.soul,
-                    queued.content,
-                    lambda wire: visualize(
-                        wire.ui_side(merge=False),
-                        initial_status=StatusUpdate(
-                            context_usage=self.soul.status.context_usage,
-                            context_tokens=self.soul.status.context_tokens,
-                            max_context_tokens=self.soul.status.max_context_tokens,
-                            mcp_status=self.soul.status.mcp_status,
-                        ),
-                        cancel_event=cancel_event,
-                        prompt_session=self._prompt_session,
-                        steer=self.soul.steer if isinstance(self.soul, KimiSoul) else None,
-                        btw_runner=self._make_btw_runner(),
-                        bind_running_input=self._bind_running_input,
-                        unbind_running_input=self._unbind_running_input,
-                        on_view_ready=_on_view_ready,
-                        on_view_closed=self._clear_active_view,
-                        show_thinking_stream=show_thinking_stream,
-                    ),
-                    cancel_event,
-                    runtime.session.wire_file if runtime else None,
-                    runtime,
-                )
-                # Wait for btw dismiss if one was triggered during this queued turn
-                if captured_view is not None:
-                    await captured_view.wait_for_btw_dismiss()
-                cancel_event.clear()  # same rationale as above
-                # captured_view is now the view from this turn;
-                # next iteration drains it for any new messages.
-            if drain_generation >= _MAX_DRAIN_GENERATIONS:
-                logger.warning(
-                    "Queue drain hit safety limit ({n} generations)",
-                    n=_MAX_DRAIN_GENERATIONS,
-                )
-                # Warn about remaining items in the local pending buffer.
-                # Clear after printing so finally doesn't duplicate.
-                for msg in pending:
-                    console.print(f"[yellow]Queued message dropped: {msg.command}[/yellow]")
-                pending.clear()
-            return True
-        except LLMNotSet:
-            logger.exception("LLM not set:")
-            console.print('[red]LLM not set, send "/login" to login[/red]')
-        except LLMNotSupported as e:
-            # actually unsupported input/mode should already be blocked by prompt session
-            logger.exception("LLM not supported:")
-            console.print(f"[red]{e}[/red]")
-        except ChatProviderError as e:
-            logger.exception("LLM provider error:")
-            if isinstance(e, APIStatusError) and e.status_code == 401:
-                console.print(
-                    "[red]Authorization failed. Your session may have expired.[/red]\n"
-                    "[dim]Type [bold]/login[/bold] to re-authenticate.[/dim]\n"
-                    f"[dim]Server: {e}[/dim]"
-                )
-            elif isinstance(e, APIStatusError) and e.status_code == 402:
-                console.print(
-                    f"[red]Membership expired, please renew your plan[/red]\n[dim]Server: {e}[/dim]"
-                )
-            elif isinstance(e, APIStatusError) and e.status_code == 403:
-                console.print(f"[red]Server: {e}[/red]")
-            elif isinstance(e, APIConnectionError):
-                console.print(
-                    f"[red]Network connection failed: {e}[/red]\n"
-                    "[dim]Please check your network and try again.[/dim]"
-                )
-            elif isinstance(e, APITimeoutError):
-                console.print(
-                    f"[red]Request timed out: {e}[/red]\n"
-                    "[dim]The server may be slow or unreachable. Please try again later.[/dim]"
-                )
-            elif isinstance(e, APIEmptyResponseError):
-                console.print(
-                    "[red]The server returned an empty response.[/red]\n"
-                    "[dim]This is usually a temporary issue. Please try again.[/dim]"
-                )
-            else:
-                console.print(f"[red]LLM provider error: {e}[/red]")
-            if not isinstance(e, APIStatusError) or e.status_code not in (401, 402, 403):
-                console.print(
-                    "[dim]If this persists, run [bold]kimi export[/bold] and send the "
-                    "exported data to support for assistance. "
-                    "Please do not share the exported file publicly.[/dim]"
-                )
-        except MaxStepsReached as e:
-            logger.warning("Max steps reached: {n_steps}", n_steps=e.n_steps)
-            console.print(
-                f"[yellow]{e}[/yellow]\n"
-                "[dim]Send another message to continue where it left off.[/dim]"
-            )
-        except RunCancelled:
-            logger.info("Cancelled by user")
-            console.print("[red]Interrupted by user[/red]")
-        except Exception as e:
-            logger.exception("Unexpected error:")
-            console.print(
-                f"[red]Unexpected error: {e}[/red]\n"
-                "[dim]Run [bold]kimi export[/bold] and send the exported data to support "
-                "for assistance. Please do not share the exported file publicly.[/dim]"
-            )
-            raise  # re-raise unknown error
-        finally:
-            # Clean up btw modal if it's still attached (exception skipped wait_for_btw_dismiss)
-            if captured_view is not None:
-                captured_view._dismiss_btw()  # pyright: ignore[reportPrivateUsage]
-            # Warn about queued messages lost due to error/cancel.
-            # Check both: pending (already drained from view) and view (not yet drained).
-            all_lost: list[UserInput] = list(pending)
-            pending.clear()
-            if captured_view is not None:
-                all_lost.extend(captured_view.drain_queued_messages())
-            for msg in all_lost:
-                console.print(f"[yellow]Queued message dropped: {msg.command}[/yellow]")
-            self._maybe_present_pending_approvals()
-            remove_sigint()
-        return False
+        return await self._run_remote_command(user_input)
 
     @staticmethod
     def _should_defer_background_auto_trigger(
@@ -1255,232 +951,13 @@ class Shell:
             return idle_task.result()
         return _PromptEvent(kind="input_activity")
 
-    async def _watch_root_wire_hub(self) -> None:
-        if not isinstance(self.soul, KimiSoul):
-            return
-        if self.soul.runtime.root_wire_hub is None:
-            return
-        queue = self.soul.runtime.root_wire_hub.subscribe()
-        try:
-            while True:
-                try:
-                    msg = await queue.get()
-                except QueueShutDown:
-                    return
-                try:
-                    await self._handle_root_hub_message(msg)
-                except Exception:
-                    logger.exception("Failed to handle root hub message:")
-        finally:
-            self.soul.runtime.root_wire_hub.unsubscribe(queue)
-
-    async def _handle_root_hub_message(self, msg: WireMessage) -> None:
-        if not isinstance(self.soul, KimiSoul):
-            return
-        match msg:
-            case ApprovalRequest() as request:
-                request = self._enrich_approval_request_for_ui(request)
-                if self.soul.runtime.approval_runtime is None:
-                    return
-                record = self.soul.runtime.approval_runtime.get_request(request.id)
-                if record is None or record.status != "pending":
-                    return
-                if self._prompt_session is not None:
-                    # Interactive mode: queue and present via modal
-                    self._queue_approval_request(request)
-                    self._maybe_present_pending_approvals()
-                    self._prompt_session.invalidate()
-                elif self._active_approval_sink is not None:
-                    # Non-interactive with live view: forward to sink
-                    self._forward_approval_to_sink(request)
-                else:
-                    # Queue for later
-                    self._queue_approval_request(request)
-            case ApprovalResponse() as response:
-                # External resolution (e.g. from web UI)
-                if (
-                    self._approval_modal is not None
-                    and self._approval_modal.request.id == response.request_id
-                ):
-                    if not self._approval_modal.request.resolved:
-                        self._approval_modal.request.resolve(response.response)
-                    self._clear_current_prompt_approval_request(response.request_id)
-                    self._activate_prompt_approval_modal()
-                self._remove_pending_approval_request(response.request_id)
-                self._maybe_present_pending_approvals()
-                if self._prompt_session is not None:
-                    self._prompt_session.invalidate()
-            case _:
-                return
-
-    def _enrich_approval_request_for_ui(self, request: ApprovalRequest) -> ApprovalRequest:
-        if not isinstance(self.soul, KimiSoul):
-            return request
-        if request.agent_id is None:
-            return request
-        if self.soul.runtime.subagent_store is None:
-            return request
-        record = self.soul.runtime.subagent_store.get_instance(request.agent_id)
-        if record is None:
-            return request
-        return request.model_copy(update={"source_description": record.description})
-
-    async def _run_btw_modal(
-        self,
-        question: str,
-        prompt_session: CustomPromptSession,
-    ) -> None:
-        """Run /btw using the prompt session's modal system.
-
-        Attaches a ``_BtwModalDelegate`` that replaces the input line with
-        the btw panel.  A refresh loop animates the spinner.  After the LLM
-        responds, we start a new prompt read so prompt_toolkit can render the
-        result and accept dismiss keys.
-        """
-        from kimi_cli.soul.btw import execute_side_question
-        from kimi_cli.ui.shell.visualize import (
-            _BtwModalDelegate,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        assert isinstance(self.soul, KimiSoul)
-
-        dismiss_event = asyncio.Event()
-        modal = _BtwModalDelegate(on_dismiss=lambda: dismiss_event.set())
-        import time
-
-        modal._question = question  # pyright: ignore[reportPrivateUsage]
-        modal.set_start_time(time.monotonic())
-        prompt_session.attach_modal(modal)
-
-        # Refresh loop for spinner animation
-        async def _refresh() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(0.08)
-                    prompt_session.invalidate()
-            except asyncio.CancelledError:
-                pass
-
-        refresh_task = asyncio.create_task(_refresh())
-        prompt_task: asyncio.Task[None] | None = None
-        llm_task: asyncio.Task[tuple[str | None, str | None]] | None = None
-
-        try:
-
-            def _on_chunk(chunk: str) -> None:
-                modal.append_text(chunk)
-
-            # Start a prompt read concurrently — renders the modal and
-            # handles key events while the LLM call runs in parallel.
-            async def _wait_for_dismiss() -> None:
-                while not dismiss_event.is_set():
-                    try:
-                        await prompt_session.prompt_next()
-                    except (KeyboardInterrupt, EOFError):
-                        dismiss_event.set()
-                        break
-
-            prompt_task = asyncio.create_task(_wait_for_dismiss())
-
-            # Run LLM call as a separate task so Escape can cancel it
-            llm_task = asyncio.create_task(
-                execute_side_question(self.soul, question, on_text_chunk=_on_chunk)
-            )
-
-            # Wait for either LLM completion or user dismiss
-            dismiss_task = asyncio.create_task(dismiss_event.wait())
-            _done, _ = await asyncio.wait(
-                [llm_task, dismiss_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            if llm_task.done() and not llm_task.cancelled():
-                # LLM finished — show result, wait for user to dismiss
-                dismiss_task.cancel()
-                response, error = llm_task.result()
-                modal.set_result(response, error)
-                prompt_session.invalidate()
-                await dismiss_event.wait()
-            else:
-                # User dismissed during loading — cancel the LLM call
-                llm_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await llm_task
-        finally:
-            # Cancel ALL child tasks
-            if llm_task is not None and not llm_task.done():
-                llm_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await llm_task
-            if prompt_task is not None:
-                prompt_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await prompt_task
-            refresh_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await refresh_task
-            prompt_session.detach_modal(modal)
-
-    def _make_btw_runner(self):
-        """Create a btw_runner callback bound to the current soul."""
-        if not isinstance(self.soul, KimiSoul):
-            return None
-
-        soul = self.soul
-
-        async def _runner(
-            question: str,
-            on_text_chunk: Callable[[str], None] | None = None,
-        ) -> tuple[str | None, str | None]:
-            from kimi_cli.soul.btw import execute_side_question
-
-            return await execute_side_question(soul, question, on_text_chunk)
-
-        return _runner
-
     def _set_active_view(self, view: Any) -> None:
         self._active_approval_sink = view
         self._active_view = view
-        # In interactive mode, approvals are handled by the prompt modal,
-        # not by the live view sink. Don't flush to avoid losing requests.
-        if self._prompt_session is not None:
-            return
-        # Flush pending approvals to the newly active sink
-        while self._pending_approval_requests:
-            request = self._pending_approval_requests.popleft()
-
-            if not isinstance(self.soul, KimiSoul) or self.soul.runtime.approval_runtime is None:
-                break
-            record = self.soul.runtime.approval_runtime.get_request(request.id)
-            if record is None or record.status != "pending":
-                continue
-            self._forward_approval_to_sink(request)
 
     def _clear_active_view(self) -> None:
         self._active_approval_sink = None
         self._active_view = None
-        # Re-queue any approval requests that were forwarded to the sink
-        # but not yet resolved.  Without this, those requests would be
-        # silently lost when the live view closes between turns.
-        if not isinstance(self.soul, KimiSoul) or self.soul.runtime.approval_runtime is None:
-            return
-        for record in self.soul.runtime.approval_runtime.list_pending():
-            self._queue_approval_request(
-                self._enrich_approval_request_for_ui(
-                    ApprovalRequest(
-                        id=record.id,
-                        tool_call_id=record.tool_call_id,
-                        sender=record.sender,
-                        action=record.action,
-                        description=record.description,
-                        display=record.display,
-                        source_kind=record.source.kind,
-                        source_id=record.source.id,
-                        agent_id=record.source.agent_id,
-                        subagent_type=record.source.subagent_type,
-                    )
-                )
-            )
 
     def _forward_approval_to_sink(self, request: ApprovalRequest) -> None:
         """Forward an approval request to the active live view sink and bridge the response."""
