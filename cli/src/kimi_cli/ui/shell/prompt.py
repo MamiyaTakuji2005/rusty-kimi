@@ -1186,8 +1186,8 @@ class CustomPromptSession:
         fast_refresh_provider: Callable[[], bool] | None = None,
         background_task_count_provider: Callable[[], BgTaskCounts] | None = None,
         model_capabilities: set[ModelCapability],
-        model_name: str | None,
-        thinking: bool,
+        model_name_provider: Callable[[], str | None],
+        thinking_provider: Callable[[], bool],
         agent_mode_slash_commands: Sequence[SlashCommand[Any]],
         shell_mode_slash_commands: Sequence[SlashCommand[Any]],
         editor_command_provider: Callable[[], str] = lambda: "",
@@ -1204,10 +1204,10 @@ class CustomPromptSession:
         self._editor_command_provider = editor_command_provider
         self._plan_mode_toggle_callback = plan_mode_toggle_callback
         self._model_capabilities = model_capabilities
-        self._model_name = model_name
+        self._model_name_provider = model_name_provider
         self._last_history_content: str | None = None
         self._mode: PromptMode = PromptMode.AGENT
-        self._thinking = thinking
+        self._thinking_provider = thinking_provider
         self._placeholder_manager = PromptPlaceholderManager()
         # Keep the old attribute for test compatibility and for any external imports.
         self._attachment_cache = self._placeholder_manager.attachment_cache
@@ -2137,14 +2137,17 @@ class CustomPromptSession:
         # Degrade gracefully on narrow terminals:
         #   full: "agent (model-name ○)"  → mid: "agent ○"  → bare: "agent"
         mode = str(self._mode)
-        if self._mode == PromptMode.AGENT and self._model_name:
-            thinking_dot = "●" if self._thinking else "○"
-            mode_full = f"{mode} ({self._model_name} {thinking_dot})"
-            mode_mid = f"{mode} {thinking_dot}"
-            if _display_width(mode_full) <= remaining - 2:
-                mode = mode_full
-            elif _display_width(mode_mid) <= remaining - 2:
-                mode = mode_mid
+        if self._mode == PromptMode.AGENT:
+            model_name = self._model_name_provider()
+            thinking = self._thinking_provider()
+            if model_name:
+                thinking_dot = "●" if thinking else "○"
+                mode_full = f"{mode} ({model_name} {thinking_dot})"
+                mode_mid = f"{mode} {thinking_dot}"
+                if _display_width(mode_full) <= remaining - 2:
+                    mode = mode_full
+                elif _display_width(mode_mid) <= remaining - 2:
+                    mode = mode_mid
             # else: keep bare mode name — model_name and dot are both dropped
         fragments.extend([("", mode), ("", "  ")])
         remaining -= _display_width(mode) + 2

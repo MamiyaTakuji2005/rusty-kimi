@@ -311,7 +311,16 @@ class WireClient:
             logger.exception("Failed to deserialize event from agent: {params}", params=params)
             return
         if isinstance(msg, StatusUpdate):
-            self.last_status = msg
+            if self.last_status is None:
+                self.last_status = msg
+            else:
+                # Merge so that None fields mean "no change" rather than
+                # clearing a previously reported value (e.g. model name).
+                merged = self.last_status.model_dump()
+                merged.update(
+                    {k: v for k, v in msg.model_dump().items() if v is not None}
+                )
+                self.last_status = StatusUpdate.model_validate(merged)
         wire = self._current_wire
         if wire is not None:
             wire.soul_side.send(msg)

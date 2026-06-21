@@ -17,8 +17,12 @@ from kimi_cli.utils.server import (
     is_local_host,
     print_banner,
 )
-from kimi_cli.vis.api import sessions_router, statistics_router, system_router
-from kimi_cli.web.api.open_in import router as open_in_router
+from kimi_cli.vis.api import (
+    open_in_router,
+    sessions_router,
+    statistics_router,
+    system_router,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 GZIP_MINIMUM_SIZE = 1024

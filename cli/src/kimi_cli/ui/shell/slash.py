@@ -9,7 +9,7 @@ from prompt_toolkit.shortcuts.choice_input import ChoiceInput
 
 from kimi_cli import logger
 from kimi_cli.auth.platforms import get_platform_name_for_provider, refresh_managed_models
-from kimi_cli.cli import Reload, SwitchToVis, SwitchToWeb
+from kimi_cli.cli import Reload, SwitchToVis
 from kimi_cli.config import load_config, save_config
 from kimi_cli.exception import ConfigError
 from kimi_cli.session import Session
@@ -665,17 +665,6 @@ def theme(app: Shell, args: str):
     track("theme_switch", theme=arg)
     console.print(f"[green]Switched to {arg} theme. Reloading...[/green]")
     raise Reload(session_id=soul.runtime.session.id)
-
-
-@registry.command
-def web(app: Shell, args: str):
-    """Open Kimi Code Web UI in browser"""
-    from kimi_cli.telemetry import track
-
-    track("web_opened")
-    soul = ensure_kimi_soul(app)
-    session_id = soul.runtime.session.id if soul else None
-    raise SwitchToWeb(session_id=session_id)
 
 
 @registry.command

@@ -197,6 +197,8 @@ class StatusUpdate(BaseModel):
     """The current MCP startup snapshot. None means no change."""
     model: str | None = None
     """The current model name. None means no change."""
+    thinking: bool | None = None
+    """Whether thinking mode is currently enabled. None means no change."""
 
 
 class Notification(BaseModel):

@@ -500,13 +500,13 @@ class Shell:
             fast_refresh_provider=_mcp_status_loading,
             background_task_count_provider=_bg_task_counts,
             model_capabilities=self.soul.model_capabilities or set(),
-            model_name=model_display_name(
+            model_name_provider=lambda: model_display_name(
                 self.soul.model_name,
                 self.soul.runtime.llm.model_config
                 if isinstance(self.soul, KimiSoul) and self.soul.runtime.llm
                 else None,
             ),
-            thinking=self.soul.thinking or False,
+            thinking_provider=lambda: self.soul.thinking or False,
             agent_mode_slash_commands=list(self._available_slash_commands.values()),
             shell_mode_slash_commands=shell_mode_registry.list_commands(),
             editor_command_provider=lambda: (
@@ -795,7 +795,7 @@ class Shell:
             remove_sigint()
 
     async def _run_slash_command(self, command_call: SlashCommandCall) -> None:
-        from kimi_cli.cli import Reload, SwitchToVis, SwitchToWeb
+        from kimi_cli.cli import Reload, SwitchToVis
         from kimi_cli.telemetry import track
 
         available_command = self._find_available_slash_command(command_call.name)
@@ -826,7 +826,7 @@ class Shell:
             ret = command.func(self, command_call.args)
             if isinstance(ret, Awaitable):
                 await ret
-        except (Reload, SwitchToWeb, SwitchToVis):
+        except (Reload, SwitchToVis):
             # just propagate
             raise
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -927,7 +927,9 @@ class Shell:
         try:
             snap = self.soul.status
             runtime = self.soul.runtime if isinstance(self.soul, KimiSoul) else None
-            show_thinking_stream = runtime.config.show_thinking_stream if runtime else self._show_thinking_stream
+            show_thinking_stream = (
+                runtime.config.show_thinking_stream if runtime else self._show_thinking_stream
+            )
             # Capture view reference via closure — _clear_active_view sets
             # _active_view=None inside visualize()'s finally (before run_soul
             # returns), so we must capture the view object independently.

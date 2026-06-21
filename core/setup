@@ -1,0 +1,4 @@
+cd "C:\Users\MamiyaTakuji\.rusty-kimi\rusty-kimi\cli"
+$env:PYTHONPATH = "src"
+$env:KIMI_AGENT_BIN = "C:\Users\MamiyaTakuji\.rusty-kimi\rusty-kimi\core\target\debug\kimi-agent.exe"
+python -m kimi_cli

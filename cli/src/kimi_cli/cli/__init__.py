@@ -21,14 +21,6 @@ class Reload(Exception):
         self.source_session: Session | None = None
 
 
-class SwitchToWeb(Exception):
-    """Switch to web interface."""
-
-    def __init__(self, session_id: str | None = None):
-        super().__init__("switch_to_web")
-        self.session_id = session_id
-
-
 class SwitchToVis(Exception):
     """Switch to vis (tracing visualizer) interface."""
 
@@ -627,9 +619,7 @@ def kimi(
                 startup_progress=startup_progress.update if ui == "shell" else None,
                 defer_mcp_loading=ui == "shell" and prompt is None,
                 ui_mode=ui,
-                remote_agent=(
-                    os.environ.get("KIMI_AGENT_BIN") if ui == "shell" else None
-                ),
+                remote_agent=(os.environ.get("KIMI_AGENT_BIN") if ui == "shell" else None),
             )
             startup_progress.stop()
 
@@ -673,9 +663,6 @@ def kimi(
                     r.source_session = session
                     raise r from e
                 e.source_session = session
-                raise
-            except SwitchToWeb:
-                preserve_background_tasks = True
                 raise
             except SwitchToVis:
                 preserve_background_tasks = True
@@ -740,11 +727,11 @@ def kimi(
             save_metadata(metadata)
 
     async def _reload_loop(session_id: str | None) -> tuple[str | None, int]:
-        """Run the main loop, handling Reload/SwitchToWeb/SwitchToVis.
+        """Run the main loop, handling Reload/SwitchToVis.
 
         Returns:
-            (switch_target, exit_code) where switch_target is "web", "vis",
-            or None if the session ended normally.
+            (switch_target, exit_code) where switch_target is "vis" or None
+            if the session ended normally.
         """
         last_session: Session | None = None
         prefill_text: str | None = None
@@ -768,12 +755,6 @@ def kimi(
                     session_id = e.session_id
                     prefill_text = e.prefill_text
                     continue
-                except SwitchToWeb as e:
-                    if e.session_id is not None:
-                        session = await Session.find(work_dir, e.session_id)
-                        if session is not None:
-                            await _post_run(session, ExitCode.SUCCESS)
-                    return "web", ExitCode.SUCCESS
                 except SwitchToVis as e:
                     if e.session_id is not None:
                         session = await Session.find(work_dir, e.session_id)
@@ -783,7 +764,7 @@ def kimi(
             assert last_session is not None
             await _post_run(last_session, exit_code)
             return None, exit_code
-        except (SwitchToWeb, SwitchToVis):
+        except SwitchToVis:
             # Currently handled inside the loop (return), but re-raise explicitly
             # so the generic except below never treats them as unexpected errors.
             raise
@@ -864,7 +845,7 @@ def kimi(
                 "Run with --debug for full traceback, or run kimi export to share diagnostics."
             )
         raise typer.Exit(code=1) from exc
-    if switch_target in ("web", "vis"):
+    if switch_target == "vis":
         from kimi_cli.utils.logging import restore_stderr
 
         restore_stderr()
@@ -879,14 +860,9 @@ def kimi(
 
         ensure_tty_sane()
 
-        if switch_target == "web":
-            from kimi_cli.web.app import run_web_server
+        from kimi_cli.vis.app import run_vis_server
 
-            run_web_server(open_browser=True)
-        else:
-            from kimi_cli.vis.app import run_vis_server
-
-            run_vis_server(open_browser=True)
+        run_vis_server(open_browser=True)
     elif exit_code != ExitCode.SUCCESS:
         raise typer.Exit(code=exit_code)
 
@@ -1028,28 +1004,6 @@ def background_task_worker(
             kill_grace_period_ms=kill_grace_period_ms,
         )
     )
-
-
-@cli.command(name="__web-worker", hidden=True)
-def web_worker(session_id: str) -> None:
-    """Run web worker subprocess (internal)."""
-    import asyncio
-    from uuid import UUID
-
-    from kimi_cli.utils.proctitle import set_process_title
-
-    set_process_title("kimi-code-worker")
-
-    from kimi_cli.app import enable_logging
-    from kimi_cli.web.runner.worker import run_worker
-
-    try:
-        parsed_session_id = UUID(session_id)
-    except ValueError as exc:
-        raise typer.BadParameter(f"Invalid session ID: {session_id}") from exc
-
-    enable_logging(debug=False)
-    asyncio.run(run_worker(parsed_session_id))
 
 
 if __name__ == "__main__":

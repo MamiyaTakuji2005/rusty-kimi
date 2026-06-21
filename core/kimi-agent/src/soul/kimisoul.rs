@@ -414,6 +414,7 @@ impl KimiSoul {
             message_id: None,
             model: Some(self.cached_model_name.lock().unwrap().clone()),
             yolo_enabled: Some(self.runtime.approval.is_yolo()),
+            thinking: self.thinking(),
         };
         wire_send(WireMessage::StatusUpdate(status));
     }
@@ -752,8 +753,9 @@ impl KimiSoul {
             max_context_tokens: None,
             token_usage: usage.clone(),
             message_id: result.id.clone(),
-            model: None,
+            model: Some(self.cached_model_name.lock().unwrap().clone()),
             yolo_enabled: Some(self.runtime.approval.is_yolo()),
+            thinking: self.thinking(),
         };
         if usage.is_some() {
             status.context_usage = Some(self.status().context_usage);

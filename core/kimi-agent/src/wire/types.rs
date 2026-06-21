@@ -74,6 +74,8 @@ pub struct StatusUpdate {
     pub model: Option<String>,
     #[serde(default)]
     pub yolo_enabled: Option<bool>,
+    #[serde(default)]
+    pub thinking: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

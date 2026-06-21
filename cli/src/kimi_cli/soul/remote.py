@@ -120,6 +120,11 @@ class RemoteSoul:
 
     @property
     def thinking(self) -> bool | None:
+        # The agent reports thinking state via StatusUpdate; server_info has no
+        # equivalent, so fall back to None until the first status arrives.
+        s = self.client.last_status
+        if s is not None and s.thinking is not None:
+            return s.thinking
         return None
 
     @property

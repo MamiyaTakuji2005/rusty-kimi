@@ -89,6 +89,7 @@ fn test_wire_message_serde() {
         message_id: None,
         model: None,
         yolo_enabled: None,
+        thinking: None,
     });
     assert_eq!(
         serialize_wire_message(&msg).unwrap(),
@@ -101,7 +102,8 @@ fn test_wire_message_serde() {
                 "token_usage": null,
                 "message_id": null,
                 "model": null,
-                "yolo_enabled": null
+                "yolo_enabled": null,
+                "thinking": null
             }
         })
     );
