@@ -19,6 +19,7 @@ from kimi_cli import logger
 from kimi_cli.llm import model_display_name
 from kimi_cli.notifications import NotificationManager
 from kimi_cli.soul import Soul
+from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.kimisoul import FLOW_COMMAND_PREFIX, KimiSoul
 from kimi_cli.ui.shell import update as _update_mod
 from kimi_cli.ui.shell.console import console
@@ -176,9 +177,11 @@ class Shell:
         welcome_info: list[WelcomeInfoItem] | None = None,
         prefill_text: str | None = None,
         *,
+        runtime: Runtime | None = None,
         show_thinking_stream: bool = True,
     ):
         self.soul = soul
+        self.runtime = runtime
         self._show_thinking_stream = show_thinking_stream
         self._welcome_info = list(welcome_info or [])
         self._prefill_text = prefill_text

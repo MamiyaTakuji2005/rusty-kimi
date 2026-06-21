@@ -14,9 +14,9 @@ from rich.table import Table
 from rich.text import Text
 
 from kimi_cli.auth import KIMI_CODE_PLATFORM_ID
+from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.auth.platforms import get_platform_by_id, parse_managed_provider_key
-from kimi_cli.config import LLMModel
-from kimi_cli.soul.kimisoul import KimiSoul
+from kimi_cli.config import LLMModel, load_config
 from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.slash import registry
 from kimi_cli.utils.aiohttp import new_client_session
@@ -37,23 +37,26 @@ class UsageRow:
 @registry.command(aliases=["status"])
 async def usage(app: Shell, args: str):
     """Display API usage and quota information"""
-    assert isinstance(app.soul, KimiSoul)
-    if app.soul.runtime.llm is None:
-        console.print("[red]LLM not set. Please run /login first.[/red]")
+    config = load_config()
+    model_key = config.default_model or ""
+    model_cfg = config.models.get(model_key)
+    if model_cfg is None:
+        console.print("[red]No default model configured. Please run /login first.[/red]")
         return
 
-    provider = app.soul.runtime.llm.provider_config
+    provider = config.providers.get(model_cfg.provider)
     if provider is None:
         console.print("[red]LLM provider configuration not found.[/red]")
         return
 
-    usage_url = _usage_url(app.soul.runtime.llm.model_config)
+    usage_url = _usage_url(model_cfg)
     if usage_url is None:
         console.print("[yellow]Usage is available on Kimi Code platform only.[/yellow]")
         return
 
     with console.status("[cyan]Fetching usage...[/cyan]"):
-        api_key = app.soul.runtime.oauth.resolve_api_key(provider.api_key, provider.oauth)
+        oauth = OAuthManager(config)
+        api_key = oauth.resolve_api_key(provider.api_key, provider.oauth)
         try:
             payload = await _fetch_usage(usage_url, api_key)
         except aiohttp.ClientResponseError as e:

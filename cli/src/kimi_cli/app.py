@@ -586,6 +586,7 @@ class KimiCLI:
                     self._soul,
                     welcome_info=welcome_info,
                     prefill_text=prefill_text,
+                    runtime=self._runtime,
                     show_thinking_stream=self._runtime.config.show_thinking_stream,
                 )
                 return await shell.run(command)

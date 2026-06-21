@@ -351,7 +351,7 @@ async def feedback(app: Shell, args: str):
         "content": content,
         "version": VERSION,
         "os": f"{platform.system()} {platform.release()}",
-        "model": current_model_key(soul),
+        "model": current_model_key(soul.runtime.config),
     }
 
     with console.status("[cyan]Submitting feedback...[/cyan]"):
@@ -391,10 +391,10 @@ async def feedback(app: Shell, args: str):
 
 async def _do_new_session(app: Shell, args: str) -> None:
     """Shared implementation for /new and /clear."""
-    soul = ensure_kimi_soul(app)
-    if soul is None:
+    if app.runtime is None:
+        console.print("[red]No runtime available.[/red]")
         return
-    current_session = soul.runtime.session
+    current_session = app.runtime.session
     work_dir = current_session.work_dir
     # Clean up the current session if it has no content, so that chaining
     # /new commands (or switching away before the first message) does not
@@ -418,10 +418,10 @@ async def new(app: Shell, args: str) -> None:
 @registry.command(name="title", aliases=["rename"])
 async def title(app: Shell, args: str):
     """Set or show the session title"""
-    soul = ensure_kimi_soul(app)
-    if soul is None:
+    if app.runtime is None:
+        console.print("[red]No runtime available.[/red]")
         return
-    session = soul.runtime.session
+    session = app.runtime.session
     if not args.strip():
         console.print(f"Session title: [bold]{session.title}[/bold]")
         return
@@ -463,10 +463,6 @@ def theme(app: Shell, args: str):
     """Switch terminal color theme (dark/light)"""
     from kimi_cli.ui.theme import get_active_theme
 
-    soul = ensure_kimi_soul(app)
-    if soul is None:
-        return
-
     current = get_active_theme()
     arg = args.strip().lower()
 
@@ -483,7 +479,11 @@ def theme(app: Shell, args: str):
         console.print(f"[yellow]Already using {arg} theme.[/yellow]")
         return
 
-    config_file = soul.runtime.config.source_file
+    config_file = (
+        app.runtime.config.source_file
+        if app.runtime is not None
+        else load_config().source_file
+    )
     if config_file is None:
         console.print(
             "[yellow]Theme switching requires a config file; "
@@ -504,7 +504,7 @@ def theme(app: Shell, args: str):
 
     track("theme_switch", theme=arg)
     console.print(f"[green]Switched to {arg} theme. Reloading...[/green]")
-    raise Reload(session_id=soul.runtime.session.id)
+    raise Reload(session_id=app.runtime.session.id if app.runtime is not None else None)
 
 
 @registry.command
@@ -608,11 +608,11 @@ async def mcp(app: Shell, args: str):
 @shell_mode_registry.command
 def hooks(app: Shell, args: str):
     """List configured hooks"""
-    soul = ensure_kimi_soul(app)
-    if soul is None:
-        return
+    from kimi_cli.hooks.engine import HookEngine
 
-    engine = soul.hook_engine
+    config = load_config()
+    cwd = str(app.runtime.session.work_dir) if app.runtime is not None else None
+    engine = HookEngine(config.hooks, cwd=cwd)
     if not engine.summary:
         console.print(
             "[yellow]No hooks configured. "
@@ -707,11 +707,11 @@ async def fork(app: Shell, args: str):
     """Fork the current session (copy all history to a new session)"""
     from kimi_cli.session_fork import fork_session
 
-    soul = ensure_kimi_soul(app)
-    if soul is None:
+    if app.runtime is None:
+        console.print("[red]No runtime available.[/red]")
         return
 
-    session = soul.runtime.session
+    session = app.runtime.session
     new_session_id = await fork_session(
         source_session_dir=session.dir,
         work_dir=session.work_dir,
