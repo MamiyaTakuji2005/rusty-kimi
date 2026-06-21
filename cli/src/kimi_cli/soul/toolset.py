@@ -569,6 +569,10 @@ class KimiToolset:
         """
         Load tools from paths like `kimi_cli.tools.shell:Shell`.
 
+        Python-side tool implementations have been removed; paths under
+        `kimi_cli.tools.` are silently skipped and execution is delegated to
+        the Rust agent over the wire.
+
         Raises:
             InvalidToolError(KimiCLIException, ValueError): When any tool cannot be loaded.
         """
@@ -577,6 +581,12 @@ class KimiToolset:
         bad_tools: list[str] = []
 
         for tool_path in tool_paths:
+            if tool_path.startswith("kimi_cli.tools."):
+                logger.info(
+                    "Skipping Python tool (delegated to Rust agent): {tool_path}",
+                    tool_path=tool_path,
+                )
+                continue
             try:
                 tool = self._load_tool(tool_path, dependencies)
             except SkipThisTool:

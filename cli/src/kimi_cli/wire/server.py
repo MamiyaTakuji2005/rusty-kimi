@@ -563,42 +563,20 @@ class WireServer:
         )
 
     def _sync_ask_user_tool_visibility(self, toolset: KimiToolset) -> None:
-        """Hide or unhide the AskUserQuestion tool based on client capabilities."""
-        from kimi_cli.tools.ask_user import NAME as ASK_USER_TOOL_NAME
+        """Hide or unhide the AskUserQuestion tool based on client capabilities.
 
-        all_toolsets = [toolset]
-
-        if self._client_supports_question:
-            for ts in all_toolsets:
-                ts.unhide(ASK_USER_TOOL_NAME)
-        else:
-            for ts in all_toolsets:
-                ts.hide(ASK_USER_TOOL_NAME)
-            logger.info(
-                "Hid {tool} tool: client does not support questions",
-                tool=ASK_USER_TOOL_NAME,
-            )
+        No-op: Python-side AskUserQuestion tool has been removed; visibility is
+        managed by the Rust agent.
+        """
+        pass
 
     def _sync_plan_mode_tool_visibility(self, toolset: KimiToolset) -> None:
-        """Hide or unhide plan mode tools based on client capabilities."""
-        from kimi_cli.tools.plan import NAME as EXIT_PLAN_MODE_TOOL_NAME
-        from kimi_cli.tools.plan.enter import NAME as ENTER_PLAN_MODE_TOOL_NAME
+        """Hide or unhide plan mode tools based on client capabilities.
 
-        plan_tool_names = [ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME]
-
-        all_toolsets = [toolset]
-
-        if self._client_supports_plan_mode:
-            for ts in all_toolsets:
-                for name in plan_tool_names:
-                    ts.unhide(name)
-        else:
-            for ts in all_toolsets:
-                for name in plan_tool_names:
-                    ts.hide(name)
-            logger.info(
-                "Hide plan mode tools: client does not support plan mode",
-            )
+        No-op: Python-side plan-mode tools have been removed; visibility is
+        managed by the Rust agent.
+        """
+        pass
 
     def _apply_wire_client_info(self, client: ClientInfo | None) -> None:
         if client is not None:

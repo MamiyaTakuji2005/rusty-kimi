@@ -10,8 +10,8 @@ from kimi_cli.approval_runtime import (
     ApprovalSource,
     get_current_approval_source_or_none,
 )
+from kimi_cli.exception import ToolRejectedError
 from kimi_cli.soul.toolset import get_current_tool_call_or_none
-from kimi_cli.tools.utils import ToolRejectedError
 from kimi_cli.utils.logging import logger
 from kimi_cli.wire.types import DisplayBlock
 

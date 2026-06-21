@@ -28,6 +28,7 @@ from kimi_cli.approval_runtime import (
     set_current_approval_source,
 )
 from kimi_cli.background import build_active_task_snapshot
+from kimi_cli.exception import ToolRejectedError
 from kimi_cli.hooks.engine import HookEngine
 from kimi_cli.llm import ModelCapability
 from kimi_cli.notifications import (
@@ -63,8 +64,6 @@ from kimi_cli.soul.dynamic_injections.plan_mode import PlanModeInjectionProvider
 from kimi_cli.soul.message import check_message, system, system_reminder, tool_result_to_message
 from kimi_cli.soul.slash import registry as soul_slash_registry
 from kimi_cli.soul.toolset import KimiToolset
-from kimi_cli.tools.dmail import NAME as SendDMail_NAME
-from kimi_cli.tools.utils import ToolRejectedError
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.slashcmd import SlashCommand, parse_slash_command_call
 from kimi_cli.wire.file import WireFile
@@ -179,12 +178,7 @@ class KimiSoul:
         self._loop_control = agent.runtime.config.loop_control
         self._compaction = SimpleCompaction()  # TODO: maybe configurable and composable
 
-        for tool in agent.toolset.tools:
-            if tool.name == SendDMail_NAME:
-                self._checkpoint_with_user_message = True
-                break
-        else:
-            self._checkpoint_with_user_message = False
+        self._checkpoint_with_user_message = False
 
         self._steer_queue: asyncio.Queue[str | list[ContentPart]] = asyncio.Queue()
         self._last_tool_calls: list[tuple[str, str]] = []
@@ -325,60 +319,12 @@ class KimiSoul:
                 )
 
     def _bind_plan_mode_tools(self) -> None:
-        """Bind plan mode state to tools that support it."""
-        if not isinstance(self._agent.toolset, KimiToolset):
-            return
+        """Bind plan mode state to tools that support it.
 
-        def checker() -> bool:
-            return self._plan_mode
-
-        def path_getter() -> Path | None:
-            return self.get_plan_file_path()
-
-        # WriteFile gets both checker and path_getter (for plan file auto-approve)
-        from kimi_cli.tools.file.write import WriteFile
-
-        write_tool = self._agent.toolset.find("WriteFile")
-        if isinstance(write_tool, WriteFile):
-            write_tool.bind_plan_mode(checker, path_getter)
-
-        from kimi_cli.tools.file.replace import StrReplaceFile
-
-        replace_tool = self._agent.toolset.find("StrReplaceFile")
-        if isinstance(replace_tool, StrReplaceFile):
-            replace_tool.bind_plan_mode(checker, path_getter)
-
-        # ExitPlanMode has a special bind() method
-        from kimi_cli.tools.plan import ExitPlanMode
-
-        exit_tool = self._agent.toolset.find("ExitPlanMode")
-        if isinstance(exit_tool, ExitPlanMode):
-            exit_tool.bind(
-                self.toggle_plan_mode,
-                path_getter,
-                checker,
-                self._approval.is_afk,
-            )
-
-        # EnterPlanMode has a special bind() method
-        from kimi_cli.tools.plan.enter import EnterPlanMode
-
-        enter_tool = self._agent.toolset.find("EnterPlanMode")
-        if isinstance(enter_tool, EnterPlanMode):
-            enter_tool.bind(
-                self.toggle_plan_mode,
-                path_getter,
-                checker,
-                self._approval.is_auto_approve,
-            )
-
-        # AskUserQuestion — bind afk checker for auto-dismiss.
-        # Yolo alone keeps the tool live; only afk (no user present) dismisses.
-        from kimi_cli.tools.ask_user import AskUserQuestion
-
-        ask_tool = self._agent.toolset.find("AskUserQuestion")
-        if isinstance(ask_tool, AskUserQuestion):
-            ask_tool.bind_afk(self._approval.is_afk)
+        No-op: Python-side tool implementations have been removed. Plan-mode
+        tooling is now handled by the Rust agent over the wire.
+        """
+        pass
 
     def _ensure_plan_session_id(self) -> None:
         """Allocate a stable plan session ID on first activation."""
