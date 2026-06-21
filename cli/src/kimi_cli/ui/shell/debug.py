@@ -10,7 +10,6 @@ from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 
-from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.slash import registry
 from kimi_cli.wire.types import (
@@ -145,12 +144,17 @@ def _format_message(msg: Message, index: int) -> Panel:
 
 
 @registry.command
-def debug(app: Shell, args: str):
+async def debug(app: Shell, args: str):
     """Debug the context"""
-    assert isinstance(app.soul, KimiSoul)
+    if app.runtime is None:
+        console.print("[red]No runtime available.[/red]")
+        return
 
-    context = app.soul.context
-    history = context.history
+    from kimi_cli.soul.context import Context
+
+    context = Context(app.runtime.session.context_file)
+    await context.restore()
+    history = list(context.history)
 
     if not history:
         console.print(
@@ -162,12 +166,18 @@ def debug(app: Shell, args: str):
         )
         return
 
+    token_count = (
+        context.token_count
+        if context.token_count
+        else app.soul.status.context_tokens
+    )
+
     # Build the debug output
     output_items = [
         Panel(
             Group(
                 Text(f"Total messages: {len(history)}", style="bold"),
-                Text(f"Token count: {context.token_count:,}", style="bold"),
+                Text(f"Token count: {token_count:,}", style="bold"),
                 Text(f"Checkpoints: {context.n_checkpoints}", style="bold"),
                 Text(f"Trajectory: {context.file_backend}", style="dim"),
             ),
