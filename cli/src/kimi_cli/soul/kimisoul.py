@@ -961,6 +961,9 @@ class KimiSoul:
             2e.7. Context growth         - append assistant + tool messages.
             2e.8. Outcome resolution     - rejection / D-Mail / stop / continue.
         """
+        raise RuntimeError(
+            "Local LLM execution is disabled; run via the Rust agent (KIMI_AGENT_BIN)."
+        )
         # already checked in `run`
         assert self._runtime.llm is not None
         chat_provider = self._runtime.llm.chat_provider
@@ -1207,6 +1210,9 @@ class KimiSoul:
             LLMNotSet: When the LLM is not set.
             ChatProviderError: When the chat provider returns an error.
         """
+        raise RuntimeError(
+            "Local LLM execution is disabled; run via the Rust agent (KIMI_AGENT_BIN)."
+        )
 
         chat_provider = self._runtime.llm.chat_provider if self._runtime.llm is not None else None
 

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import sys
-import time
 import warnings
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -12,26 +10,19 @@ from typing import TYPE_CHECKING, Any
 
 import kaos
 from kaos.path import KaosPath
-from pydantic import SecretStr
 
-from kimi_cli.agentspec import DEFAULT_AGENT_FILE
-from kimi_cli.auth.oauth import KIMI_CODE_OAUTH_KEY, OAuthManager, get_device_id
+from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.background.models import is_terminal_status
 from kimi_cli.cli import InputFormat, OutputFormat
-from kimi_cli.config import Config, LLMModel, LLMProvider, load_config
-from kimi_cli.constant import VERSION
-from kimi_cli.llm import augment_provider_with_env_vars, create_llm, model_display_name
+from kimi_cli.config import Config, load_config
 from kimi_cli.session import Session
 from kimi_cli.share import get_share_dir
-from kimi_cli.soul import RunCancelled, run_soul
-from kimi_cli.soul.agent import Runtime, load_agent
-from kimi_cli.soul.context import Context
-from kimi_cli.soul.kimisoul import KimiSoul
-from kimi_cli.soul.toolset import KimiToolset
+from kimi_cli.soul import RunCancelled, Soul, run_soul
+from kimi_cli.soul.agent import Runtime
 from kimi_cli.utils.aioqueue import QueueShutDown
-from kimi_cli.utils.envvar import get_env_bool
 from kimi_cli.utils.logging import logger, open_original_stderr, redirect_stderr_to_logger
 from kimi_cli.utils.path import shorten_home
+from kimi_cli.utils.signals import install_sigint_handler
 from kimi_cli.wire import Wire, WireUISide
 from kimi_cli.wire.types import ApprovalRequest, ApprovalResponse, ContentPart, WireMessage
 
@@ -90,33 +81,6 @@ def _write_original_stderr(text: str) -> None:
     sys.stderr.write(text)
 
 
-async def _refresh_managed_models_silent(config: Config) -> None:
-    from kimi_cli.auth.platforms import refresh_managed_models
-
-    try:
-        await refresh_managed_models(config)
-    except Exception as exc:
-        logger.warning("Background managed-model refresh failed: {error}", error=exc)
-
-
-def _cleanup_stale_foreground_subagents(runtime: Runtime) -> None:
-    subagent_store = getattr(runtime, "subagent_store", None)
-    if subagent_store is None:
-        return
-
-    stale_agent_ids = [
-        record.agent_id
-        for record in subagent_store.list_instances()
-        if record.status == "running_foreground"
-    ]
-    for agent_id in stale_agent_ids:
-        logger.warning(
-            "Marking stale foreground subagent instance as failed during startup: {agent_id}",
-            agent_id=agent_id,
-        )
-        subagent_store.update_instance(agent_id, status="failed")
-
-
 class KimiCLI:
     @staticmethod
     async def create(
@@ -143,7 +107,7 @@ class KimiCLI:
         max_ralph_iterations: int | None = None,
         startup_progress: Callable[[str], None] | None = None,
         defer_mcp_loading: bool = False,
-        remote_agent: str | None = None,
+        remote_agent: str,
     ) -> KimiCLI:
         """
         Create a KimiCLI instance.
@@ -187,15 +151,10 @@ class KimiCLI:
             MCPRuntimeError(KimiCLIException, RuntimeError): When any MCP server cannot be
                 connected.
         """
-        _create_t0 = time.monotonic()
-        _phase_timings_ms: dict[str, int] = {}
-
         if startup_progress is not None:
             startup_progress("Loading configuration...")
 
-        _phase_t = time.monotonic()
         config = config if isinstance(config, Config) else load_config(config)
-        _phase_timings_ms["config_ms"] = int((time.monotonic() - _phase_t) * 1000)
         if max_steps_per_turn is not None:
             config.loop_control.max_steps_per_turn = max_steps_per_turn
         if max_retries_per_step is not None:
@@ -204,181 +163,23 @@ class KimiCLI:
             config.loop_control.max_ralph_iterations = max_ralph_iterations
         logger.info("Loaded config: {config}", config=config)
 
-        _phase_t = time.monotonic()
         oauth = OAuthManager(config)
 
-        if remote_agent is not None:
-            # Remote mode: the external Wire agent owns the loop, LLM, tools, MCP
-            # and session. Skip all local LLM/agent/soul construction.
-            return await KimiCLI._create_remote(
-                remote_agent,
-                config=config,
-                oauth=oauth,
-                session=session,
-                yolo=yolo,
-                afk=afk,
-                runtime_afk=runtime_afk,
-                skills_dirs=skills_dirs,
-                ui_mode=ui_mode,
-                resumed=resumed,
-                startup_progress=startup_progress,
-            )
-
-        bg_refresh_task = asyncio.create_task(_refresh_managed_models_silent(config))
-
-        model: LLMModel | None = None
-        provider: LLMProvider | None = None
-
-        # try to use config file
-        if not model_name and config.default_model:
-            # no --model specified && default model is set in config
-            model = config.models[config.default_model]
-            provider = config.providers[model.provider]
-        if model_name and model_name in config.models:
-            # --model specified && model is set in config
-            model = config.models[model_name]
-            provider = config.providers[model.provider]
-
-        if not model:
-            model = LLMModel(provider="", model="", max_context_size=100_000)
-            provider = LLMProvider(type="kimi", base_url="", api_key=SecretStr(""))
-
-        # try overwrite with environment variables
-        assert provider is not None
-        assert model is not None
-        env_overrides = augment_provider_with_env_vars(provider, model)
-
-        # determine thinking mode
-        thinking = config.default_thinking if thinking is None else thinking
-
-        # determine yolo mode
-        yolo = yolo if yolo else config.default_yolo
-
-        # determine plan mode (only for new sessions, not restored)
-        if not resumed:
-            plan_mode = plan_mode if plan_mode else config.default_plan_mode
-
-        llm = create_llm(
-            provider,
-            model,
-            thinking=thinking,
-            session_id=session.id,
+        # Remote mode: the external Wire agent owns the loop, LLM, tools, MCP
+        # and session. Skip all local LLM/agent/soul construction.
+        return await KimiCLI._create_remote(
+            remote_agent,
+            config=config,
             oauth=oauth,
-        )
-        if llm is not None:
-            logger.info("Using LLM provider: {provider}", provider=provider)
-            logger.info("Using LLM model: {model}", model=model)
-            logger.info("Thinking mode: {thinking}", thinking=thinking)
-
-        if startup_progress is not None:
-            startup_progress("Scanning workspace...")
-
-        runtime = await Runtime.create(
-            config,
-            oauth,
-            llm,
-            session,
-            yolo,
+            session=session,
+            yolo=yolo,
             afk=afk,
             runtime_afk=runtime_afk,
             skills_dirs=skills_dirs,
-        )
-        runtime.ui_mode = ui_mode
-        runtime.resumed = resumed
-        runtime.notifications.recover()
-        runtime.background_tasks.reconcile()
-        _cleanup_stale_foreground_subagents(runtime)
-        _phase_timings_ms["init_ms"] = int((time.monotonic() - _phase_t) * 1000)
-
-        if agent_file is None:
-            agent_file = DEFAULT_AGENT_FILE
-        if startup_progress is not None:
-            startup_progress("Loading agent...")
-
-        _phase_t = time.monotonic()
-        agent = await load_agent(
-            agent_file,
-            runtime,
-            mcp_configs=mcp_configs or [],
-            start_mcp_loading=not defer_mcp_loading,
-        )
-        _phase_timings_ms["mcp_ms"] = int((time.monotonic() - _phase_t) * 1000)
-
-        if startup_progress is not None:
-            startup_progress("Restoring conversation...")
-        context = Context(session.context_file)
-        await context.restore()
-
-        if context.system_prompt is not None:
-            agent = dataclasses.replace(agent, system_prompt=context.system_prompt)
-        else:
-            await context.write_system_prompt(agent.system_prompt)
-
-        soul = KimiSoul(agent, context=context)
-
-        # Activate plan mode if requested (for new sessions or --plan flag)
-        if plan_mode and not soul.plan_mode:
-            await soul.set_plan_mode_from_manual(True)
-        elif plan_mode and soul.plan_mode:
-            # Already in plan mode from restored session, trigger activation reminder
-            soul.schedule_plan_activation_reminder()
-
-        # Create and inject hook engine
-        from kimi_cli.hooks.engine import HookEngine
-
-        hook_engine = HookEngine(config.hooks, cwd=str(session.work_dir))
-        soul.set_hook_engine(hook_engine)
-        runtime.hook_engine = hook_engine
-
-        # --- Initialize telemetry ---
-        from kimi_cli.telemetry import attach_sink, set_context
-        from kimi_cli.telemetry import disable as disable_telemetry
-
-        telemetry_disabled = not config.telemetry or get_env_bool("KIMI_DISABLE_TELEMETRY")
-        if telemetry_disabled:
-            disable_telemetry()
-        else:
-            device_id = get_device_id()
-            set_context(device_id=device_id, session_id=session.id)
-            from kimi_cli.telemetry.sink import EventSink
-            from kimi_cli.telemetry.transport import AsyncTransport
-
-            def _get_token() -> str | None:
-                return oauth.get_cached_access_token(KIMI_CODE_OAUTH_KEY)
-
-            transport = AsyncTransport(device_id=device_id, get_access_token=_get_token)
-            sink = EventSink(
-                transport,
-                version=VERSION,
-                model=model.model if model else "",
-                ui_mode=ui_mode,
-            )
-            attach_sink(sink)
-
-        from kimi_cli.telemetry import track, track_session_started_once
-        from kimi_cli.telemetry.crash import install_asyncio_handler, set_phase
-
-        # App init finished — enter runtime phase and hook asyncio crashes.
-        install_asyncio_handler()
-        set_phase("runtime")
-
-        if ui_mode != "wire":
-            track_session_started_once(ui_mode=ui_mode, resumed=resumed)
-        track(
-            "started",
+            ui_mode=ui_mode,
             resumed=resumed,
-            yolo=runtime.approval.is_yolo(),
-            afk=runtime.approval.is_afk(),
+            startup_progress=startup_progress,
         )
-        track(
-            "startup_perf",
-            duration_ms=int((time.monotonic() - _create_t0) * 1000),
-            config_ms=_phase_timings_ms.get("config_ms", 0),
-            init_ms=_phase_timings_ms.get("init_ms", 0),
-            mcp_ms=_phase_timings_ms.get("mcp_ms", 0),
-        )
-
-        return KimiCLI(soul, runtime, env_overrides, bg_refresh_task)
 
     @staticmethod
     async def _create_remote(
@@ -437,7 +238,7 @@ class KimiCLI:
 
     def __init__(
         self,
-        _soul: KimiSoul,
+        _soul: Soul,
         _runtime: Runtime,
         _env_overrides: dict[str, str],
         _bg_refresh_task: asyncio.Task[None] | None = None,
@@ -450,8 +251,8 @@ class KimiCLI:
         """Set when running against an external Wire agent (KIMI_AGENT_BIN)."""
 
     @property
-    def soul(self) -> KimiSoul:
-        """Get the KimiSoul instance."""
+    def soul(self) -> Soul:
+        """Get the Soul instance."""
         return self._soul
 
     @property
@@ -476,17 +277,6 @@ class KimiCLI:
         # so it does not outlive the CLI process.
         if self._bg_refresh_task is not None and not self._bg_refresh_task.done():
             self._bg_refresh_task.cancel()
-
-        # Close MCP client connections so stdio/WebSocket transports do not
-        # outlive the CLI process and trigger firewall warnings.
-        # In remote mode there is no local toolset/MCP (the agent owns it).
-        if isinstance(self.soul, KimiSoul):
-            try:
-                toolset = self.soul.agent.toolset
-                if isinstance(toolset, KimiToolset):
-                    await toolset.cleanup()
-            except (Exception, asyncio.CancelledError):
-                logger.warning("Error during toolset cleanup; continuing exit", exc_info=True)
 
         bg_config = self._runtime.config.background
         if bg_config.keep_alive_on_exit:
@@ -761,97 +551,7 @@ class KimiCLI:
         self, command: str | None = None, *, prefill_text: str | None = None
     ) -> bool:
         """Run the Kimi Code CLI instance with shell UI."""
-        from kimi_cli.ui.shell import Shell, WelcomeInfoItem
-
-        if self._remote_client is not None:
-            return await self._run_shell_remote(prefill_text=prefill_text, command=command)
-
-        if command is None:
-            from kimi_cli.ui.shell.update import check_update_gate
-
-            check_update_gate()
-
-        welcome_info = [
-            WelcomeInfoItem(
-                name="Directory", value=str(shorten_home(self._runtime.session.work_dir))
-            ),
-            WelcomeInfoItem(name="Session", value=self._runtime.session.id),
-        ]
-        if base_url := self._env_overrides.get("KIMI_BASE_URL"):
-            welcome_info.append(
-                WelcomeInfoItem(
-                    name="API URL",
-                    value=f"{base_url} (from KIMI_BASE_URL)",
-                    level=WelcomeInfoItem.Level.WARN,
-                )
-            )
-        if self._env_overrides.get("KIMI_API_KEY"):
-            welcome_info.append(
-                WelcomeInfoItem(
-                    name="API Key",
-                    value="****** (from KIMI_API_KEY)",
-                    level=WelcomeInfoItem.Level.WARN,
-                )
-            )
-        if not self._runtime.llm:
-            welcome_info.append(
-                WelcomeInfoItem(
-                    name="Model",
-                    value="not set, send /login to login",
-                    level=WelcomeInfoItem.Level.WARN,
-                )
-            )
-        elif "KIMI_MODEL_NAME" in self._env_overrides:
-            welcome_info.append(
-                WelcomeInfoItem(
-                    name="Model",
-                    value=f"{self._soul.model_name} (from KIMI_MODEL_NAME)",
-                    level=WelcomeInfoItem.Level.WARN,
-                )
-            )
-        else:
-            welcome_info.append(
-                WelcomeInfoItem(
-                    name="Model",
-                    value=model_display_name(
-                        self._soul.model_name,
-                        self._runtime.llm.model_config if self._runtime.llm else None,
-                    ),
-                    level=WelcomeInfoItem.Level.INFO,
-                )
-            )
-            model_name = self._soul.model_name
-            if model_name not in (
-                "kimi-for-coding",
-                "kimi-code",
-            ) and not model_name.startswith("kimi-k2"):
-                welcome_info.append(
-                    WelcomeInfoItem(
-                        name="Tip",
-                        value="send /login to use Kimi for Coding",
-                        level=WelcomeInfoItem.Level.WARN,
-                    )
-                )
-        from kimi_cli.ui.shell.migration_nudge import (
-            already_installed_text,
-            kimi_code_installed,
-            welcome_card_text,
-        )
-
-        welcome_info.append(
-            WelcomeInfoItem(
-                name="\n✨ Update",
-                value=(
-                    already_installed_text(sys.platform)
-                    if kimi_code_installed()
-                    else welcome_card_text()
-                ),
-                level=WelcomeInfoItem.Level.WARN,
-            )
-        )
-        async with self._env():
-            shell = Shell(self._soul, welcome_info=welcome_info, prefill_text=prefill_text)
-            return await shell.run(command)
+        return await self._run_shell_remote(prefill_text=prefill_text, command=command)
 
     async def _run_shell_remote(
         self,
@@ -900,18 +600,51 @@ class KimiCLI:
         *,
         final_only: bool = False,
     ) -> int:
-        """Run the Kimi Code CLI instance with print UI."""
-        from kimi_cli.ui.print import Print
+        """Run the Kimi Code CLI instance with print UI against the remote agent."""
+        from kimi_cli.soul.remote import run_remote_soul
+        from kimi_cli.ui.print.visualize import visualize
+        from kimi_cli.wire.client import WireClientError
 
-        async with self._env():
-            print_ = Print(
-                self._soul,
-                input_format,
-                output_format,
-                self._runtime.session.context_file,
-                final_only=final_only,
+        client = self._remote_client
+        if client is None:
+            raise RuntimeError("Print UI requires a remote agent (KIMI_AGENT_BIN).")
+
+        if command is None:
+            if not sys.stdin.isatty() and input_format == "text":
+                command = sys.stdin.read().strip()
+                logger.info("Read command from stdin: {command}", command=command)
+            if not command:
+                return 0
+
+        if input_format != "text":
+            raise RuntimeError(
+                f"Print input format {input_format!r} is not supported in remote mode."
             )
-            return await print_.run(command)
+
+        cancel_event = asyncio.Event()
+
+        def _handler() -> None:
+            logger.debug("SIGINT received.")
+            cancel_event.set()
+
+        loop = asyncio.get_running_loop()
+        remove_sigint = install_sigint_handler(loop, _handler)
+
+        try:
+            await run_remote_soul(
+                client,
+                command,
+                lambda wire: visualize(output_format, final_only, wire),
+                cancel_event,
+            )
+            return 0
+        except RunCancelled:
+            return 1
+        except WireClientError as e:
+            logger.error("Agent connection error: {error}", error=e)
+            return 1
+        finally:
+            remove_sigint()
 
     async def run_wire_stdio(self) -> None:
         """Run the Kimi Code CLI instance as Wire server over stdio."""

@@ -634,6 +634,10 @@ class WireServer:
             self._track_session_started(None)
 
         self._cancel_event = asyncio.Event()
+        if isinstance(self._soul, KimiSoul):
+            raise RuntimeError(
+                "Local LLM execution is disabled; run via the Rust agent (KIMI_AGENT_BIN)."
+            )
         runtime = self._soul.runtime if isinstance(self._soul, KimiSoul) else None
         try:
             await run_soul(

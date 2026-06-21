@@ -76,6 +76,9 @@ async def run_soul_checked(
     ``ChatProviderError``, generic ``Exception``) are converted to failures.
     Only ``CancelledError`` and ``RunCancelled`` are re-raised.
     """
+    raise RuntimeError(
+        "Local subagent execution is disabled; run via the Rust agent (KIMI_AGENT_BIN)."
+    )
     try:
         await run_soul(
             soul,

@@ -117,6 +117,9 @@ async def execute_side_question(
     Returns:
         (response_text, None) on success, (None, error_message) on failure.
     """
+    raise RuntimeError(
+        "Local LLM execution is disabled; run via the Rust agent (KIMI_AGENT_BIN)."
+    )
     import time
 
     from kimi_cli.telemetry import track

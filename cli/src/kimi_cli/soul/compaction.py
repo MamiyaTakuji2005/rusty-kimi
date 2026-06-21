@@ -107,6 +107,9 @@ class SimpleCompaction:
     async def compact(
         self, messages: Sequence[Message], llm: LLM, *, custom_instruction: str = ""
     ) -> CompactionResult:
+        raise RuntimeError(
+            "Local LLM execution is disabled; run via the Rust agent (KIMI_AGENT_BIN)."
+        )
         compact_message, to_preserve = self.prepare(messages, custom_instruction=custom_instruction)
         if compact_message is None:
             return CompactionResult(messages=to_preserve, usage=None)

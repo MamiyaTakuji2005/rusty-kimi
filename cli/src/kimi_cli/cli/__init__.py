@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -598,7 +599,13 @@ def kimi(
             # the saved original stderr fd.
             redirect_stderr_to_logger()
 
-            import os
+            remote_agent = os.environ.get("KIMI_AGENT_BIN")
+            if not remote_agent:
+                raise typer.BadParameter(
+                    "KIMI_AGENT_BIN is not set. Please set it to the path of the Rust agent binary "
+                    "(e.g., export KIMI_AGENT_BIN=/path/to/kimi-agent).",
+                    param_hint="KIMI_AGENT_BIN",
+                )
 
             instance = await KimiCLI.create(
                 session,
@@ -619,7 +626,7 @@ def kimi(
                 startup_progress=startup_progress.update if ui == "shell" else None,
                 defer_mcp_loading=ui == "shell" and prompt is None,
                 ui_mode=ui,
-                remote_agent=(os.environ.get("KIMI_AGENT_BIN") if ui == "shell" else None),
+                remote_agent=remote_agent,
             )
             startup_progress.stop()
 
