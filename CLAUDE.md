@@ -10,23 +10,23 @@ Two-tier system: Python CLI (TUI + wire protocol server) and Rust agent (LLM exe
 
 **Wire protocol** — the IPC channel between Python and Rust. Python sends user input; Rust sends back streamed events (TurnBegin, StepBegin, ContentPart, ToolResult, TurnEnd, etc.).
 
-## Dead Code in Python
+## Vestigial Local-Execution Code in Python
 
-The following are intentionally dead and must not be restored or modified:
+Local LLM execution was removed; the Rust agent (`KIMI_AGENT_BIN`) owns it. The Python remnants are intentionally minimal — do not rebuild a local agent loop on top of them:
 
-- **`KimiSoul._step()`** (`cli/src/kimi_cli/soul/kimisoul.py`) — raises `RuntimeError("Local LLM execution is disabled; run via the Rust agent (KIMI_AGENT_BIN).")` immediately. All code after that raise is unreachable dead code.
+- **`KimiSoul`** (`cli/src/kimi_cli/soul/kimisoul.py`) — reduced to a stub: a placeholder class plus the `SKILL_COMMAND_PREFIX` / `FLOW_COMMAND_PREFIX` constants. It exists only so `isinstance(soul, KimiSoul)` checks in the shell resolve — always `False` in remote mode, where the active soul is `RemoteSoul`. Constructing one raises `RuntimeError`.
 
-- **`KimiSoul.compact_context()`** — same: raises the same RuntimeError immediately. Dead code follows.
+- **`soul/compaction.py`** — reduced to the `estimate_text_tokens` helper used by the shim; the local `SimpleCompaction` is gone (Rust owns compaction).
 
-- **`KimiSoul._bind_plan_mode_tools()`** — explicit no-op stub. Comment says "Python-side tool implementations have been removed."
+- **Python-side tool loading** (`KimiToolset.load_tools`) — any tool path under `kimi_cli.tools.` is silently skipped; execution is delegated to the Rust agent over the wire.
 
-- **Python-side tool loading** (`KimiToolset.load_tools`) — any tool path under `kimi_cli.tools.` is silently skipped. Comment: "Python-side tool implementations have been removed; execution is delegated to the Rust agent over the wire."
+Removed entirely (do not re-add): `soul/slash.py` (local slash registry), `soul/btw.py`, and the `skill/`, `prompts/`, `agents/`, `skills/` package data — all owned by the Rust agent now.
 
-The Python kosong chat provider implementations (kimi.py, openai_compatible.py, contrib providers) exist as library code but are not used in the main execution path — the Rust agent owns the LLM call directly.
+The Python kosong chat provider implementations exist as library code but are not used in the main execution path — the Rust agent owns the LLM call directly.
 
 ## Python Cannot Run Standalone
 
-Python has no working agent loop. `KimiSoul._agent_loop()` calls `_step()` which immediately raises. The process requires `KIMI_AGENT_BIN` (the Rust binary) to function. Python's job is:
+Python has no agent loop. In remote mode the active soul is `RemoteSoul`, a thin shim over the wire connection; `KimiSoul` is a stub that raises on construction. The process requires `KIMI_AGENT_BIN` (the Rust binary) to function. Python's job is:
 
 1. Start the Rust agent subprocess
 2. Manage the session, TUI, approval prompts, hooks, MCP OAuth

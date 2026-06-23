@@ -21,13 +21,6 @@ from kimi_cli.exception import MCPConfigError, SystemPromptTemplateError
 from kimi_cli.llm import LLM
 from kimi_cli.notifications import NotificationManager
 from kimi_cli.session import Session
-from kimi_cli.skill import (
-    Skill,
-    discover_skills_from_roots,
-    format_skills_for_prompt,
-    index_skills,
-    resolve_skills_roots,
-)
 from kimi_cli.soul.approval import Approval, ApprovalState
 from kimi_cli.soul.denwarenji import DenwaRenji
 from kimi_cli.soul.toolset import KimiToolset
@@ -183,7 +176,7 @@ class Runtime:
     environment: Environment
     notifications: NotificationManager
     background_tasks: BackgroundTaskManager
-    skills: dict[str, Skill]
+    skills: dict[str, Any]
     additional_dirs: list[KaosPath]
     skills_dirs: list[KaosPath]
     subagent_store: SubagentStore | None = None
@@ -225,19 +218,11 @@ class Runtime:
             Environment.detect(),
         )
 
-        # Discover and format skills (grouped by scope for the system prompt).
-        scoped_roots = await resolve_skills_roots(
-            session.work_dir,
-            skills_dirs=skills_dirs,
-            merge_brands=config.merge_all_available_skills,
-            extra_skill_dirs=config.extra_skill_dirs or None,
-        )
-        # Canonicalize so symlinked skill directories match resolved paths
-        skills_roots_canonical = [s.root.canonical() for s in scoped_roots]
-        skills = await discover_skills_from_roots(scoped_roots)
-        skills_by_name = index_skills(skills)
-        logger.info("Discovered {count} skill(s)", count=len(skills))
-        skills_formatted = format_skills_for_prompt(skills)
+        # Skills are owned by the Rust agent now; the Python shim keeps empty
+        # placeholders so Runtime's shape is unchanged.
+        skills_roots_canonical: list[KaosPath] = []
+        skills_by_name: dict[str, Any] = {}
+        skills_formatted = "No skills found."
 
         # Restore additional directories from session state, pruning stale entries
         additional_dirs: list[KaosPath] = []
