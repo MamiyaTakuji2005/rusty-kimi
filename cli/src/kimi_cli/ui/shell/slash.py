@@ -703,8 +703,8 @@ async def undo(app: Shell, args: str):
 
 
 @registry.command
-async def fork(app: Shell, args: str):
-    """Fork the current session (copy all history to a new session)"""
+async def branch(app: Shell, args: str):
+    """Branch the current session (copy all history into a new session and switch to it)"""
     from kimi_cli.session_fork import fork_session
 
     if app.runtime is None:
@@ -716,14 +716,14 @@ async def fork(app: Shell, args: str):
         source_session_dir=session.dir,
         work_dir=session.work_dir,
         turn_index=None,
-        title_prefix="Fork",
+        title_prefix="Branch",
         source_title=session.title,
     )
 
     from kimi_cli.telemetry import track
 
     track("session_fork")
-    console.print("[green]Session forked. Switching to new session...[/green]")
+    console.print("[green]Session branched. Switching to new session...[/green]")
     raise Reload(session_id=new_session_id)
 
 

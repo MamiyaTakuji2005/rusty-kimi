@@ -26,6 +26,7 @@ use crate::soul::{
     state::write_state,
     wire_send,
 };
+use crate::tools::fork::{ForkParams, ForkTool};
 use crate::tools::utils::is_tool_rejected;
 use crate::utils::{SlashCommandInfo, parse_slash_command_call};
 use crate::wire::{
@@ -33,7 +34,7 @@ use crate::wire::{
     StepBegin, StepInterrupted, TurnBegin, TurnEnd, UserInput, WireMessage,
 };
 
-use kosong::tooling::Toolset;
+use kosong::tooling::{CallableTool2, ToolOutput, Toolset};
 
 const SKILL_COMMAND_PREFIX: &str = "skill:";
 const FLOW_COMMAND_PREFIX: &str = "flow:";
@@ -85,6 +86,7 @@ enum BuiltinSlash {
     Clear,
     Yolo,
     Model,
+    Fork,
 }
 
 fn parse_model_args(args: &str) -> (&str, bool) {
@@ -226,6 +228,12 @@ impl KimiSoul {
                 BuiltinSlash::Model,
                 vec![],
             ),
+            (
+                "fork",
+                "Spawn a background fork that shares this conversation (e.g. /fork investigate the failing test)",
+                BuiltinSlash::Fork,
+                vec![],
+            ),
         ];
 
         for (name, description, kind, aliases) in builtin {
@@ -318,6 +326,7 @@ impl KimiSoul {
                 BuiltinSlash::Clear => self.slash_clear().await,
                 BuiltinSlash::Yolo => self.slash_yolo().await,
                 BuiltinSlash::Model => self.slash_model(args).await,
+                BuiltinSlash::Fork => self.slash_fork(args).await,
             },
             Some(SlashHandler::Skill(skill)) => self.run_skill(skill, args).await,
             Some(SlashHandler::Flow(runner)) => runner.run(self, args).await,
@@ -499,6 +508,54 @@ impl KimiSoul {
                 display_name,
                 if thinking { "on" } else { "off" }
             ),
+        ))));
+        Ok(())
+    }
+
+    /// User-facing `/fork <prompt>`: spawn a background fork that shares this
+    /// conversation's context. Mirrors the `Fork` tool the agent can call, so
+    /// the user can launch one just as easily.
+    async fn slash_fork(&self, args: &str) -> anyhow::Result<()> {
+        let prompt = args.trim();
+        if prompt.is_empty() {
+            wire_send(WireMessage::ContentPart(ContentPart::Text(TextPart::new(
+                "Usage: /fork <prompt> — spawns a background fork that shares this conversation's \
+                 context and works on <prompt>. You'll be notified when it finishes.",
+            ))));
+            return Ok(());
+        }
+
+        let tool = ForkTool::new(&self.runtime);
+        let result = tool
+            .call_typed(ForkParams {
+                prompt: prompt.to_string(),
+                description: String::new(),
+            })
+            .await;
+
+        if result.is_error {
+            wire_send(WireMessage::ContentPart(ContentPart::Text(TextPart::new(
+                format!("Fork failed: {}", result.message),
+            ))));
+            return Ok(());
+        }
+
+        let output = match &result.output {
+            ToolOutput::Text(text) => text.clone(),
+            ToolOutput::Parts(_) => String::new(),
+        };
+        let task_line = output
+            .lines()
+            .find(|line| line.starts_with("Task ID:"))
+            .unwrap_or("")
+            .trim();
+        let message = if task_line.is_empty() {
+            "Forked into a background task. You'll be notified when it finishes.".to_string()
+        } else {
+            format!("Forked into a background task ({task_line}). You'll be notified when it finishes.")
+        };
+        wire_send(WireMessage::ContentPart(ContentPart::Text(TextPart::new(
+            message,
         ))));
         Ok(())
     }

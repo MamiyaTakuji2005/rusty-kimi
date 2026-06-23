@@ -548,7 +548,7 @@ def kimi(
                     session = await Session.create(work_dir, session_id)
                 else:
                     # Only count as "resumed" if the session has actual turns.
-                    # Sessions created by /new, /undo (turn 0), /fork via Reload
+                    # Sessions created by /new, /undo (turn 0), /branch via Reload
                     # may have a custom_title but no wire content — treat as startup.
                     resumed = not session.wire_file.is_empty()
                 logger.info("Resuming session: {session_id}", session_id=session.id)
