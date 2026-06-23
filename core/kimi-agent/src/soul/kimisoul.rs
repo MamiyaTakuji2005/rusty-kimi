@@ -71,6 +71,10 @@ pub struct KimiSoul {
     cached_model_name: std::sync::Mutex<String>,
     /// User inputs injected mid-turn via `steer`, consumed between steps.
     steer_queue: std::sync::Mutex<std::collections::VecDeque<UserInput>>,
+    /// Task IDs of background forks the user spawned via `/fork`. Drained at the
+    /// start of each turn: completed ones get their result injected into context
+    /// so the agent (and user) see it on the next interaction.
+    pending_fork_tasks: std::sync::Mutex<Vec<String>>,
 }
 
 enum SlashHandler {
@@ -134,6 +138,7 @@ impl KimiSoul {
             slash_handlers: HashMap::new(),
             cached_model_name,
             steer_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            pending_fork_tasks: std::sync::Mutex::new(Vec::new()),
         };
         soul.build_slash_commands();
         soul
@@ -544,20 +549,135 @@ impl KimiSoul {
             ToolOutput::Text(text) => text.clone(),
             ToolOutput::Parts(_) => String::new(),
         };
-        let task_line = output
+        let task_id = output
             .lines()
-            .find(|line| line.starts_with("Task ID:"))
-            .unwrap_or("")
-            .trim();
-        let message = if task_line.is_empty() {
-            "Forked into a background task. You'll be notified when it finishes.".to_string()
+            .find_map(|line| line.strip_prefix("Task ID:"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        // Record the fork in the parent context so the agent knows the user
+        // spawned it. Its result is delivered automatically at the next turn
+        // once it finishes (see surface_completed_forks). Without this the fork
+        // would be invisible to the agent.
+        let note = if task_id.is_empty() {
+            format!(
+                "The user spawned a background fork (a concurrent copy of you sharing this \
+                 conversation) with the prompt: \"{prompt}\". It runs independently; its result \
+                 will be delivered to you automatically once it finishes."
+            )
         } else {
-            format!("Forked into a background task ({task_line}). You'll be notified when it finishes.")
+            format!(
+                "The user spawned a background fork (a concurrent copy of you sharing this \
+                 conversation), task_id={task_id}, with the prompt: \"{prompt}\". It runs \
+                 independently; its result will be delivered to you automatically once it \
+                 finishes."
+            )
+        };
+        {
+            let mut context = self.context.lock().await;
+            context
+                .append_messages(Message::new(Role::User, vec![system(&note)]))
+                .await?;
+        }
+        if !task_id.is_empty() {
+            self.pending_fork_tasks
+                .lock()
+                .expect("pending_fork_tasks poisoned")
+                .push(task_id.clone());
+        }
+
+        let message = if task_id.is_empty() {
+            "Forked into a background task. Its result will surface on your next message."
+                .to_string()
+        } else {
+            format!(
+                "Forked into a background task (task_id={task_id}). Its result will surface on \
+                 your next message."
+            )
         };
         wire_send(WireMessage::ContentPart(ContentPart::Text(TextPart::new(
             message,
         ))));
         Ok(())
+    }
+
+    /// Drain any `/fork`-spawned background tasks that have finished, injecting
+    /// their output into the context as a system message. Called at the start of
+    /// each turn so completed forks surface on the user's next interaction.
+    /// Tasks still running are kept for a later turn.
+    async fn surface_completed_forks(&self) {
+        const MAX_FORK_OUTPUT: usize = 8000;
+
+        let pending: Vec<String> = {
+            let guard = self
+                .pending_fork_tasks
+                .lock()
+                .expect("pending_fork_tasks poisoned");
+            guard.clone()
+        };
+        if pending.is_empty() {
+            return;
+        }
+
+        let mut still_pending = Vec::new();
+        for task_id in pending {
+            let view = self.runtime.background_tasks.get(&task_id);
+            let Some(view) = view else {
+                // Unknown task (e.g. lost across restart) — drop it.
+                continue;
+            };
+            if !view.status.is_terminal() {
+                still_pending.push(task_id);
+                continue;
+            }
+
+            let output = self
+                .runtime
+                .background_tasks
+                .stdout(&task_id)
+                .and_then(|buf| buf.lock().ok().map(|b| String::from_utf8_lossy(&b).to_string()))
+                .unwrap_or_default();
+            let output = output.trim();
+            let truncated = if output.len() > MAX_FORK_OUTPUT {
+                format!(
+                    "{}\n…(truncated; call TaskOutput with task_id={task_id} for the full output)",
+                    &output[output.len() - MAX_FORK_OUTPUT..]
+                )
+            } else {
+                output.to_string()
+            };
+            let body = if truncated.is_empty() {
+                "(no output)".to_string()
+            } else {
+                truncated
+            };
+            let note = format!(
+                "Background fork task_id={task_id} finished with status {}. Its output:\n{body}",
+                view.status.as_str()
+            );
+            {
+                let mut context = self.context.lock().await;
+                if let Err(err) = context
+                    .append_messages(Message::new(Role::User, vec![system(&note)]))
+                    .await
+                {
+                    warn!("Failed to inject completed fork {task_id} into context: {err}");
+                    still_pending.push(task_id);
+                    continue;
+                }
+            }
+            // Show the user a notice too (same display path as Agent-tool
+            // completions). The wire is live during this turn, so it renders.
+            if let Some(notif) = self.runtime.background_tasks.build_notification(&task_id) {
+                wire_send(WireMessage::Notification(notif));
+            }
+        }
+
+        let mut guard = self
+            .pending_fork_tasks
+            .lock()
+            .expect("pending_fork_tasks poisoned");
+        *guard = still_pending;
     }
 
     async fn run_skill(&self, skill: &Skill, args: &str) -> anyhow::Result<()> {
@@ -1006,6 +1126,10 @@ impl Soul for KimiSoul {
         let text_input = user_message.extract_text(" ").trim().to_string();
 
         wire_send(WireMessage::TurnBegin(TurnBegin { user_input }));
+
+        // Surface any /fork-spawned background tasks that finished since the last
+        // turn, injecting their results into context before this turn runs.
+        self.surface_completed_forks().await;
 
         if let Some(command_call) = parse_slash_command_call(&text_input) {
             self.handle_slash(&command_call.name, &command_call.args)
