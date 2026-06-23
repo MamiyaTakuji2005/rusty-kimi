@@ -31,27 +31,62 @@ pub struct EditParams {
     pub regex: bool,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, JsonSchema)]
+#[schemars(schema_with = "str_replace_params_schema")]
 pub struct StrReplaceParams {
     #[schemars(
         description = "The path to the target file. Relative unless outside the workdir."
     )]
     pub path: String,
-    #[serde(deserialize_with = "deserialize_edit_list")]
-    #[schemars(schema_with = "edit_schema")]
     pub edit: Vec<EditParams>,
 }
 
-fn deserialize_edit_list<'de, D>(deserializer: D) -> Result<Vec<EditParams>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    if value.is_array() {
-        serde_json::from_value(value).map_err(serde::de::Error::custom)
-    } else {
-        let single: EditParams = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(vec![single])
+impl<'de> Deserialize<'de> for StrReplaceParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let path = value
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom("`path` is required"))?
+            .to_string();
+
+        let edit = if let Some(edit_value) = value.get("edit") {
+            if edit_value.is_array() {
+                serde_json::from_value(edit_value.clone()).map_err(serde::de::Error::custom)?
+            } else {
+                let single: EditParams = serde_json::from_value(edit_value.clone())
+                    .map_err(serde::de::Error::custom)?;
+                vec![single]
+            }
+        } else {
+            let old = value
+                .get("old")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    serde::de::Error::custom("either `edit` or `old`+`new` is required")
+                })?
+                .to_string();
+            let new = value
+                .get("new")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    serde::de::Error::custom("`new` is required when `old` is provided")
+                })?
+                .to_string();
+            let replace_all = value.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+            let regex = value.get("regex").and_then(Value::as_bool).unwrap_or(false);
+            vec![EditParams {
+                old,
+                new,
+                replace_all,
+                regex,
+            }]
+        };
+
+        Ok(StrReplaceParams { path, edit })
     }
 }
 
@@ -73,6 +108,26 @@ fn edit_schema(schema_gen: &mut SchemaGenerator) -> Schema {
         ),
     );
     Schema::from(map)
+}
+
+fn str_replace_params_schema(schema_gen: &mut SchemaGenerator) -> Schema {
+    let path_schema = serde_json::to_value(schema_gen.subschema_for::<String>()).unwrap_or(Value::Null);
+    let edit_property = serde_json::to_value(edit_schema(schema_gen)).unwrap_or(Value::Null);
+
+    let mut root = serde_json::Map::new();
+    root.insert("type".to_string(), Value::String("object".to_string()));
+    let mut props = serde_json::Map::new();
+    props.insert("path".to_string(), path_schema);
+    props.insert("edit".to_string(), edit_property);
+    root.insert("properties".to_string(), Value::Object(props));
+    root.insert(
+        "required".to_string(),
+        Value::Array(vec![
+            Value::String("path".to_string()),
+            Value::String("edit".to_string()),
+        ]),
+    );
+    Schema::from(root)
 }
 
 pub struct StrReplaceFile {
@@ -209,7 +264,6 @@ impl CallableTool2 for StrReplaceFile {
         }
     }
 }
-
 
 fn replace_first_exact(text: &str, old: &str, new: &str) -> Option<String> {
     let pos = text.find(old)?;
@@ -399,6 +453,153 @@ fn validate_capture_refs(re: &Regex, new: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Fallback parser for the common case where the model emits malformed JSON
+/// for `StrReplaceFile` (usually unescaped newlines or backslashes inside
+/// `old`/`new`).
+///
+/// Instead of trying to repair arbitrary JSON, we exploit the known structure:
+/// `path`, `old`, and `new` are extracted raw, and the actual file on disk is
+/// used as the validator via `apply_edits`/`fuzzy_replace`.
+pub(crate) fn try_parse_str_replace_fallback(raw: &str) -> Option<StrReplaceParams> {
+    // `path` is always a short string without the escaping problems that break
+    // `old`/`new`, so a simple regex is enough.
+    let path_re = Regex::new(r#""path"\s*:\s*"([^"]*)""#).ok()?;
+    let path = path_re.captures(raw)?.get(1)?.as_str().to_string();
+
+    // Extract `old` (must be followed by `,"new"`) and `new` (must be the last
+    // field before the closing brace). We search `new` starting after `old` so
+    // that an `old` value containing the literal substring `"new":` does not
+    // confuse us.
+    let (old, old_close) = extract_string_field(raw, "old", 0, Some("new"))?;
+    let (new, _) = extract_string_field(raw, "new", old_close + 1, None)?;
+
+    let replace_all = parse_bool_field(raw, "replace_all");
+    let regex = parse_bool_field(raw, "regex");
+
+    Some(StrReplaceParams {
+        path,
+        edit: vec![EditParams {
+            old: unescape_json(&old),
+            new: unescape_json(&new),
+            replace_all,
+            regex,
+        }],
+    })
+}
+
+fn parse_bool_field(raw: &str, key: &str) -> bool {
+    let pat = format!(r#""{}"\s*:\s*(true|false)"#, regex::escape(key));
+    Regex::new(&pat)
+        .ok()
+        .and_then(|re| re.captures(raw))
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str() == "true")
+        .unwrap_or(false)
+}
+
+fn extract_string_field(
+    raw: &str,
+    key: &str,
+    search_from: usize,
+    next_key: Option<&str>,
+) -> Option<(String, usize)> {
+    let key_pat = format!(r#""{}"\s*:\s*""#, regex::escape(key));
+    let key_re = Regex::new(&key_pat).ok()?;
+
+    let window = &raw[search_from..];
+    let key_match = key_re.find(window)?;
+    let open_quote = search_from + key_match.end() - 1;
+    let close_quote = find_unescaped_quote(raw, open_quote + 1)?;
+
+    // The character immediately after the closing quote must be the expected
+    // structural delimiter. This rejects ambiguous cases such as an unescaped
+    // quote inside the value: `{"old": "say "hello", "new": "bye"}`.
+    let after = &raw[close_quote + 1..];
+    match next_key {
+        Some(next) => {
+            let next_pat = format!(r#"^\s*,\s*"{}"\s*:"#, regex::escape(next));
+            let next_re = Regex::new(&next_pat).ok()?;
+            next_re.find(after)?;
+        }
+        None => {
+            // `new` may be the last field or may be followed by other flags
+            // such as `replace_all`. Either `}` or `,` is acceptable here.
+            let tail_re = Regex::new(r#"^\s*[},]"#).ok()?;
+            tail_re.find(after)?;
+        }
+    }
+
+    Some((raw[open_quote + 1..close_quote].to_string(), close_quote))
+}
+
+fn find_unescaped_quote(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = start;
+    let mut escaped = false;
+    while i < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[i] == b'\\' {
+            escaped = true;
+        } else if bytes[i] == b'"' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Undo the JSON escape sequences that are still present in a raw extracted
+/// substring. This matters when the model correctly escaped some characters
+/// but the overall JSON is still unparseable because of, e.g., an unescaped
+/// newline elsewhere.
+fn unescape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('b') => out.push('\u{0008}'),
+            Some('f') => out.push('\u{000C}'),
+            Some('/') => out.push('/'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('u') => {
+                let mut hex = String::with_capacity(4);
+                for _ in 0..4 {
+                    match chars.next() {
+                        Some(h) => hex.push(h),
+                        None => break,
+                    }
+                }
+                if hex.len() == 4 {
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(ch) = char::from_u32(code) {
+                            out.push(ch);
+                            continue;
+                        }
+                    }
+                }
+                out.push('\\');
+                out.push('u');
+                out.push_str(&hex);
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 fn apply_edits(content: &mut String, edits: &[EditParams]) -> Result<bool, String> {
     let mut changed = false;
     for e in edits {
@@ -442,4 +643,87 @@ fn apply_edits(content: &mut String, edits: &[EditParams]) -> Result<bool, Strin
         return Ok(false);
     }
     Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_literal_newlines() {
+        let raw = r#"{"path": "foo.txt", "edit": {"old": "line1
+line2", "new": "line3
+line4"}}"#;
+        let params = try_parse_str_replace_fallback(raw).unwrap();
+        assert_eq!(params.path, "foo.txt");
+        assert_eq!(params.edit.len(), 1);
+        assert_eq!(params.edit[0].old, "line1\nline2");
+        assert_eq!(params.edit[0].new, "line3\nline4");
+    }
+
+    #[test]
+    fn fallback_escaped_quotes() {
+        let raw = r#"{"path": "foo.txt", "edit": {"old": "say \"hello\"", "new": "say \"bye\""}}"#;
+        let params = try_parse_str_replace_fallback(raw).unwrap();
+        assert_eq!(params.edit[0].old, r#"say "hello""#);
+        assert_eq!(params.edit[0].new, r#"say "bye""#);
+    }
+
+    #[test]
+    fn fallback_unescaped_quote_is_rejected() {
+        let raw = r#"{"path": "foo.txt", "edit": {"old": "say "hello"", "new": "bye"}}"#;
+        assert!(try_parse_str_replace_fallback(raw).is_none());
+    }
+
+    #[test]
+    fn fallback_array_edit_wrapper() {
+        let raw = r#"{"path": "foo.txt", "edit": [{"old": "a", "new": "b"}]}"#;
+        let params = try_parse_str_replace_fallback(raw).unwrap();
+        assert_eq!(params.path, "foo.txt");
+        assert_eq!(params.edit[0].old, "a");
+        assert_eq!(params.edit[0].new, "b");
+    }
+
+    #[test]
+    fn fallback_preserves_replace_all() {
+        let raw = r#"{"path": "foo.txt", "edit": {"old": "a", "new": "b", "replace_all": true}}"#;
+        let params = try_parse_str_replace_fallback(raw).unwrap();
+        assert!(params.edit[0].replace_all);
+    }
+}
+
+
+#[cfg(test)]
+mod flat_shape_tests {
+    use super::*;
+
+    #[test]
+    fn flat_shape_single_edit() {
+        let raw = r#"{"path": "foo.txt", "old": "a", "new": "b"}"#;
+        let params: StrReplaceParams = serde_json::from_str(raw).unwrap();
+        assert_eq!(params.path, "foo.txt");
+        assert_eq!(params.edit.len(), 1);
+        assert_eq!(params.edit[0].old, "a");
+        assert_eq!(params.edit[0].new, "b");
+        assert!(!params.edit[0].replace_all);
+        assert!(!params.edit[0].regex);
+    }
+
+    #[test]
+    fn flat_shape_with_flags() {
+        let raw = r#"{"path": "foo.txt", "old": "a", "new": "b", "replace_all": true, "regex": true}"#;
+        let params: StrReplaceParams = serde_json::from_str(raw).unwrap();
+        assert!(params.edit[0].replace_all);
+        assert!(params.edit[0].regex);
+    }
+
+    #[test]
+    fn wrapper_shape_still_works() {
+        let raw = r#"{"path": "foo.txt", "edit": {"old": "a", "new": "b"}}"#;
+        let params: StrReplaceParams = serde_json::from_str(raw).unwrap();
+        assert_eq!(params.path, "foo.txt");
+        assert_eq!(params.edit.len(), 1);
+        assert_eq!(params.edit[0].old, "a");
+        assert_eq!(params.edit[0].new, "b");
+    }
 }

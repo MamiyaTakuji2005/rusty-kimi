@@ -30,6 +30,7 @@ use crate::exception::{InvalidToolError, MCPConfigError, MCPRuntimeError};
 use crate::mcp::{get_mcp_credential_store, has_oauth_tokens};
 use crate::soul::agent::Runtime;
 use crate::soul::get_current_wire_or_none;
+use crate::tools::file::{try_parse_str_replace_fallback, try_parse_write_file_fallback, WriteMode};
 use crate::tools::utils::tool_rejected_error;
 use crate::tools::{ToolDeps, load_tool};
 use crate::wire::ToolCallRequest;
@@ -255,10 +256,49 @@ impl Toolset for KimiToolset {
         let args: Value = match serde_json::from_str(&arguments) {
             Ok(value) => value,
             Err(err) => {
-                return ToolResultFuture::Immediate(ToolResult {
-                    tool_call_id: tool_call.id,
-                    return_value: tool_parse_error(&err.to_string()),
-                });
+                // Models often fail to escape multi-line strings in StrReplaceFile's
+                // `old`/`new` arguments. Try a tool-specific raw extractor before
+                // giving up; the file on disk will validate the extraction later.
+                if tool_call.function.name == "StrReplaceFile" {
+                    if let Some(params) = try_parse_str_replace_fallback(&arguments) {
+                        serde_json::json!({
+                            "path": params.path,
+                            "edit": [{
+                                "old": params.edit[0].old,
+                                "new": params.edit[0].new,
+                                "replace_all": params.edit[0].replace_all,
+                                "regex": params.edit[0].regex,
+                            }]
+                        })
+                    } else {
+                        return ToolResultFuture::Immediate(ToolResult {
+                            tool_call_id: tool_call.id,
+                            return_value: tool_parse_error(&err.to_string()),
+                        });
+                    }
+                } else if tool_call.function.name == "WriteFile" {
+                    if let Some(params) = try_parse_write_file_fallback(&arguments) {
+                        let mode_str = match params.mode {
+                            WriteMode::Overwrite => "overwrite",
+                            WriteMode::Append => "append",
+                        };
+                        serde_json::json!({
+                            "path": params.path,
+                            "content": params.content,
+                            "mode": mode_str,
+                        })
+                    } else {
+                        return ToolResultFuture::Immediate(ToolResult {
+                            tool_call_id: tool_call.id,
+                            return_value: tool_parse_error(&err.to_string()),
+                        });
+                    }
+                } else {
+                    return ToolResultFuture::Immediate(ToolResult {
+                        tool_call_id: tool_call.id,
+                        return_value: tool_parse_error(&err.to_string()),
+                    });
+                }
             }
         };
 

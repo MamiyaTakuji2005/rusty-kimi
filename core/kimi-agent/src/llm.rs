@@ -252,12 +252,13 @@ pub async fn create_llm(
                     kwargs.insert("max_tokens".to_string(), Value::from(parsed));
                 }
             }
-            if !kwargs.is_empty() {
-                // Apply generation kwargs
-            }
+            let openai_compatible = if !kwargs.is_empty() {
+                openai_compatible.with_generation_kwargs(kwargs)
+            } else {
+                openai_compatible
+            };
             if let Some(extra) = &provider.extra_body {
-                let openai_compatible = openai_compatible.with_extra_body(extra.clone());
-                Box::new(openai_compatible)
+                Box::new(openai_compatible.with_extra_body(extra.clone()))
             } else {
                 Box::new(openai_compatible)
             }

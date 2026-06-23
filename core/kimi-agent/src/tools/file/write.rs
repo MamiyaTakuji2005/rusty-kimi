@@ -1,4 +1,5 @@
 use kaos::KaosPath;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -157,4 +158,98 @@ impl CallableTool2 for WriteFile {
             extras: None,
         }
     }
+}
+
+/// Fallback parser for when the model emits malformed JSON for `WriteFile`
+/// (typically unescaped newlines or backslashes inside `content`).
+///
+/// `path` and `mode` are short fields that never cause escaping issues.
+/// `content` is extracted raw using an escape-aware quote scan, then
+/// partially unescaped to handle the mixed case where the model correctly
+/// escaped some sequences but left others bare.
+pub(crate) fn try_parse_write_file_fallback(raw: &str) -> Option<WriteParams> {
+    let path_re = Regex::new(r#""path"\s*:\s*"([^"]*)""#).ok()?;
+    let path = path_re.captures(raw)?.get(1)?.as_str().to_string();
+
+    let content = extract_content_field(raw)?;
+
+    let mode = Regex::new(r#""mode"\s*:\s*"(overwrite|append)""#)
+        .ok()
+        .and_then(|re| re.captures(raw))
+        .and_then(|caps| caps.get(1))
+        .map(|m| if m.as_str() == "append" { WriteMode::Append } else { WriteMode::Overwrite })
+        .unwrap_or(WriteMode::Overwrite);
+
+    Some(WriteParams { path, content, mode })
+}
+
+fn extract_content_field(raw: &str) -> Option<String> {
+    let key_re = Regex::new(r#""content"\s*:\s*""#).ok()?;
+    let m = key_re.find(raw)?;
+    let open = m.end() - 1;
+    let close = write_find_close_quote(raw, open + 1)?;
+    // Structural check: after the closing " must come whitespace then } or ,
+    let after = raw[close + 1..].trim_start();
+    if !after.starts_with('}') && !after.starts_with(',') {
+        return None;
+    }
+    Some(write_unescape(&raw[open + 1..close]))
+}
+
+fn write_find_close_quote(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = start;
+    let mut escaped = false;
+    while i < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[i] == b'\\' {
+            escaped = true;
+        } else if bytes[i] == b'"' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn write_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('b') => out.push('\u{0008}'),
+            Some('f') => out.push('\u{000C}'),
+            Some('u') => {
+                let mut hex = String::with_capacity(4);
+                for _ in 0..4 {
+                    if let Some(h) = chars.next() { hex.push(h); }
+                }
+                if hex.len() == 4 {
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(ch) = char::from_u32(code) {
+                            out.push(ch);
+                            continue;
+                        }
+                    }
+                }
+                out.push('\\');
+                out.push('u');
+                out.push_str(&hex);
+            }
+            Some(other) => { out.push('\\'); out.push(other); }
+            None => out.push('\\'),
+        }
+    }
+    out
 }

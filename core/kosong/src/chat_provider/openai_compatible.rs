@@ -200,7 +200,7 @@ impl ChatProvider for OpenAiCompatible {
             body.insert("stream_options".to_string(), json!({"include_usage": true}));
         }
         let mut generation_kwargs = Map::new();
-        generation_kwargs.insert("max_tokens".to_string(), Value::from(4096));
+        generation_kwargs.insert("max_tokens".to_string(), Value::from(32768));
         for (k, v) in &self.generation_kwargs {
             generation_kwargs.insert(k.clone(), v.clone());
         }

@@ -17,66 +17,46 @@ use super::GREP_DESC;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GrepParams {
-    #[schemars(description = "The regular expression pattern to search for in file contents.")]
+    #[schemars(description = "Regex pattern to search for.")]
     pub pattern: String,
     #[serde(default)]
-    #[schemars(
-        description = "File or directory to search in. Defaults to the working directory. Accepts absolute or relative paths."
-    )]
+    #[schemars(description = "Search root. Defaults to the working directory.")]
     pub path: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Glob pattern to filter files (e.g. `*.js`, `*.{ts,tsx}`). No filter by default."
-    )]
+    #[schemars(description = "Glob filter, e.g. `*.rs`.")]
     pub glob: Option<String>,
     #[serde(default = "default_output_mode")]
     #[schemars(
-        description = "`content`: show matching lines (supports `-B`/`-A`/`-C`/`-n`/`head_limit`); `files_with_matches`: one file path per match (default); `count_matches`: per-file match count.",
+        description = "Output mode: `files_with_matches` (default), `content`, or `count_matches`.",
         default = "default_output_mode"
     )]
     pub output_mode: String,
     #[serde(default, rename = "-B")]
-    #[schemars(
-        description = "Lines of context before each match. Requires `output_mode: content`."
-    )]
+    #[schemars(description = "Lines of context before each match.")]
     pub before_context: Option<usize>,
     #[serde(default, rename = "-A")]
-    #[schemars(
-        description = "Lines of context after each match. Requires `output_mode: content`."
-    )]
+    #[schemars(description = "Lines of context after each match.")]
     pub after_context: Option<usize>,
     #[serde(default, rename = "-C")]
-    #[schemars(
-        description = "Lines of context before AND after each match. Requires `output_mode: content`."
-    )]
+    #[schemars(description = "Lines of context before and after each match.")]
     pub context: Option<usize>,
     #[serde(default, rename = "-n")]
-    #[schemars(
-        description = "Show line numbers in output. Requires `output_mode: content`."
-    )]
+    #[schemars(description = "Show line numbers.")]
     pub line_number: bool,
     #[serde(default, rename = "-i")]
     #[schemars(description = "Case-insensitive search.")]
     pub ignore_case: bool,
     #[serde(default, rename = "-F")]
-    #[schemars(
-        description = "Treat `pattern` as a literal string rather than a regex (fixed strings). Useful when searching for text that contains regex metacharacters."
-    )]
+    #[schemars(description = "Treat pattern as a literal string.")]
     pub fixed_strings: bool,
     #[serde(default, rename = "type")]
-    #[schemars(
-        description = "File type to search. Examples: rust, python, js, ts, go, java, cpp, c. More efficient than `glob` for standard file types."
-    )]
+    #[schemars(description = "File type filter, e.g. `rust`, `python`.")]
     pub file_type: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Limit output to first N lines. Works across all output modes."
-    )]
+    #[schemars(description = "Limit output to the first N lines.")]
     pub head_limit: Option<usize>,
     #[serde(default)]
-    #[schemars(
-        description = "Enable multiline mode: `.` matches newlines and the pattern can span lines."
-    )]
+    #[schemars(description = "Enable multiline regex mode.")]
     pub multiline: bool,
 }
 
