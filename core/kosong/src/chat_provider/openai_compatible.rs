@@ -166,7 +166,10 @@ impl ChatProvider for OpenAiCompatible {
                 "high" => Some(ThinkingEffort::High),
                 _ => Some(ThinkingEffort::Off),
             },
-            _ => None,
+            // Absent or Null reasoning_effort (the latter is what with_thinking(Off)
+            // writes) means thinking is off — not "unknown" — so callers (and the UI
+            // thinking indicator) can distinguish off from on instead of going stale.
+            _ => Some(ThinkingEffort::Off),
         }
     }
 
