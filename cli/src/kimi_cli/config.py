@@ -51,6 +51,8 @@ class LLMProvider(BaseModel):
     when unset. Use an empty string to disable reasoning round-tripping."""
     oauth: OAuthRef | None = None
     """OAuth credential reference (do not store tokens here)."""
+    extra_body: dict | None = None
+    """Extra fields merged into the API request body (e.g. temperature, top_p)."""
 
     @field_serializer("api_key", when_used="json")
     def dump_secret(self, v: SecretStr):

@@ -728,6 +728,7 @@ async def fork(app: Shell, args: str):
 
 
 from . import (  # noqa: E402
+    compact_v2,  # noqa: F401 # type: ignore[reportUnusedImport]
     debug,  # noqa: F401 # type: ignore[reportUnusedImport]
     export_import,  # noqa: F401 # type: ignore[reportUnusedImport]
     oauth,  # noqa: F401 # type: ignore[reportUnusedImport]

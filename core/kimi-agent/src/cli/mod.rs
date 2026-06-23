@@ -452,9 +452,11 @@ async fn resolve_session(
 }
 
 async fn post_run(session: &Session) -> Result<()> {
+    use crate::metadata::normalize_path_string;
     let mut metadata = load_metadata().await;
+    let normalized_session_path = normalize_path_string(&session.work_dir.to_string());
     let mut index = metadata.work_dirs.iter().position(|meta| {
-        meta.path == session.work_dir.to_string() && meta.kaos == session.work_dir_meta.kaos
+        normalize_path_string(&meta.path) == normalized_session_path && meta.kaos == session.work_dir_meta.kaos
     });
 
     if index.is_none() {

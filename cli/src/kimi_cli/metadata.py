@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from hashlib import md5
 from pathlib import Path
 
@@ -14,6 +15,11 @@ from kimi_cli.utils.io import atomic_json_write
 from kimi_cli.utils.logging import logger
 
 
+def _normalize_path(s: str) -> str:
+    """Lowercase on Windows so Python and Rust agree on session directory hashes."""
+    return s.lower() if sys.platform == "win32" else s
+
+
 def get_metadata_file() -> Path:
     return get_share_dir() / "kimi.json"
 
@@ -22,7 +28,7 @@ class WorkDirMeta(BaseModel):
     """Metadata for a work directory."""
 
     path: str
-    """The full path of the work directory."""
+    """The full path of the work directory (normalized to lowercase on Windows)."""
 
     kaos: str = local_kaos.name
     """The name of the KAOS where the work directory is located."""
@@ -33,7 +39,8 @@ class WorkDirMeta(BaseModel):
     @property
     def sessions_dir(self) -> Path:
         """The directory to store sessions for this work directory."""
-        path_md5 = md5(self.path.encode(encoding="utf-8")).hexdigest()
+        normalized = _normalize_path(self.path)
+        path_md5 = md5(normalized.encode(encoding="utf-8")).hexdigest()
         dir_basename = path_md5 if self.kaos == local_kaos.name else f"{self.kaos}_{path_md5}"
         session_dir = get_share_dir() / "sessions" / dir_basename
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -50,14 +57,15 @@ class Metadata(BaseModel):
 
     def get_work_dir_meta(self, path: KaosPath) -> WorkDirMeta | None:
         """Get the metadata for a work directory."""
+        normalized = _normalize_path(str(path))
         for wd in self.work_dirs:
-            if wd.path == str(path) and wd.kaos == get_current_kaos().name:
+            if _normalize_path(wd.path) == normalized and wd.kaos == get_current_kaos().name:
                 return wd
         return None
 
     def new_work_dir_meta(self, path: KaosPath) -> WorkDirMeta:
         """Create a new work directory metadata."""
-        wd_meta = WorkDirMeta(path=str(path), kaos=get_current_kaos().name)
+        wd_meta = WorkDirMeta(path=_normalize_path(str(path)), kaos=get_current_kaos().name)
         self.work_dirs.append(wd_meta)
         return wd_meta
 
