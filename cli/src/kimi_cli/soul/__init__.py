@@ -74,7 +74,12 @@ def format_context_status(
     max_context_tokens: int = 0,
 ) -> str:
     """Format context status string for display in status bar."""
-    bounded = max(0.0, min(context_usage, 1.0))
+    if max_context_tokens > 0 and context_tokens > 0:
+        # Recompute from actual token counts so the percentage stays correct
+        # even when context_usage is stale (e.g. from a different model's session).
+        bounded = min(context_tokens / max_context_tokens, 1.0)
+    else:
+        bounded = max(0.0, min(context_usage, 1.0))
     if max_context_tokens > 0:
         used = format_token_count(context_tokens)
         total = format_token_count(max_context_tokens)

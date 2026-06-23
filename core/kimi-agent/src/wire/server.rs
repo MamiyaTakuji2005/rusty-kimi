@@ -504,6 +504,18 @@ impl WireServer {
         let cancelled = cancel_token.is_cancelled();
         *self.cancel_token.lock().await = None;
 
+        // Emit a fresh StatusUpdate after replay so Python receives the current
+        // model's max_context_tokens (and recomputed ratio), overriding any stale
+        // values that came from the old wire.jsonl. This fixes the "wrong percentage
+        // on resume" and "stale max context" display bugs.
+        if !cancelled {
+            let status_msg = self.soul.current_status_update();
+            let event = build_event_message(WireMessage::StatusUpdate(status_msg));
+            let _ = self
+                .write_queue
+                .put_nowait(serde_json::to_value(&event).unwrap_or(Value::Null));
+        }
+
         let status = if cancelled {
             statuses::CANCELLED
         } else {

@@ -385,18 +385,18 @@ impl KimiSoul {
         Ok(())
     }
 
-    fn send_status_update(&self) {
+    pub fn current_status_update(&self) -> StatusUpdate {
         let (context_usage, context_tokens, max_context_tokens) =
             if let Ok(guard) = self.runtime.llm.try_read() {
                 if let Some(llm) = guard.as_ref() {
                     match self.context.try_lock() {
                         Ok(context) => {
                             let n = context.token_count();
-                            (
-                                n as f64 / llm.max_context_size as f64,
-                                Some(n as i64),
-                                Some(llm.max_context_size),
-                            )
+                            // Send None for context_tokens when count is 0 so the Python
+                            // merge logic retains the previously-displayed value (e.g. from
+                            // wire replay) rather than zeroing it out.
+                            let tokens = if n > 0 { Some(n as i64) } else { None };
+                            (n as f64 / llm.max_context_size as f64, tokens, Some(llm.max_context_size))
                         }
                         Err(_) => (0.0, None, None),
                     }
@@ -406,7 +406,7 @@ impl KimiSoul {
             } else {
                 (0.0, None, None)
             };
-        let status = StatusUpdate {
+        StatusUpdate {
             context_usage: Some(context_usage),
             context_tokens,
             max_context_tokens,
@@ -415,8 +415,11 @@ impl KimiSoul {
             model: Some(self.cached_model_name.lock().unwrap().clone()),
             yolo_enabled: Some(self.runtime.approval.is_yolo()),
             thinking: self.thinking(),
-        };
-        wire_send(WireMessage::StatusUpdate(status));
+        }
+    }
+
+    fn send_status_update(&self) {
+        wire_send(WireMessage::StatusUpdate(self.current_status_update()));
     }
 
     async fn slash_yolo(&self) -> anyhow::Result<()> {
