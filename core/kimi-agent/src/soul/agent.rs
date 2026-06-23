@@ -80,6 +80,10 @@ pub struct Runtime {
     pub background_tasks: BackgroundTaskManager,
     pub todos: Arc<std::sync::Mutex<Vec<TodoItem>>>,
     pub cached_kaos: Arc<CachedKaos>,
+    /// Resolved agent spec file this runtime was started with. Used by the
+    /// `Fork` tool to spawn a child running the same agent (system prompt +
+    /// tools) as the parent.
+    pub agent_file: std::path::PathBuf,
 }
 
 impl Runtime {
@@ -89,6 +93,7 @@ impl Runtime {
         session: Session,
         yolo: bool,
         skills_dir: Option<KaosPath>,
+        agent_file: std::path::PathBuf,
     ) -> Runtime {
         let work_dir = session.work_dir.clone();
 
@@ -153,6 +158,7 @@ impl Runtime {
             background_tasks: BackgroundTaskManager::new(tasks_dir, session_id),
             todos: Arc::new(std::sync::Mutex::new(Vec::new())),
             cached_kaos,
+            agent_file,
         }
     }
 

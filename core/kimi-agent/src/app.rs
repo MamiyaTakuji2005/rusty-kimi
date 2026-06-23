@@ -132,11 +132,13 @@ impl KimiCLI {
             .map_err(anyhow::Error::new)?
             .map(Arc::new);
 
-        let runtime = Runtime::create(config, llm, session, yolo, skills_dir).await;
-
         let agent_file = agent_file
             .map(|p| p.to_path_buf())
             .unwrap_or_else(default_agent_file);
+
+        let runtime =
+            Runtime::create(config, llm, session, yolo, skills_dir, agent_file.clone()).await;
+
         let agent = load_agent(&agent_file, runtime.clone(), &mcp_configs, &extra_system_prompt_args).await?;
 
         let mut context = Context::new(runtime.session.context_file.clone());

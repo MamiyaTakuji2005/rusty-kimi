@@ -31,6 +31,13 @@ def extract_key_argument(json_content: str | streamingjson.Lexer, tool_name: str
             if not isinstance(curr_args, dict) or not curr_args.get("description"):
                 return None
             key_argument = str(curr_args["description"])
+        case "Fork":
+            if not isinstance(curr_args, dict):
+                return None
+            label = curr_args.get("description") or curr_args.get("prompt")
+            if not label:
+                return None
+            key_argument = str(label)
         case "SendDMail":
             return None
         case "Think":

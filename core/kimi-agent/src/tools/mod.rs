@@ -15,6 +15,7 @@ pub mod utils;
 pub mod agent;
 pub mod dmail;
 pub mod file;
+pub mod fork;
 pub mod shell;
 pub mod snapshot;
 pub mod task;
@@ -79,6 +80,9 @@ pub fn load_tool(
         "kimi_cli.tools.agent:Agent" => {
             Ok(Some(Arc::new(agent::AgentTool::new(deps.runtime))))
         }
+        "kimi_cli.tools.fork:Fork" => {
+            Ok(Some(Arc::new(fork::ForkTool::new(deps.runtime))))
+        }
         "kimi_cli.tools.snapshot:Undo" => {
             Ok(Some(Arc::new(snapshot::Undo::new(deps.runtime))))
         }
@@ -94,6 +98,7 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
     let is_known = matches!(
         tool_name,
         "Agent"
+            | "Fork"
             | "SendDMail"
             | "Think"
             | "SetTodoList"
@@ -122,6 +127,7 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
     }
     let key_argument = match tool_name {
         "Agent" => value.get("agent_file")?.as_str()?.to_string(),
+        "Fork" => value.get("prompt")?.as_str()?.to_string(),
         "SendDMail" => return None,
         "Think" => value.get("thought")?.as_str()?.to_string(),
         "SetTodoList" => return None,
