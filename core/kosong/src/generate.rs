@@ -2,7 +2,7 @@ use crate::chat_provider::{ChatProvider, ChatProviderError, ChatProviderErrorKin
 use crate::message::{Message, Role, StreamedMessagePart, ToolCall};
 use crate::tooling::Tool;
 use tokio::sync::mpsc;
-use tracing::trace;
+use tracing::{trace, warn};
 
 pub struct GenerateResult {
     pub id: Option<String>,
@@ -94,8 +94,14 @@ fn append_part(
                 cb(tool_call);
             }
         }
-        StreamedMessagePart::ToolCallPart(_) => {
-            // orphaned tool call part; ignore
+        StreamedMessagePart::ToolCallPart(part) => {
+            // An argument fragment with no preceding ToolCall start. With the
+            // index-keyed provider assembly this should never happen; if it does
+            // it means a tool call is being lost, so make it loud.
+            warn!(
+                "kosong: dropping orphaned ToolCallPart (no ToolCall start) — a tool call may be lost: {:?}",
+                part.arguments_part
+            );
         }
     }
 }

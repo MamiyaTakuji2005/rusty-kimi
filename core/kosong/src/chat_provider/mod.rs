@@ -4,12 +4,62 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::message::{Message, StreamedMessagePart};
+use crate::message::{Message, StreamedMessagePart, ToolCall, ToolCallFunction};
 use crate::tooling::Tool;
 
 pub mod echo;
 pub mod kimi;
 pub mod openai_compatible;
+
+/// Merge one streamed `tool_calls` delta entry into an index-keyed accumulator.
+///
+/// OpenAI-style streaming sends tool calls as deltas correlated by an `index`
+/// field: the first delta for an index carries `id`/`function.name`, and later
+/// deltas carry `function.arguments` fragments. Assembling by adjacency (relying
+/// on the name landing in the first fragment) silently loses calls when a
+/// provider fragments differently; keying by `index` is robust to that and to
+/// interleaved parallel tool calls.
+pub(crate) fn accumulate_tool_call_delta(acc: &mut Vec<ToolCall>, tc: &serde_json::Value) {
+    let index = tc
+        .get("index")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .max(0) as usize;
+    while acc.len() <= index {
+        acc.push(ToolCall {
+            kind: "function".to_string(),
+            id: String::new(),
+            function: ToolCallFunction {
+                name: String::new(),
+                arguments: None,
+            },
+            extras: None,
+        });
+    }
+    let call = &mut acc[index];
+    if let Some(id) = tc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        call.id = id.to_string();
+    }
+    if let Some(function) = tc.get("function") {
+        if let Some(name) = function
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            call.function.name = name.to_string();
+        }
+        if let Some(args) = function.get("arguments").and_then(|v| v.as_str()) {
+            match &mut call.function.arguments {
+                Some(existing) => existing.push_str(args),
+                None => call.function.arguments = Some(args.to_string()),
+            }
+        }
+    }
+}
 
 #[async_trait]
 pub trait StreamedMessage: Send {

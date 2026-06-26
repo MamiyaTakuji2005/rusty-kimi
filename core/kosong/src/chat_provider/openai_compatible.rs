@@ -17,7 +17,6 @@ use crate::chat_provider::{
 };
 use crate::message::{
     ContentPart, Message, StreamedMessagePart, TextPart, ThinkPart, ToolCall, ToolCallFunction,
-    ToolCallPart,
 };
 use crate::tooling::Tool;
 
@@ -287,6 +286,16 @@ pub struct OpenAiCompatibleStreamedMessage {
     parts: VecDeque<StreamedMessagePart>,
     id: Option<String>,
     usage: Option<TokenUsage>,
+    /// True once the provider signalled completion (a `finish_reason` chunk or
+    /// `[DONE]`). If the byte stream ends without this, the connection was cut
+    /// early (e.g. a slow response dropped by the provider gateway) and the
+    /// partial response must NOT be treated as complete.
+    finished: bool,
+    /// Tool calls accumulated by their streaming `index`, assembled here rather
+    /// than by adjacency in `generate.rs` (robust to late names / interleaved
+    /// parallel calls). Flushed as complete `ToolCall` parts once `finished`.
+    tool_acc: Vec<ToolCall>,
+    tools_flushed: bool,
 }
 
 impl OpenAiCompatibleStreamedMessage {
@@ -298,6 +307,9 @@ impl OpenAiCompatibleStreamedMessage {
             parts: VecDeque::new(),
             id: None,
             usage: None,
+            finished: false,
+            tool_acc: Vec::new(),
+            tools_flushed: false,
         }
     }
 
@@ -312,6 +324,22 @@ impl OpenAiCompatibleStreamedMessage {
             parts: parts.into(),
             id,
             usage,
+            finished: true,
+            tool_acc: Vec::new(),
+            tools_flushed: true,
+        }
+    }
+
+    /// Emit the index-accumulated tool calls as complete `ToolCall` parts.
+    fn flush_tool_calls(&mut self) {
+        for mut call in self.tool_acc.drain(..) {
+            if call.function.name.is_empty() {
+                continue; // padding/malformed slot with no name
+            }
+            if call.id.is_empty() {
+                call.id = Uuid::new_v4().to_string();
+            }
+            self.parts.push_back(StreamedMessagePart::ToolCall(call));
         }
     }
 
@@ -333,8 +361,29 @@ impl OpenAiCompatibleStreamedMessage {
         }
         if let Some(choices) = value.get("choices").and_then(|v| v.as_array()) {
             for choice in choices {
+                if let Some(fr) = choice
+                    .get("finish_reason")
+                    .filter(|v| !v.is_null())
+                    .and_then(|v| v.as_str())
+                {
+                    self.finished = true;
+                    tracing::debug!("openai_compatible stream finish_reason={fr}");
+                } else if choice
+                    .get("finish_reason")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false)
+                {
+                    self.finished = true;
+                }
                 if let Some(delta) = choice.get("delta") {
                     ingest_delta(delta, &mut self.parts);
+                    if let Some(tool_calls) =
+                        delta.get("tool_calls").and_then(|v| v.as_array())
+                    {
+                        for tc in tool_calls {
+                            super::accumulate_tool_call_delta(&mut self.tool_acc, tc);
+                        }
+                    }
                 }
             }
         }
@@ -349,9 +398,31 @@ impl StreamedMessage for OpenAiCompatibleStreamedMessage {
             if let Some(part) = self.parts.pop_front() {
                 return Ok(Some(part));
             }
+            // Parts drained. If the provider signalled completion, flush the
+            // index-accumulated tool calls (once) then we're done.
+            if self.finished {
+                if !self.tools_flushed {
+                    self.tools_flushed = true;
+                    self.flush_tool_calls();
+                    continue;
+                }
+                self.stream = None;
+                return Ok(None);
+            }
             let stream = match &mut self.stream {
                 Some(stream) => stream,
-                None => return Ok(None),
+                None => {
+                    // Stream gone but never marked finished: the connection was
+                    // cut early (slow responses dropped by the provider gateway).
+                    // Surface as a retryable Connection error instead of silently
+                    // returning a truncated response.
+                    return Err(ChatProviderError::new(
+                        ChatProviderErrorKind::Connection,
+                        "stream ended before completion (no finish_reason or [DONE]); \
+                         connection closed early"
+                            .to_string(),
+                    ));
+                }
             };
             match stream.next().await {
                 Some(Ok(bytes)) => {
@@ -365,8 +436,9 @@ impl StreamedMessage for OpenAiCompatibleStreamedMessage {
                         }
                         if let Some(data) = line.strip_prefix("data: ") {
                             if data.trim() == "[DONE]" {
+                                self.finished = true;
                                 self.stream = None;
-                                return Ok(None);
+                                break;
                             }
                             let value: Value = serde_json::from_str(data).map_err(|err| {
                                 ChatProviderError::new(
@@ -380,8 +452,9 @@ impl StreamedMessage for OpenAiCompatibleStreamedMessage {
                 }
                 Some(Err(err)) => return Err(map_reqwest_error(err)),
                 None => {
+                    // Mark the stream gone; the top-of-loop `finished` check
+                    // decides clean completion (flush) vs premature close (error).
                     self.stream = None;
-                    return Ok(None);
                 }
             }
         }
@@ -545,13 +618,9 @@ fn ingest_delta(delta: &Value, parts: &mut VecDeque<StreamedMessagePart>) {
             TextPart::new(content),
         )));
     }
-    if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-        for tool_call in tool_calls {
-            if let Some(part) = parse_tool_call_delta(tool_call) {
-                parts.push_back(part);
-            }
-        }
-    }
+    // Tool-call deltas are NOT handled here — they are accumulated by `index`
+    // in OpenAiCompatibleStreamedMessage::ingest_chunk and flushed as complete
+    // ToolCall parts on completion (see accumulate_tool_call_delta).
 }
 
 fn parse_tool_call(tool_call: &Value) -> Option<ToolCall> {
@@ -572,42 +641,6 @@ fn parse_tool_call(tool_call: &Value) -> Option<ToolCall> {
         function: ToolCallFunction { name, arguments },
         extras: None,
     })
-}
-
-fn parse_tool_call_delta(tool_call: &Value) -> Option<StreamedMessagePart> {
-    let function = tool_call.get("function")?;
-    let name = function
-        .get("name")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    let arguments = function
-        .get("arguments")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    if let Some(name) = name {
-        let id = tool_call
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let call = ToolCall {
-            kind: "function".to_string(),
-            id,
-            function: ToolCallFunction {
-                name: name.to_string(),
-                arguments: arguments.map(|s| s.to_string()),
-            },
-            extras: None,
-        };
-        return Some(StreamedMessagePart::ToolCall(call));
-    }
-    if let Some(arguments) = arguments {
-        let part = ToolCallPart {
-            arguments_part: Some(arguments.to_string()),
-        };
-        return Some(StreamedMessagePart::ToolCallPart(part));
-    }
-    None
 }
 
 fn parse_usage(value: &Value) -> Option<TokenUsage> {
@@ -650,20 +683,38 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_tool_call_delta_with_index() {
-        let tool_call = json!({
-            "index": 0,
-            "function": {
-                "name": "test_func"
-            }
-        });
-        let result = parse_tool_call_delta(&tool_call);
-        assert!(result.is_some());
-        if let Some(StreamedMessagePart::ToolCall(call)) = result {
-            assert_eq!(call.function.name, "test_func");
-        } else {
-            panic!("Expected ToolCall");
-        }
+    fn test_accumulate_tool_call_delta_by_index() {
+        let mut acc = Vec::new();
+        crate::chat_provider::accumulate_tool_call_delta(
+            &mut acc,
+            &json!({"index": 0, "id": "call_1", "function": {"name": "test_func", "arguments": "{\"a\":"}}),
+        );
+        crate::chat_provider::accumulate_tool_call_delta(
+            &mut acc,
+            &json!({"index": 0, "function": {"arguments": "1}"}}),
+        );
+        assert_eq!(acc.len(), 1);
+        assert_eq!(acc[0].id, "call_1");
+        assert_eq!(acc[0].function.name, "test_func");
+        assert_eq!(acc[0].function.arguments.as_deref(), Some("{\"a\":1}"));
+    }
+
+    #[test]
+    fn test_accumulate_tool_call_delta_late_name() {
+        // The bug this fix addresses: the name does not arrive in the first
+        // fragment. Adjacency-based assembly dropped these; index-keying keeps them.
+        let mut acc = Vec::new();
+        crate::chat_provider::accumulate_tool_call_delta(
+            &mut acc,
+            &json!({"index": 0, "function": {"arguments": "{}"}}),
+        );
+        crate::chat_provider::accumulate_tool_call_delta(
+            &mut acc,
+            &json!({"index": 0, "id": "call_2", "function": {"name": "late"}}),
+        );
+        assert_eq!(acc.len(), 1);
+        assert_eq!(acc[0].function.name, "late");
+        assert_eq!(acc[0].function.arguments.as_deref(), Some("{}"));
     }
 
     #[test]
