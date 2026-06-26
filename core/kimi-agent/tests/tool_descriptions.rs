@@ -1,77 +1,14 @@
 mod tool_test_utils;
 
-use kimi_agent::soul::toolset::KimiToolset;
 use kimi_agent::tools::dmail::SendDMail;
 use kimi_agent::tools::file::{Glob, Grep, ReadFile, ReadMediaFile, StrReplaceFile, WriteFile};
-use kimi_agent::tools::multiagent::{CreateSubagent, TaskTool};
 use kimi_agent::tools::shell::Shell;
 use kimi_agent::tools::think::Think;
 use kimi_agent::tools::todo::SetTodoList;
 use kimi_agent::tools::web::{FetchURL, SearchWeb};
 use kosong::tooling::CallableTool2;
-use std::sync::Arc;
 
 use tool_test_utils::{RuntimeFixture, normalize_newlines};
-
-#[test]
-fn test_task_description() {
-    let fixture = RuntimeFixture::new();
-    let tool = TaskTool::new(&fixture.runtime);
-    assert_eq!(
-        normalize_newlines(tool.description()),
-        "\
-Spawn a subagent to perform a specific task. Subagent will be spawned with a fresh context without any history of yours.\n\
-\n\
-**Context Isolation**\n\
-\n\
-Context isolation is one of the key benefits of using subagents. By delegating tasks to subagents, you can keep your main context clean and focused on the main goal requested by the user.\n\
-\n\
-Here are some scenarios you may want this tool for context isolation:\n\
-\n\
-- You wrote some code and it did not work as expected. In this case you can spawn a subagent to fix the code, asking the subagent to return how it is fixed. This can potentially benefit because the detailed process of fixing the code may not be relevant to your main goal, and may clutter your context.\n\
-- When you need some latest knowledge of a specific library, framework or technology to proceed with your task, you can spawn a subagent to search on the internet for the needed information and return to you the gathered relevant information, for example code examples, API references, etc. This can avoid ton of irrelevant search results in your own context.\n\
-\n\
-DO NOT directly forward the user prompt to Task tool. DO NOT simply spawn Task tool for each todo item. This will cause the user confused because the user cannot see what the subagent do. Only you can see the response from the subagent. So, only spawn subagents for very specific and narrow tasks like fixing a compilation error, or searching for a specific solution.\n\
-\n\
-**Parallel Multi-Tasking**\n\
-\n\
-Parallel multi-tasking is another key benefit of this tool. When the user request involves multiple subtasks that are independent of each other, you can use Task tool multiple times in a single response to let subagents work in parallel for you.\n\
-\n\
-Examples:\n\
-\n\
-- User requests to code, refactor or fix multiple modules/files in a project, and they can be tested independently. In this case you can spawn multiple subagents each working on a different module/file.\n\
-- When you need to analyze a huge codebase (> hundreds of thousands of lines), you can spawn multiple subagents each exploring on a different part of the codebase and gather the summarized results.\n\
-- When you need to search the web for multiple queries, you can spawn multiple subagents for better efficiency.\n\
-\n\
-**Available Subagents:**\n\
-\n\
-- `mocker`: The mock agent for testing purposes.\n"
-    );
-}
-
-#[test]
-fn test_create_subagent_description() {
-    let fixture = RuntimeFixture::new();
-    let tool = CreateSubagent::new(
-        Arc::new(tokio::sync::Mutex::new(KimiToolset::new())),
-        &fixture.runtime,
-    );
-    assert_eq!(
-        normalize_newlines(tool.description()),
-        "\
-Create a custom subagent with specific system prompt and name for reuse.\n\
-\n\
-Usage:\n\
-- Define specialized agents with custom roles and boundaries\n\
-- Created agents can be referenced by name in the Task tool\n\
-- Use this when you need a specific agent type not covered by predefined agents\n\
-- The created agent configuration will be saved and can be used immediately\n\
-\n\
-Example workflow:\n\
-1. Use CreateSubagent to define a specialized agent (e.g., 'code_reviewer')\n\
-2. Use the Task tool with agent='code_reviewer' to launch the created agent\n"
-    );
-}
 
 #[test]
 fn test_send_dmail_description() {

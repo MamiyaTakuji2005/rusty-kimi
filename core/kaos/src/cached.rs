@@ -73,6 +73,19 @@ fn scan_workdir(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 impl CachedKaos {
+    /// Build a `CachedKaos` with an empty, ready index and no initial scan.
+    /// Synchronous — intended for tests/fixtures that need a `CachedKaos` value
+    /// but do not exercise the glob index (the first real `glob()` would return
+    /// nothing until a mutation marks it dirty and triggers a rescan).
+    pub fn empty(work_dir: PathBuf) -> Self {
+        Self {
+            inner: Arc::new(LocalKaos::new()),
+            work_dir,
+            index: Arc::new(RwLock::new(IndexState::Ready(Arc::new(Vec::new())))),
+            write_history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
     /// Build a `CachedKaos` over `work_dir`, performing the initial blocking
     /// scan immediately so the first `glob()` call hits the index.
     pub async fn new(work_dir: PathBuf) -> Self {

@@ -40,7 +40,7 @@ agent:
 "#,
     );
 
-    let agent = load_agent(&agent_yaml, fixture.runtime.clone(), &[])
+    let agent = load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default())
         .await
         .expect("load agent");
 
@@ -72,7 +72,7 @@ agent:
 "#,
     );
 
-    let agent = load_agent(&agent_yaml, fixture.runtime.clone(), &[])
+    let agent = load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default())
         .await
         .expect("load agent");
 
@@ -104,7 +104,7 @@ agent:
 "#,
     );
 
-    let err = match load_agent(&agent_yaml, fixture.runtime.clone(), &[]).await {
+    let err = match load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default()).await {
         Ok(_) => panic!("expected error"),
         Err(err) => err,
     };
@@ -159,7 +159,7 @@ agent:
 "#,
     );
 
-    match load_agent(&agent_yaml, fixture.runtime.clone(), &[]).await {
+    match load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default()).await {
         Ok(_) => panic!("expected error"),
         Err(err) => assert!(err.to_string().contains("Invalid tools")),
     }

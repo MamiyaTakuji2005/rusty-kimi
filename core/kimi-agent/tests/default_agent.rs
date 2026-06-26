@@ -61,7 +61,7 @@ async fn test_default_agent() {
     let agent_file = default_agent_file();
     let spec = load_agent_spec(&agent_file).await.expect("load agent spec");
 
-    let agent = load_agent(&agent_file, fixture.runtime.clone(), &[])
+    let agent = load_agent(&agent_file, fixture.runtime.clone(), &[], &Default::default())
         .await
         .expect("load agent");
 

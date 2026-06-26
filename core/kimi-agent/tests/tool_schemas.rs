@@ -1,15 +1,12 @@
 mod tool_test_utils;
 
-use kimi_agent::soul::toolset::KimiToolset;
 use kimi_agent::tools::dmail::SendDMail;
 use kimi_agent::tools::file::{Glob, Grep, ReadFile, ReadMediaFile, StrReplaceFile, WriteFile};
-use kimi_agent::tools::multiagent::{CreateSubagent, TaskTool};
 use kimi_agent::tools::shell::Shell;
 use kimi_agent::tools::think::Think;
 use kimi_agent::tools::todo::SetTodoList;
 use kimi_agent::tools::web::{FetchURL, SearchWeb};
 use kosong::tooling::CallableTool;
-use std::sync::Arc;
 
 use tool_test_utils::RuntimeFixture;
 
@@ -38,61 +35,6 @@ fn assert_schema_eq(actual: serde_json::Value, expected: serde_json::Value) {
     normalize_required(&mut actual);
     normalize_required(&mut expected);
     assert_eq!(actual, expected);
-}
-
-#[test]
-fn test_task_params_schema() {
-    let fixture = RuntimeFixture::new();
-    let tool = TaskTool::new(&fixture.runtime);
-    let base = tool.base();
-    assert_schema_eq(
-        base.parameters,
-        serde_json::json!({
-            "properties": {
-                "description": {
-                    "description": "A short (3-5 word) description of the task",
-                    "type": "string",
-                },
-                "subagent_name": {
-                    "description": "The name of the specialized subagent to use for this task",
-                    "type": "string",
-                },
-                "prompt": {
-                    "description": "The task for the subagent to perform. You must provide a detailed prompt with all necessary background information because the subagent cannot see anything in your context.",
-                    "type": "string",
-                },
-            },
-            "required": ["description", "subagent_name", "prompt"],
-            "type": "object",
-        }),
-    );
-}
-
-#[test]
-fn test_create_subagent_params_schema() {
-    let fixture = RuntimeFixture::new();
-    let tool = CreateSubagent::new(
-        Arc::new(tokio::sync::Mutex::new(KimiToolset::new())),
-        &fixture.runtime,
-    );
-    let base = tool.base();
-    assert_schema_eq(
-        base.parameters,
-        serde_json::json!({
-            "properties": {
-                "name": {
-                    "description": "Unique name for this agent configuration (e.g., 'summarizer', 'code_reviewer'). This name will be used to reference the agent in the Task tool.",
-                    "type": "string",
-                },
-                "system_prompt": {
-                    "description": "System prompt defining the agent's role, capabilities, and boundaries.",
-                    "type": "string",
-                },
-            },
-            "required": ["name", "system_prompt"],
-            "type": "object",
-        }),
-    );
 }
 
 #[test]

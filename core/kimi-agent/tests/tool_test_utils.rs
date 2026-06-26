@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use kaos::{
-    CurrentKaosToken, Kaos, KaosPath, LocalKaos, get_current_kaos, reset_current_kaos,
+    CachedKaos, CurrentKaosToken, Kaos, KaosPath, LocalKaos, get_current_kaos, reset_current_kaos,
     set_current_kaos,
 };
 use kimi_agent::config::{
@@ -13,10 +13,9 @@ use kimi_agent::config::{
 use kimi_agent::llm::LLM;
 use kimi_agent::metadata::WorkDirMeta;
 use kimi_agent::session::Session;
-use kimi_agent::soul::agent::{Agent, BuiltinSystemPromptArgs, LaborMarket, Runtime};
+use kimi_agent::soul::agent::{BuiltinSystemPromptArgs, Runtime};
 use kimi_agent::soul::approval::Approval;
 use kimi_agent::soul::denwarenji::DenwaRenji;
-use kimi_agent::soul::toolset::KimiToolset;
 use kimi_agent::tasks::BackgroundTaskManager;
 use kimi_agent::utils::Environment;
 use kimi_agent::wire::WireFile;
@@ -100,6 +99,9 @@ impl RuntimeFixture {
             },
         };
 
+        let tasks_dir = share_dir.path().join("tasks");
+        let cached_kaos = Arc::new(CachedKaos::empty(PathBuf::from(work_path.to_string_lossy().to_string())));
+
         let runtime = Runtime {
             config,
             llm: Arc::new(tokio::sync::RwLock::new(Some(Arc::new(llm)))),
@@ -113,28 +115,13 @@ impl RuntimeFixture {
             },
             denwa_renji: Arc::new(tokio::sync::Mutex::new(DenwaRenji::new())),
             approval: Arc::new(Approval::new(true)),
-            labor_market: Arc::new(tokio::sync::Mutex::new(LaborMarket::new())),
             environment,
             skills: Default::default(),
-            background_tasks: BackgroundTaskManager::new(),
+            background_tasks: BackgroundTaskManager::new(tasks_dir, session.id.clone()),
+            todos: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cached_kaos,
+            agent_file: PathBuf::from("agent.yaml"),
         };
-
-        let agent = Agent {
-            name: "Mocker".to_string(),
-            system_prompt: "You are a mock agent for testing.".to_string(),
-            toolset: Arc::new(tokio::sync::Mutex::new(KimiToolset::new())),
-            runtime: runtime.copy_for_fixed_subagent(),
-        };
-
-        runtime
-            .labor_market
-            .try_lock()
-            .expect("lock labor market")
-            .add_fixed_subagent(
-                "mocker".to_string(),
-                agent,
-                "The mock agent for testing purposes.".to_string(),
-            );
 
         Self {
             runtime,
