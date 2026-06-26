@@ -72,14 +72,30 @@ impl CallableTool2 for TaskOutput {
 
         let mut builder = ToolResultBuilder::new(DEFAULT_MAX_OUTPUT, None);
 
-        // If block and task is still running, wait for notification.
-        if params.block && !view.status.is_terminal() {
+        // If block is requested, wait for the completion notification — but
+        // close the TOCTOU race: `notify_waiters()` only wakes already-registered
+        // waiters, so a task that completes between the status check and
+        // registration would otherwise hang until timeout. Arm the notified
+        // future first, THEN re-check terminal status; if it's already done (or
+        // finishes after arming), we don't block.
+        let _ = view; // initial snapshot only used for the not-found check above
+        if params.block {
             if let Some(notify) = self.background_tasks.notify(&params.task_id) {
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(params.timeout as u64),
-                    notify.notified(),
-                )
-                .await;
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let still_running = self
+                    .background_tasks
+                    .get(&params.task_id)
+                    .map(|v| !v.status.is_terminal())
+                    .unwrap_or(false);
+                if still_running {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(params.timeout as u64),
+                        notified,
+                    )
+                    .await;
+                }
             }
         }
 
