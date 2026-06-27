@@ -303,22 +303,31 @@ impl Toolset for KimiToolset {
         };
 
         let tool_call_id = tool_call.id.clone();
-        let schema = tool.base().parameters;
-        let compiled = match jsonschema::validator_for(&schema) {
-            Ok(compiled) => compiled,
-            Err(err) => {
+        // StrReplaceFile advertises a flat schema, but its Deserialize also
+        // accepts the legacy nested object / array shapes, and the fallback
+        // above reconstructs malformed JSON into the `edit` array shape. Strict
+        // jsonschema validation here would reject those valid-but-non-flat
+        // shapes before the lenient deserializer runs, so skip the gate for this
+        // tool and let `call_typed`'s deserializer + on-disk apply_edits do the
+        // validating (a genuinely bad shape still surfaces a clear parse error).
+        if tool_call.function.name != "StrReplaceFile" {
+            let schema = tool.base().parameters;
+            let compiled = match jsonschema::validator_for(&schema) {
+                Ok(compiled) => compiled,
+                Err(err) => {
+                    return ToolResultFuture::Immediate(ToolResult {
+                        tool_call_id,
+                        return_value: tool_runtime_error(&err.to_string()),
+                    });
+                }
+            };
+            if let Err(err) = compiled.validate(&args) {
+                let msg = err.to_string();
                 return ToolResultFuture::Immediate(ToolResult {
                     tool_call_id,
-                    return_value: tool_runtime_error(&err.to_string()),
+                    return_value: tool_validate_error(&msg),
                 });
             }
-        };
-        if let Err(err) = compiled.validate(&args) {
-            let msg = err.to_string();
-            return ToolResultFuture::Immediate(ToolResult {
-                tool_call_id,
-                return_value: tool_validate_error(&msg),
-            });
         }
         let tool_call_clone = tool_call.clone();
         let tool_ref = Arc::clone(&tool);

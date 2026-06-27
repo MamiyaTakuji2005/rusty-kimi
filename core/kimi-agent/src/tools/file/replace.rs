@@ -19,9 +19,9 @@ use super::{
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EditParams {
-    #[schemars(description = "The string that you want to replace, suports multi-line.")]
+    #[schemars(description = "The string that you want to replace, supports multi-line.")]
     pub old: String,
-    #[schemars(description = "The replacement string, suports multi-line.")]
+    #[schemars(description = "The replacement string, supports multi-line.")]
     pub new: String,
     #[serde(default)]
     #[schemars(description = "Whether to replace all matches.", default)]
@@ -90,44 +90,50 @@ impl<'de> Deserialize<'de> for StrReplaceParams {
     }
 }
 
-fn edit_schema(schema_gen: &mut SchemaGenerator) -> Schema {
-    let edit_schema = EditParams::json_schema(schema_gen);
-    let list_schema = Vec::<EditParams>::json_schema(schema_gen);
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "anyOf".to_string(),
-        Value::Array(vec![
-            serde_json::to_value(&edit_schema).unwrap_or(Value::Null),
-            serde_json::to_value(&list_schema).unwrap_or(Value::Null),
-        ]),
-    );
-    map.insert(
-        "description".to_string(),
-        Value::String(
-            "The edit(s) to apply to the file. You can provide a single edit or a list of edits here.".to_string(),
-        ),
-    );
-    Schema::from(map)
-}
-
-fn str_replace_params_schema(schema_gen: &mut SchemaGenerator) -> Schema {
-    let path_schema = serde_json::to_value(schema_gen.subschema_for::<String>()).unwrap_or(Value::Null);
-    let edit_property = serde_json::to_value(edit_schema(schema_gen)).unwrap_or(Value::Null);
-
-    let mut root = serde_json::Map::new();
-    root.insert("type".to_string(), Value::String("object".to_string()));
-    let mut props = serde_json::Map::new();
-    props.insert("path".to_string(), path_schema);
-    props.insert("edit".to_string(), edit_property);
-    root.insert("properties".to_string(), Value::Object(props));
-    root.insert(
-        "required".to_string(),
-        Value::Array(vec![
-            Value::String("path".to_string()),
-            Value::String("edit".to_string()),
-        ]),
-    );
-    Schema::from(root)
+/// Advertise the flat single-edit shape: `path`, `old`, `new`, plus the
+/// `replace_all`/`regex` flags as siblings. No nested `edit` wrapper and no
+/// `anyOf` — the simplest JSON for a model to emit, which is the least fragile
+/// shape under choppy/slow tool-call streaming.
+///
+/// The lenient `StrReplaceParams` Deserialize still accepts the legacy nested
+/// object / array shapes, and `KimiToolset::handle` skips strict jsonschema
+/// validation for this tool, so those shapes are not rejected before the
+/// deserializer (and the on-disk `apply_edits`) get to validate.
+fn str_replace_params_schema(_schema_gen: &mut SchemaGenerator) -> Schema {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "The path to the target file. Relative unless outside the workdir.",
+            },
+            "old": {
+                "type": "string",
+                "description": "The string that you want to replace, supports multi-line.",
+            },
+            "new": {
+                "type": "string",
+                "description": "The replacement string, supports multi-line.",
+            },
+            "replace_all": {
+                "type": "boolean",
+                "default": false,
+                "description": "Whether to replace all matches.",
+            },
+            "regex": {
+                "type": "boolean",
+                "default": false,
+                "description": "Whether to treat the old string as a regex pattern.",
+            },
+        },
+        "required": ["path", "old", "new"],
+    });
+    Schema::from(
+        schema
+            .as_object()
+            .cloned()
+            .expect("str_replace schema literal is an object"),
+    )
 }
 
 pub struct StrReplaceFile {

@@ -125,15 +125,25 @@ fn test_shell_params_schema() {
         serde_json::json!({
             "properties": {
                 "command": {
-                    "description": "The bash command to execute.",
+                    "description": "The command to execute.",
                     "type": "string",
                 },
                 "timeout": {
                     "default": 60,
                     "description": "The timeout in seconds for the command to execute. If the command takes longer than this, it will be killed.",
-                    "maximum": 300,
+                    "maximum": 86400,
                     "minimum": 1,
                     "type": "integer",
+                },
+                "run_in_background": {
+                    "default": false,
+                    "description": "Whether to run the command as a background task.",
+                    "type": "boolean",
+                },
+                "description": {
+                    "default": "",
+                    "description": "A short description for the background task. Required when run_in_background=true.",
+                    "type": "string",
                 },
             },
             "required": ["command"],
@@ -152,18 +162,17 @@ fn test_read_file_params_schema() {
         serde_json::json!({
             "properties": {
                 "path": {
-                    "description": "The path to the file to read. Absolute paths only required when working outside the workdir.",
+                    "description": "The path to the file to read. Relative unless when targeting a file outside of the workdir.",
                     "type": "string",
                 },
                 "line_offset": {
                     "default": 1,
-                    "description": "The line number to start reading from. By default read from the beginning of the file. Set this when the file is too large to read at once.",
-                    "minimum": 1,
+                    "description": "The line number to start reading from. Default's to 1. Negative values read from the end of the file (e.g. -100 reads the last 100 lines).",
                     "type": "integer",
                 },
                 "n_lines": {
                     "default": 1000,
-                    "description": "The number of lines to read. By default read up to 1000 lines, which is the max allowed value. Set this value when the file is too large to read at once.",
+                    "description": "The number of lines to read. By default the maximum. Combine this value with the offset to make targeted readings.",
                     "minimum": 1,
                     "type": "integer",
                 },
@@ -184,7 +193,7 @@ fn test_read_media_file_params_schema() {
         serde_json::json!({
             "properties": {
                 "path": {
-                    "description": "The path to the file to read. Absolute paths only required when working outside the workdir.",
+                    "description": "The path to the file to read. Relative unless when targeting a file outside of the workdir.",
                     "type": "string",
                 }
             },
@@ -234,62 +243,71 @@ fn test_grep_params_schema() {
         serde_json::json!({
             "properties": {
                 "pattern": {
-                    "description": "The regular expression pattern to search for in file contents",
+                    "description": "Regex pattern to search for.",
                     "type": "string",
                 },
                 "path": {
-                    "default": ".",
-                    "description": "File or directory to search in. Defaults to current working directory. If specified, it must be an absolute path.",
-                    "type": "string",
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": null,
+                    "description": "Search root. Defaults to the working directory.",
                 },
                 "glob": {
                     "anyOf": [{"type": "string"}, {"type": "null"}],
                     "default": null,
-                    "description": "Glob pattern to filter files (e.g. `*.js`, `*.{ts,tsx}`). No filter by default.",
+                    "description": "Glob filter, e.g. `*.rs`.",
                 },
                 "output_mode": {
                     "default": "files_with_matches",
-                    "description": "`content`: Show matching lines (supports `-B`, `-A`, `-C`, `-n`, `head_limit`); `files_with_matches`: Show file paths (supports `head_limit`); `count_matches`: Show total number of matches. Defaults to `files_with_matches`.",
+                    "description": "Output mode: `files_with_matches` (default), `content`, or `count_matches`.",
                     "type": "string",
                 },
                 "-B": {
                     "anyOf": [{"type": "integer"}, {"type": "null"}],
                     "default": null,
-                    "description": "Number of lines to show before each match (the `-B` option). Requires `output_mode` to be `content`.",
+                    "description": "Lines of context before each match.",
+                    "minimum": 0,
                 },
                 "-A": {
                     "anyOf": [{"type": "integer"}, {"type": "null"}],
                     "default": null,
-                    "description": "Number of lines to show after each match (the `-A` option). Requires `output_mode` to be `content`.",
+                    "description": "Lines of context after each match.",
+                    "minimum": 0,
                 },
                 "-C": {
                     "anyOf": [{"type": "integer"}, {"type": "null"}],
                     "default": null,
-                    "description": "Number of lines to show before and after each match (the `-C` option). Requires `output_mode` to be `content`.",
+                    "description": "Lines of context before and after each match.",
+                    "minimum": 0,
                 },
                 "-n": {
                     "default": false,
-                    "description": "Show line numbers in output (the `-n` option). Requires `output_mode` to be `content`.",
+                    "description": "Show line numbers.",
                     "type": "boolean",
                 },
                 "-i": {
                     "default": false,
-                    "description": "Case insensitive search (the `-i` option).",
+                    "description": "Case-insensitive search.",
+                    "type": "boolean",
+                },
+                "-F": {
+                    "default": false,
+                    "description": "Treat pattern as a literal string.",
                     "type": "boolean",
                 },
                 "type": {
                     "anyOf": [{"type": "string"}, {"type": "null"}],
                     "default": null,
-                    "description": "File type to search. Examples: py, rust, js, ts, go, java, etc. More efficient than `glob` for standard file types.",
+                    "description": "File type filter, e.g. `rust`, `python`.",
                 },
                 "head_limit": {
                     "anyOf": [{"type": "integer"}, {"type": "null"}],
                     "default": null,
-                    "description": "Limit output to first N lines, equivalent to `| head -N`. Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count_matches (limits count entries). By default, no limit is applied.",
+                    "description": "Limit output to the first N lines.",
+                    "minimum": 0,
                 },
                 "multiline": {
                     "default": false,
-                    "description": "Enable multiline mode where `.` matches newlines and patterns can span lines (the `-U` and `--multiline-dotall` options). By default, multiline mode is disabled.",
+                    "description": "Enable multiline regex mode.",
                     "type": "boolean",
                 },
             },
@@ -339,57 +357,29 @@ fn test_str_replace_file_params_schema() {
         serde_json::json!({
             "properties": {
                 "path": {
-                    "description": "The path to the file to edit. Absolute paths only required when working outside the workdir.",
+                    "description": "The path to the target file. Relative unless outside the workdir.",
                     "type": "string",
                 },
-                "edit": {
-                    "anyOf": [
-                        {
-                            "properties": {
-                                "old": {
-                                    "description": "The old string to replace. Can be multi-line.",
-                                    "type": "string",
-                                },
-                                "new": {
-                                    "description": "The new string to replace with. Can be multi-line.",
-                                    "type": "string",
-                                },
-                                "replace_all": {
-                                    "default": false,
-                                    "description": "Whether to replace all occurrences.",
-                                    "type": "boolean",
-                                },
-                            },
-                            "required": ["old", "new"],
-                            "type": "object",
-                        },
-                        {
-                            "items": {
-                                "properties": {
-                                    "old": {
-                                        "description": "The old string to replace. Can be multi-line.",
-                                        "type": "string",
-                                    },
-                                    "new": {
-                                        "description": "The new string to replace with. Can be multi-line.",
-                                        "type": "string",
-                                    },
-                                    "replace_all": {
-                                        "default": false,
-                                        "description": "Whether to replace all occurrences.",
-                                        "type": "boolean",
-                                    },
-                                },
-                                "required": ["old", "new"],
-                                "type": "object",
-                            },
-                            "type": "array",
-                        },
-                    ],
-                    "description": "The edit(s) to apply to the file. You can provide a single edit or a list of edits here.",
+                "old": {
+                    "description": "The string that you want to replace, supports multi-line.",
+                    "type": "string",
+                },
+                "new": {
+                    "description": "The replacement string, supports multi-line.",
+                    "type": "string",
+                },
+                "replace_all": {
+                    "default": false,
+                    "description": "Whether to replace all matches.",
+                    "type": "boolean",
+                },
+                "regex": {
+                    "default": false,
+                    "description": "Whether to treat the old string as a regex pattern.",
+                    "type": "boolean",
                 },
             },
-            "required": ["path", "edit"],
+            "required": ["path", "old", "new"],
             "type": "object",
         }),
     );
