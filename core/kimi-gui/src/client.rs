@@ -1,14 +1,19 @@
 //! Wire protocol client: spawns `kimi-agent`, speaks newline-delimited
 //! JSON-RPC 2.0 over its stdio, and forwards everything to the UI thread.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 use kimi_agent::wire::{WireMessage, deserialize_wire_message};
+
+/// How much of the agent's stderr to keep for the "it exited" message.
+const STDERR_TAIL_LINES: usize = 20;
 
 /// Everything the agent can send us, normalized for the UI thread.
 pub enum Inbound {
@@ -40,15 +45,47 @@ impl WireClient {
         agent_args: &[String],
         egui_ctx: eframe::egui::Context,
     ) -> std::io::Result<(Self, Receiver<Inbound>)> {
-        let mut child = Command::new(agent_bin)
+        let mut command = Command::new(agent_bin);
+        command
             .args(agent_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            // Piped, not inherited: a windowed parent has no console to
+            // inherit, and the tail is worth keeping to explain a crash.
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // The agent is a console binary, so Windows gives it a console of
+            // its own — a terminal window popping up per session. The agent
+            // logs to ~/.kimi/logs anyway, so nothing is lost by suppressing it.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command.spawn()?;
 
         let stdin = child.stdin.take().expect("child stdin is piped");
         let stdout = child.stdout.take().expect("child stdout is piped");
+        let stderr = child.stderr.take().expect("child stderr is piped");
+
+        // With no console to print to, a startup failure (bad config, missing
+        // credentials) would otherwise be completely silent.
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        let collector = Arc::clone(&stderr_tail);
+        std::thread::Builder::new()
+            .name("wire-stderr".into())
+            .spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    let Ok(mut tail) = collector.lock() else {
+                        break;
+                    };
+                    if tail.len() == STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+            })
+            .expect("spawn wire-stderr thread");
 
         let (writer_tx, writer_rx) = channel::<String>();
         std::thread::Builder::new()
@@ -69,6 +106,7 @@ impl WireClient {
             .expect("spawn wire-writer thread");
 
         let (inbound_tx, inbound_rx) = channel::<Inbound>();
+        let exit_tail = Arc::clone(&stderr_tail);
         std::thread::Builder::new()
             .name("wire-reader".into())
             .spawn(move || {
@@ -78,8 +116,10 @@ impl WireClient {
                     line.clear();
                     match reader.read_line(&mut line) {
                         Ok(0) => {
-                            let _ =
-                                inbound_tx.send(Inbound::AgentExited("agent stdout closed".into()));
+                            let _ = inbound_tx.send(Inbound::AgentExited(with_stderr_tail(
+                                "agent stdout closed",
+                                &exit_tail,
+                            )));
                             break;
                         }
                         Ok(_) => {
@@ -95,8 +135,10 @@ impl WireClient {
                             }
                         }
                         Err(err) => {
-                            let _ =
-                                inbound_tx.send(Inbound::AgentExited(format!("read error: {err}")));
+                            let _ = inbound_tx.send(Inbound::AgentExited(with_stderr_tail(
+                                &format!("read error: {err}"),
+                                &exit_tail,
+                            )));
                             break;
                         }
                     }
@@ -171,6 +213,19 @@ impl Drop for WireClient {
         self.writer_tx = None;
         let _ = self.child.kill();
     }
+}
+
+/// Attach the agent's last stderr lines to an exit reason. Its own logs go to
+/// a file, so anything here is a panic or a failure to get that far.
+fn with_stderr_tail(reason: &str, tail: &Mutex<VecDeque<String>>) -> String {
+    let Ok(tail) = tail.lock() else {
+        return reason.to_string();
+    };
+    if tail.is_empty() {
+        return reason.to_string();
+    }
+    let lines: Vec<&str> = tail.iter().map(String::as_str).collect();
+    format!("{reason}\n{}", lines.join("\n"))
 }
 
 fn classify_line(line: &str) -> Inbound {

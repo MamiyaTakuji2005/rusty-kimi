@@ -207,7 +207,7 @@ impl KimiGuiApp {
     /// session as a new tab (`kimi-agent -w <dir> --session <id>`).
     fn resume_popup(&mut self, ui: &mut egui::Ui, anchor: &egui::Response) {
         let mut resume: Option<&ResumeEntry> = None;
-        egui::Popup::menu(anchor).width(460.0).show(|ui| {
+        egui::Popup::menu(anchor).width(1380.0).show(|ui| {
             if self.resume_listing.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -221,7 +221,7 @@ impl KimiGuiApp {
             }
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .max_height(360.0)
+                .max_height(1080.0)
                 .show(ui, |ui| {
                     for entry in &self.resume_sessions {
                         if ui
