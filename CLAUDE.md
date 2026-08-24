@@ -1,4 +1,41 @@
-# rusty-kimi
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+This repo vendors two subtrees, each with its own toolchain. **Rust** (`core/`) uses cargo; **Python** (`cli/`) uses `uv` + a `Makefile`. Run cargo commands from `core/`, make/uv commands from `cli/`.
+
+### Rust (`core/`) — the agent core
+- Build the agent binary: `cargo build -p kimi-agent`
+- Build the native GUI frontend: `cargo build -p kimi-gui` (egui shell speaking the wire protocol; run with `--agent-bin <path-to-kimi-agent>` or `KIMI_AGENT_BIN`, remaining args are forwarded to the agent)
+- Test a crate: `cargo test -p kimi-agent` (also `-p kosong`, `-p kaos`); whole workspace: `cargo test`
+- Single test: `cargo test -p kimi-agent <test_name>`
+- Format / lint: `cargo fmt` · `cargo clippy --workspace --all-targets` (workspace denies `unsafe_code`, warns on all clippy)
+
+### Python (`cli/`) — the shell UI
+- One-time setup: `make prepare` (syncs `uv` deps for all workspace packages, installs prek hooks)
+- Lint + typecheck all packages: `make check` (ruff + pyright + non-blocking ty)
+- Format: `make format`
+- Test all suites: `make test`; just the CLI: `make test-kimi-cli`
+- Single test: `uv run pytest tests/path/to/test_x.py::test_name -vv`
+- The `cli/` workspace holds sub-packages (`packages/kosong`, `packages/kaos`, `sdks/kimi-sdk`); run their pytest via `uv run --project <path> --directory <path> pytest ...` (see `cli/Makefile`).
+
+### Running the app (shell UI on the Rust core)
+```sh
+cd core && cargo build -p kimi-agent && cd ..
+cd cli
+PYTHONPATH=src KIMI_AGENT_BIN="../core/target/debug/kimi-agent" python -m kimi_cli
+```
+On Windows (PowerShell) quote the binary path and set `PYTHONUTF8=1`. The banner shows `(remote / wire)` when running on the Rust core. Without `KIMI_AGENT_BIN` the Python side has no working agent loop (see below).
+
+### Python↔Rust E2E
+Build the binary, then point the E2E suite at it:
+`KIMI_E2E_WIRE_CMD=../target/debug/kimi-agent uv run pytest tests_e2e`
+
+## Sync contract (must-follow)
+
+Rust and Python must stay in lockstep on all external behavior: the wire protocol/envelopes/error codes, `kosong.message` & `kimi_cli.wire.types` schemas and serde, config/session/context JSONL formats under `~/.kimi`, tool schemas/descriptions/approvals, prompts, and compaction. Tool identifiers remain `kimi_cli.tools.*` and wire identity stays "Kimi Code CLI" even in the Rust binary. **The Rust workspace version must exactly match the Python `kimi-cli` version.** When behavior conflicts, Python (`cli/src/kimi_cli`, `cli/packages/*`) and `cli/docs/zh/` are the source of truth. See `core/AGENTS.md` for the full contract.
 
 ## Architecture
 

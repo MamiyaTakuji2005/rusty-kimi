@@ -1,0 +1,19 @@
+[package]
+name = "kimi-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kimi-gui"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+eframe = "0.32"
+egui_commonmark = "0.21"
+
+kimi-agent = { path = "../kimi-agent" }
+kosong = { path = "../kosong" }
