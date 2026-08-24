@@ -1,0 +1,138 @@
+//! Background listing of past sessions, used by the resume menu (the book
+//! button in the tab strip).
+//!
+//! The agent process owns session persistence, so this reuses the agent's own
+//! `Session::list` (reading `~/.kimi/kimi.json` + the session directories) on
+//! a background thread with a private tokio runtime, and hands the flattened
+//! result back to the UI thread through a channel.
+
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, channel};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::{DateTime, Local};
+use kaos::KaosPath;
+use kimi_agent::metadata::load_metadata;
+use kimi_agent::session::Session as AgentSession;
+
+/// One resumable past session, flattened across all known work directories.
+#[derive(Clone, Debug)]
+pub struct ResumeEntry {
+    pub id: String,
+    /// First user input of the session, as computed by the agent.
+    pub title: String,
+    /// Working directory the session belongs to.
+    pub work_dir: PathBuf,
+    /// Last modification time of `context.jsonl` (unix seconds).
+    pub updated_at: f64,
+}
+
+impl ResumeEntry {
+    /// Shortened title for a tab: first user input without the trailing
+    /// session-id suffix, capped to a sane width.
+    pub fn tab_title(&self) -> String {
+        let suffix = format!(" ({})", self.id);
+        let base = self.title.strip_suffix(&suffix).unwrap_or(&self.title);
+        let base = base.trim();
+        if base.is_empty() {
+            return format!("resume {}", self.short_id());
+        }
+        let mut out: String = base.chars().take(24).collect();
+        if base.chars().count() > 24 {
+            out.push('…');
+        }
+        out
+    }
+
+    /// First 8 characters of the session id (enough to disambiguate in the UI).
+    fn short_id(&self) -> String {
+        self.id.chars().take(8).collect()
+    }
+
+    /// One-line metadata string for the resume menu rows.
+    pub fn meta_line(&self) -> String {
+        let dir = self
+            .work_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.work_dir.to_string_lossy().into_owned());
+        format!(
+            "{} · {} · {}",
+            format_relative_time(self.updated_at),
+            dir,
+            self.short_id(),
+        )
+    }
+}
+
+/// Spawn a background thread that lists every session of every work directory
+/// known to `~/.kimi/kimi.json`, newest first. The result (or an error
+/// message) arrives on the returned receiver; the egui context is kicked when
+/// it lands so the UI picks it up without polling delays.
+pub fn spawn_session_listing(
+    ctx: &eframe::egui::Context,
+) -> Receiver<Result<Vec<ResumeEntry>, String>> {
+    let (tx, rx) = channel();
+    let ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("session-listing".into())
+        .spawn(move || {
+            // `Session::list` panics on unexpected filesystem errors; never
+            // take the whole app down just because the menu was opened.
+            let result = match std::panic::catch_unwind(list_all_sessions) {
+                Ok(Ok(sessions)) => Ok(sessions),
+                Ok(Err(err)) => Err(err),
+                Err(panic) => Err(format!("session listing panicked: {panic:?}")),
+            };
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        })
+        .expect("spawn session-listing thread");
+    rx
+}
+
+fn list_all_sessions() -> Result<Vec<ResumeEntry>, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create runtime: {err}"))?;
+    rt.block_on(async {
+        let metadata = load_metadata().await;
+        let mut entries: Vec<ResumeEntry> = Vec::new();
+        for work_dir in &metadata.work_dirs {
+            for session in AgentSession::list(KaosPath::new(&work_dir.path)).await {
+                entries.push(ResumeEntry {
+                    id: session.id,
+                    title: session.title,
+                    work_dir: session.work_dir.as_path().to_path_buf(),
+                    updated_at: session.updated_at,
+                });
+            }
+        }
+        entries.sort_by(|a, b| b.updated_at.total_cmp(&a.updated_at));
+        Ok(entries)
+    })
+}
+
+/// Human-friendly relative timestamp ("3m ago"), falling back to a local date
+/// for anything older than a week.
+pub fn format_relative_time(updated_at: f64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let delta = (now - updated_at).max(0.0);
+    if delta < 60.0 {
+        "just now".to_string()
+    } else if delta < 3600.0 {
+        format!("{}m ago", (delta / 60.0) as u64)
+    } else if delta < 86400.0 {
+        format!("{}h ago", (delta / 3600.0) as u64)
+    } else if delta < 7.0 * 86400.0 {
+        format!("{}d ago", (delta / 86400.0) as u64)
+    } else {
+        DateTime::from_timestamp(updated_at as i64, 0)
+            .map(|t| t.with_timezone(&Local).format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}

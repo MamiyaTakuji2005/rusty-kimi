@@ -12,8 +12,12 @@ path = "src/main.rs"
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+rfd = "0.15"
 eframe = "0.32"
 egui_commonmark = "0.21"
 
+kaos = { path = "../kaos" }
 kimi-agent = { path = "../kimi-agent" }
 kosong = { path = "../kosong" }

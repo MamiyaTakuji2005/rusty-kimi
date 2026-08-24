@@ -1,25 +1,36 @@
 //! The eframe application: a hub of sessions, each backed by its own
 //! kimi-agent subprocess and shown as a top-level tab. A second tab layer
 //! inside each session (main + subagent transcripts) lives in `session.rs`.
+//!
+//! Session creation lives in the tab strip: the `+` button opens the native
+//! OS folder picker and instantly starts a session in the chosen directory,
+//! while the book button pinned to the right edge opens the resume menu with
+//! every past session found under `~/.kimi`.
 
-use eframe::egui::{self, Align2, Color32, Key, RichText};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+
+use eframe::egui::{self, Align2, Color32, RichText};
 
 use crate::session::Session;
-
-/// Draft state for the "new session" popup.
-#[derive(Default)]
-struct NewSessionDraft {
-    workdir: String,
-    extra_args: String,
-    error: Option<String>,
-}
+use crate::session_list::{ResumeEntry, spawn_session_listing};
 
 pub struct KimiGuiApp {
     agent_bin: String,
     sessions: Vec<Session>,
     active: usize,
     next_session_id: usize,
-    new_session: Option<NewSessionDraft>,
+    /// In-flight native folder picker started by the `+` button.
+    folder_pick: Option<Receiver<Option<PathBuf>>>,
+    /// Sessions shown by the resume menu, newest first.
+    resume_sessions: Vec<ResumeEntry>,
+    /// In-flight resume listing (a result is pending).
+    resume_listing: Option<Receiver<Result<Vec<ResumeEntry>, String>>>,
+    /// Error message from a failed `Session::spawn`, shown in a small modal.
+    spawn_error: Option<String>,
+    /// Directory most recently associated with a session; where the `+`
+    /// folder picker opens so a parallel session is one Enter away.
+    last_workdir: Option<PathBuf>,
 }
 
 impl KimiGuiApp {
@@ -28,22 +39,40 @@ impl KimiGuiApp {
         agent_bin: &str,
         agent_args: &[String],
     ) -> Result<Self, String> {
-        install_cjk_fallback_fonts(&cc.egui_ctx);
+        install_fallback_fonts(&cc.egui_ctx);
         let mut app = Self {
             agent_bin: agent_bin.to_string(),
             sessions: Vec::new(),
             active: 0,
             next_session_id: 1,
-            new_session: None,
+            folder_pick: None,
+            resume_sessions: Vec::new(),
+            resume_listing: None,
+            spawn_error: None,
+            last_workdir: None,
         };
-        app.open_session(agent_args.to_vec(), &cc.egui_ctx)?;
+        app.open_session(agent_args.to_vec(), &cc.egui_ctx, None)?;
+        // Sessions launched without `-w` run in the GUI's cwd; make the
+        // folder picker default there too.
+        if app.last_workdir.is_none() {
+            app.last_workdir = std::env::current_dir().ok();
+        }
         Ok(app)
     }
 
-    fn open_session(&mut self, args: Vec<String>, ctx: &egui::Context) -> Result<(), String> {
+    fn open_session(
+        &mut self,
+        args: Vec<String>,
+        ctx: &egui::Context,
+        title: Option<String>,
+    ) -> Result<(), String> {
+        // Track the most recent workdir for the `+` picker's start location.
+        if let Some(dir) = args_workdir(&args) {
+            self.last_workdir = Some(PathBuf::from(dir));
+        }
         let id = self.next_session_id;
         self.next_session_id += 1;
-        let title = session_title(&args, id);
+        let title = title.unwrap_or_else(|| session_title(&args, id));
         let session = Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?;
         self.sessions.push(session);
         self.active = self.sessions.len() - 1;
@@ -61,9 +90,59 @@ impl KimiGuiApp {
         }
     }
 
+    /// Pick up the result of the `+` button's folder picker, if it finished.
+    fn poll_folder_pick(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.folder_pick.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Some(dir)) => {
+                let args = vec!["-w".to_string(), dir.to_string_lossy().into_owned()];
+                if let Err(error) = self.open_session(args, ctx, None) {
+                    self.spawn_error = Some(error);
+                }
+            }
+            // Cancelled or the picker thread died: nothing to do.
+            Ok(None) | Err(TryRecvError::Disconnected) => {}
+            Err(TryRecvError::Empty) => self.folder_pick = Some(rx),
+        }
+    }
+
+    /// Pick up the resume listing for the book menu, if it finished.
+    fn poll_resume_listing(&mut self) {
+        let Some(rx) = self.resume_listing.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(sessions)) => self.resume_sessions = sessions,
+            // Keep the previous list on failure; the error is dropped for
+            // simplicity (stale data is still shown in the menu).
+            Ok(Err(_)) | Err(TryRecvError::Disconnected) => {}
+            Err(TryRecvError::Empty) => self.resume_listing = Some(rx),
+        }
+    }
+
     fn tab_strip(&mut self, ctx: &egui::Context) {
         let mut close: Option<usize> = None;
+        let mut pick_folder = false;
+        let mut refresh_resume = false;
         egui::TopBottomPanel::top("session_tabs").show(ctx, |ui| {
+            // Book button: resume menu, pinned to the right edge of the strip.
+            let book = egui::SidePanel::right("tabs_right")
+                .resizable(false)
+                .exact_width(40.0)
+                .show_inside(ui, |ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.button("📖").on_hover_text("resume a session")
+                    })
+                    .inner
+                })
+                .inner;
+            if book.clicked() {
+                refresh_resume = true;
+            }
+
+            // Session tabs plus the `+` button on the left.
             ui.horizontal_wrapped(|ui| {
                 for (index, session) in self.sessions.iter().enumerate() {
                     let mut text = RichText::new(&session.title);
@@ -87,77 +166,98 @@ impl KimiGuiApp {
                     }
                     ui.add_space(6.0);
                 }
-                if ui.button("+").on_hover_text("new session").clicked()
-                    && self.new_session.is_none()
+                if ui
+                    .button("+")
+                    .on_hover_text("new session (pick a folder)")
+                    .clicked()
                 {
-                    self.new_session = Some(NewSessionDraft::default());
+                    pick_folder = true;
                 }
             });
+
+            self.resume_popup(ui, &book);
         });
         if let Some(index) = close {
             self.close_session(index);
         }
+        if pick_folder && self.folder_pick.is_none() {
+            let start = self.last_workdir.clone();
+            self.folder_pick = Some(pick_folder_async(ctx, start.as_deref()));
+        }
+        if refresh_resume && self.resume_listing.is_none() {
+            self.resume_listing = Some(spawn_session_listing(ctx));
+        }
     }
 
-    fn new_session_popup(&mut self, ctx: &egui::Context) {
-        if self.new_session.is_none() {
+    /// The resume menu below the book button. Clicking a row resumes that
+    /// session as a new tab (`kimi-agent -w <dir> --session <id>`).
+    fn resume_popup(&mut self, ui: &mut egui::Ui, anchor: &egui::Response) {
+        let mut resume: Option<&ResumeEntry> = None;
+        egui::Popup::menu(anchor).width(460.0).show(|ui| {
+            if self.resume_listing.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("loading sessions...");
+                });
+                return;
+            }
+            if self.resume_sessions.is_empty() {
+                ui.label(RichText::new("no past sessions found").weak());
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    for entry in &self.resume_sessions {
+                        if ui
+                            .selectable_label(false, RichText::new(&entry.title).strong())
+                            .on_hover_text(format!("resume {}", entry.id))
+                            .clicked()
+                        {
+                            resume = Some(entry);
+                        }
+                        ui.label(RichText::new(entry.meta_line()).weak().small());
+                        ui.add_space(2.0);
+                    }
+                });
+        });
+        let Some(entry) = resume else {
+            return;
+        };
+        let args = vec![
+            "-w".to_string(),
+            entry.work_dir.to_string_lossy().into_owned(),
+            "--session".to_string(),
+            entry.id.clone(),
+        ];
+        let title = entry.tab_title();
+        if let Err(error) = self.open_session(args, ui.ctx(), Some(title)) {
+            self.spawn_error = Some(error);
+        }
+    }
+
+    fn spawn_error_window(&mut self, ctx: &egui::Context) {
+        if self.spawn_error.is_none() {
             return;
         }
-        let mut create = false;
-        let mut cancel = ctx.input(|i| i.key_pressed(Key::Escape));
-        if let Some(draft) = &mut self.new_session {
-            egui::Window::new("New session")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label("Working directory");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut draft.workdir)
-                            .desired_width(420.0)
-                            .hint_text(r"e.g. C:\code\my-project (empty = current dir)"),
-                    );
-                    ui.add_space(4.0);
-                    ui.label("Extra agent args");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut draft.extra_args)
-                            .desired_width(420.0)
-                            .hint_text("e.g. --continue, --session <id>, -y"),
-                    );
-                    if let Some(error) = &draft.error {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(error).color(Color32::from_rgb(200, 80, 80)));
-                    }
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Create").clicked() {
-                            create = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            cancel = true;
-                        }
-                    });
-                });
-        }
-        if create {
-            let draft = self.new_session.take().expect("checked above");
-            let mut args = Vec::new();
-            let workdir = draft.workdir.trim();
-            if !workdir.is_empty() {
-                args.push("-w".to_string());
-                args.push(workdir.to_string());
-            }
-            args.extend(draft.extra_args.split_whitespace().map(String::from));
-            if let Err(error) = self.open_session(args, ctx) {
-                // Reopen the popup with the draft and the spawn error.
-                self.new_session = Some(NewSessionDraft {
-                    workdir: draft.workdir,
-                    extra_args: draft.extra_args,
-                    error: Some(error),
-                });
-            }
-        } else if cancel {
-            self.new_session = None;
+        let mut close = false;
+        egui::Window::new("Could not start session")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(self.spawn_error.as_deref().unwrap_or_default())
+                        .color(Color32::from_rgb(200, 80, 80)),
+                );
+                ui.add_space(6.0);
+                if ui.button("OK").clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.spawn_error = None;
         }
     }
 }
@@ -173,19 +273,26 @@ impl eframe::App for KimiGuiApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
 
+        self.poll_folder_pick(ctx);
+        self.poll_resume_listing();
         self.tab_strip(ctx);
-        self.new_session_popup(ctx);
+        self.spawn_error_window(ctx);
 
         if self.sessions.is_empty() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("no sessions — press + to start one").weak());
+                    ui.label(
+                        RichText::new(
+                            "no sessions — press + to pick a folder, or 📖 to resume one",
+                        )
+                        .weak(),
+                    );
                 });
             });
             return;
         }
 
-        let popup_open = self.new_session.is_some();
+        let popup_open = self.spawn_error.is_some();
         self.sessions[self.active].ui(ctx, popup_open);
     }
 
@@ -196,10 +303,40 @@ impl eframe::App for KimiGuiApp {
     }
 }
 
+/// Open the native OS folder picker on a background thread (it blocks while
+/// the dialog is shown) and report the picked directory, if any. The dialog
+/// starts in `start_dir` when that directory still exists on disk.
+fn pick_folder_async(
+    ctx: &egui::Context,
+    start_dir: Option<&std::path::Path>,
+) -> Receiver<Option<PathBuf>> {
+    let start_dir = start_dir.filter(|dir| dir.is_dir()).map(ToOwned::to_owned);
+    let (tx, rx) = channel();
+    let ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("folder-picker".into())
+        .spawn(move || {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(dir) = start_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            let picked = dialog.pick_folder();
+            let _ = tx.send(picked);
+            ctx.request_repaint();
+        })
+        .expect("spawn folder-picker thread");
+    rx
+}
+
+/// The working directory passed to the agent via `-w`/`--workdir`, if any.
+fn args_workdir(args: &[String]) -> Option<&str> {
+    let pos = args.iter().position(|a| a == "-w" || a == "--workdir")?;
+    args.get(pos + 1).map(String::as_str)
+}
+
 /// Tab title: the workdir's basename when `-w <dir>` is present, else a number.
 fn session_title(args: &[String], id: usize) -> String {
-    if let Some(pos) = args.iter().position(|a| a == "-w" || a == "--workdir")
-        && let Some(dir) = args.get(pos + 1)
+    if let Some(dir) = args_workdir(args)
         && let Some(name) = std::path::Path::new(dir).file_name()
     {
         return name.to_string_lossy().to_string();
@@ -207,18 +344,21 @@ fn session_title(args: &[String], id: usize) -> String {
     format!("session {id}")
 }
 
-/// egui's bundled fonts have no CJK coverage; pull in a system font so
-/// Japanese/Chinese session content doesn't render as tofu.
-fn install_cjk_fallback_fonts(ctx: &egui::Context) {
-    let candidates = [
+/// egui's bundled fonts have no CJK coverage and no emoji-presentation
+/// symbols; pull in system fonts so session content renders and the resume
+/// (book) button has a glyph.
+fn install_fallback_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // CJK fallback: first font that exists wins.
+    let cjk_candidates = [
         r"C:\Windows\Fonts\YuGothM.ttc",
         r"C:\Windows\Fonts\meiryo.ttc",
         r"C:\Windows\Fonts\msgothic.ttc",
         r"C:\Windows\Fonts\msyh.ttc",
     ];
-    for path in candidates {
+    for path in cjk_candidates {
         if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
                 "cjk-fallback".to_owned(),
                 std::sync::Arc::new(egui::FontData::from_owned(bytes)),
@@ -230,8 +370,25 @@ fn install_cjk_fallback_fonts(ctx: &egui::Context) {
                     .or_default()
                     .push("cjk-fallback".to_owned());
             }
-            ctx.set_fonts(fonts);
-            return;
+            break;
         }
     }
+
+    // Monochrome symbol fallback (Segoe UI Symbol) for the 📖 glyph; egui's
+    // rasterizer cannot use color emoji fonts like Segoe UI Emoji.
+    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\seguisym.ttf") {
+        fonts.font_data.insert(
+            "symbol-fallback".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("symbol-fallback".to_owned());
+        }
+    }
+
+    ctx.set_fonts(fonts);
 }
