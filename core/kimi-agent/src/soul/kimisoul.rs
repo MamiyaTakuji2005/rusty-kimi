@@ -399,41 +399,57 @@ impl KimiSoul {
         Ok(())
     }
 
-    pub fn current_status_update(&self) -> StatusUpdate {
-        let (context_usage, context_tokens, max_context_tokens) =
-            if let Ok(guard) = self.runtime.llm.try_read() {
-                if let Some(llm) = guard.as_ref() {
-                    match self.context.try_lock() {
-                        Ok(context) => {
-                            let n = context.token_count();
-                            // Send None for context_tokens when count is 0 so the Python
-                            // merge logic retains the previously-displayed value (e.g. from
-                            // wire replay) rather than zeroing it out.
-                            let tokens = if n > 0 { Some(n as i64) } else { None };
-                            (
-                                n as f64 / llm.max_context_size as f64,
-                                tokens,
-                                Some(llm.max_context_size),
-                            )
-                        }
-                        Err(_) => (0.0, None, None),
-                    }
-                } else {
-                    (0.0, None, None)
-                }
-            } else {
-                (0.0, None, None)
-            };
+    /// Context figures for the status bar: `(usage_ratio, tokens, max_tokens)`.
+    ///
+    /// `known_tokens` lets a caller that just wrote the count hand it over, so
+    /// the display never depends on winning a race for the context lock. When
+    /// a figure is genuinely unavailable it stays `None`: clients merge status
+    /// deltas, where `None` means "unchanged" but a `0` would blank the bar.
+    fn context_stats(&self, known_tokens: Option<i64>) -> (Option<f64>, Option<i64>, Option<i64>) {
+        let max_context_tokens = self
+            .runtime
+            .llm
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|llm| llm.max_context_size))
+            .filter(|max| *max > 0);
+        let context_tokens = known_tokens.or_else(|| {
+            self.context
+                .try_lock()
+                .ok()
+                .map(|context| context.token_count())
+        });
+        let context_usage = match (context_tokens, max_context_tokens) {
+            (Some(tokens), Some(max)) => Some(tokens as f64 / max as f64),
+            _ => None,
+        };
+        (context_usage, context_tokens, max_context_tokens)
+    }
+
+    /// Build a status event. Every field the agent can answer for is filled in
+    /// on every send — a client that only ever hears about the ratio can show
+    /// a percentage but never the token counts behind it.
+    fn status_update(
+        &self,
+        known_tokens: Option<i64>,
+        token_usage: Option<kosong::chat_provider::TokenUsage>,
+        message_id: Option<String>,
+    ) -> StatusUpdate {
+        let (context_usage, context_tokens, max_context_tokens) = self.context_stats(known_tokens);
         StatusUpdate {
-            context_usage: Some(context_usage),
+            context_usage,
             context_tokens,
             max_context_tokens,
-            token_usage: None,
-            message_id: None,
+            token_usage,
+            message_id,
             model: Some(self.cached_model_name.lock().unwrap().clone()),
             yolo_enabled: Some(self.runtime.approval.is_yolo()),
             thinking: self.thinking(),
         }
+    }
+
+    pub fn current_status_update(&self) -> StatusUpdate {
+        self.status_update(None, None, None)
     }
 
     fn send_status_update(&self) {
@@ -935,6 +951,7 @@ impl KimiSoul {
             result.tool_calls.len()
         );
         let usage = result.usage.clone();
+        let mut context_tokens = None;
         if let Some(usage) = &usage {
             let mut context = self.context.lock().await;
             // Bookkeeping only — the count is re-read from the next step's
@@ -943,22 +960,16 @@ impl KimiSoul {
             if let Err(err) = context.update_token_count(usage.input()).await {
                 warn!("Failed to record token count: {err:#}");
             }
+            // Read it back under the same lock: `update_token_count` sets the
+            // in-memory count before writing, so this is right either way.
+            context_tokens = Some(context.token_count());
         }
 
-        let mut status = StatusUpdate {
-            context_usage: None,
-            context_tokens: None,
-            max_context_tokens: None,
-            token_usage: usage.clone(),
-            message_id: result.id.clone(),
-            model: Some(self.cached_model_name.lock().unwrap().clone()),
-            yolo_enabled: Some(self.runtime.approval.is_yolo()),
-            thinking: self.thinking(),
-        };
-        if usage.is_some() {
-            status.context_usage = Some(self.status().context_usage);
-        }
-        wire_send(WireMessage::StatusUpdate(status));
+        wire_send(WireMessage::StatusUpdate(self.status_update(
+            context_tokens,
+            usage.clone(),
+            result.id.clone(),
+        )));
 
         let tool_results = result.tool_results().await?;
         debug!("Got tool results: {}", tool_results.len());
@@ -1104,20 +1115,8 @@ impl Soul for KimiSoul {
     }
 
     fn status(&self) -> StatusSnapshot {
-        let context_usage = self
-            .runtime
-            .llm
-            .try_read()
-            .ok()
-            .and_then(|guard| {
-                guard.as_ref().map(|llm| match self.context.try_lock() {
-                    Ok(context) => context.token_count() as f64 / llm.max_context_size as f64,
-                    Err(_) => 0.0,
-                })
-            })
-            .unwrap_or(0.0);
         StatusSnapshot {
-            context_usage,
+            context_usage: self.context_stats(None).0.unwrap_or(0.0),
             yolo_enabled: self.runtime.approval.is_yolo(),
         }
     }

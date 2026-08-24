@@ -91,6 +91,47 @@ impl Status {
             self.thinking = update.thinking;
         }
     }
+
+    /// How full the context is, 0.0–1.0. Derived from the token counts when
+    /// both are known, so the figure can't lag behind a model switch that
+    /// changed the window size; the agent-supplied ratio is the fallback.
+    pub fn context_ratio(&self) -> Option<f64> {
+        match (self.context_tokens, self.max_context_tokens) {
+            (Some(tokens), Some(max)) if max > 0 => Some((tokens as f64 / max as f64).min(1.0)),
+            _ => self.context_usage.map(|usage| usage.clamp(0.0, 1.0)),
+        }
+    }
+
+    /// Status-bar text for the context, mirroring the Python shell's
+    /// `format_context_status`. `None` before the agent has reported anything.
+    pub fn context_label(&self) -> Option<String> {
+        let ratio = self.context_ratio()?;
+        match self.max_context_tokens {
+            Some(max) if max > 0 => Some(format!(
+                "context: {:.1}% ({}/{})",
+                ratio * 100.0,
+                format_token_count(self.context_tokens.unwrap_or(0)),
+                format_token_count(max),
+            )),
+            _ => Some(format!("context: {:.1}%", ratio * 100.0)),
+        }
+    }
+}
+
+/// Compact token count, e.g. `28.5k`, `128k`, `1.2m` — same rendering as the
+/// Python shell's `format_token_count`.
+pub fn format_token_count(n: i64) -> String {
+    let (value, suffix) = if n >= 1_000_000 {
+        (n as f64 / 1_000_000.0, "m")
+    } else if n >= 1_000 {
+        (n as f64 / 1_000.0, "k")
+    } else {
+        return n.to_string();
+    };
+    // Keep one decimal when it says something, but drop a trailing ".0".
+    let compact = format!("{value:.1}");
+    let compact = compact.trim_end_matches('0').trim_end_matches('.');
+    format!("{compact}{suffix}")
 }
 
 #[derive(Default)]
@@ -363,5 +404,84 @@ pub fn user_input_text(input: &UserInput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_update() -> StatusUpdate {
+        StatusUpdate {
+            context_usage: None,
+            context_tokens: None,
+            max_context_tokens: None,
+            token_usage: None,
+            message_id: None,
+            model: None,
+            yolo_enabled: None,
+            thinking: None,
+        }
+    }
+
+    #[test]
+    fn test_format_token_count() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1k");
+        assert_eq!(format_token_count(28_500), "28.5k");
+        assert_eq!(format_token_count(128_000), "128k");
+        assert_eq!(format_token_count(1_200_000), "1.2m");
+    }
+
+    /// A brand-new session reports zero tokens against a real window, and the
+    /// status bar must show that rather than nothing at all.
+    #[test]
+    fn test_empty_context_still_renders() {
+        let mut status = Status::default();
+        status.merge(&StatusUpdate {
+            context_usage: Some(0.0),
+            context_tokens: Some(0),
+            max_context_tokens: Some(256_000),
+            ..status_update()
+        });
+        assert_eq!(
+            status.context_label().as_deref(),
+            Some("context: 0.0% (0/256k)")
+        );
+    }
+
+    /// The percentage comes from the counts, not from a ratio that may have
+    /// been computed against a different model's window size.
+    #[test]
+    fn test_ratio_recomputed_from_counts() {
+        let mut status = Status::default();
+        status.merge(&StatusUpdate {
+            context_usage: Some(0.9),
+            context_tokens: Some(64_000),
+            max_context_tokens: Some(256_000),
+            ..status_update()
+        });
+        assert_eq!(
+            status.context_label().as_deref(),
+            Some("context: 25.0% (64k/256k)")
+        );
+        assert_eq!(status.context_ratio(), Some(0.25));
+    }
+
+    /// An agent that only reports a ratio still gets a percentage shown.
+    #[test]
+    fn test_ratio_only_status() {
+        let mut status = Status::default();
+        status.merge(&StatusUpdate {
+            context_usage: Some(0.125),
+            ..status_update()
+        });
+        assert_eq!(status.context_label().as_deref(), Some("context: 12.5%"));
+    }
+
+    #[test]
+    fn test_nothing_reported_yet() {
+        assert_eq!(Status::default().context_label(), None);
     }
 }

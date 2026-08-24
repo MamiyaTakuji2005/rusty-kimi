@@ -298,6 +298,15 @@ impl WireServer {
         let _ = self
             .write_queue
             .put_nowait(serde_json::to_value(response).unwrap_or(Value::Null));
+
+        // Hand over the model and context figures immediately. A fresh session
+        // has no wire history to replay, so without this a client's status bar
+        // stays blank until the first step completes.
+        let event =
+            build_event_message(WireMessage::StatusUpdate(self.soul.current_status_update()));
+        let _ = self
+            .write_queue
+            .put_nowait(serde_json::to_value(&event).unwrap_or(Value::Null));
     }
 
     async fn handle_prompt(&mut self, msg: JsonRpcMessage) {

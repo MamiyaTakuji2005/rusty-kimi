@@ -512,18 +512,15 @@ impl Session {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let status = &self.transcript.status;
-                if let (Some(tokens), Some(max)) =
-                    (status.context_tokens, status.max_context_tokens)
-                {
-                    let pct = status
-                        .context_usage
-                        .map(|u| format!("{:.0}%", u * 100.0))
-                        .unwrap_or_default();
-                    ui.label(
-                        RichText::new(format!("{tokens}/{max} {pct}"))
-                            .weak()
-                            .monospace(),
-                    );
+                if let Some(label) = status.context_label() {
+                    let text = RichText::new(label).monospace();
+                    // Warn before compaction rather than after it surprises you.
+                    let text = match status.context_ratio().unwrap_or(0.0) {
+                        r if r >= 0.95 => text.color(Color32::from_rgb(200, 80, 80)),
+                        r if r >= 0.80 => text.color(Color32::from_rgb(220, 160, 60)),
+                        _ => text.weak(),
+                    };
+                    ui.label(text);
                 }
                 if status.yolo_enabled == Some(true) {
                     ui.label(RichText::new("yolo").color(Color32::from_rgb(220, 160, 60)));
