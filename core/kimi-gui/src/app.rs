@@ -28,8 +28,8 @@ pub struct KimiGuiApp {
     resume_listing: Option<Receiver<Result<Vec<ResumeEntry>, String>>>,
     /// Error message from a failed `Session::spawn`, shown in a small modal.
     spawn_error: Option<String>,
-    /// Directory most recently associated with a session; where the `+`
-    /// folder picker opens so a parallel session is one Enter away.
+    /// Directory of the session most recently opened this run (any session
+    /// carries its own `work_dir`; this covers the no-active-session case).
     last_workdir: Option<PathBuf>,
 }
 
@@ -52,11 +52,10 @@ impl KimiGuiApp {
             last_workdir: None,
         };
         app.open_session(agent_args.to_vec(), &cc.egui_ctx, None)?;
-        // Sessions launched without `-w` run in the GUI's cwd; make the
-        // folder picker default there too.
-        if app.last_workdir.is_none() {
-            app.last_workdir = std::env::current_dir().ok();
-        }
+        // List past sessions right away: it pre-warms the resume menu and
+        // supplies the most recent session directory as the folder-picker
+        // default after a GUI restart.
+        app.resume_listing = Some(spawn_session_listing(&cc.egui_ctx));
         Ok(app)
     }
 
@@ -66,14 +65,16 @@ impl KimiGuiApp {
         ctx: &egui::Context,
         title: Option<String>,
     ) -> Result<(), String> {
-        // Track the most recent workdir for the `+` picker's start location.
-        if let Some(dir) = args_workdir(&args) {
-            self.last_workdir = Some(PathBuf::from(dir));
-        }
+        // Only an explicit `-w` counts as a chosen directory; a session
+        // launched without one runs in the GUI's incidental cwd, which must
+        // not shadow the newest-on-disk default in the folder picker.
+        let work_dir = args_workdir(&args).map(PathBuf::from);
         let id = self.next_session_id;
         self.next_session_id += 1;
         let title = title.unwrap_or_else(|| session_title(&args, id));
-        let session = Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?;
+        let mut session = Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?;
+        session.work_dir = work_dir.clone();
+        self.last_workdir = work_dir.or(self.last_workdir.take());
         self.sessions.push(session);
         self.active = self.sessions.len() - 1;
         Ok(())
@@ -181,7 +182,20 @@ impl KimiGuiApp {
             self.close_session(index);
         }
         if pick_folder && self.folder_pick.is_none() {
-            let start = self.last_workdir.clone();
+            // Open the picker where a parallel session is one Enter away:
+            // the active tab's directory, else the most recently opened one
+            // this run, else the newest past session on disk, else cwd.
+            let start = self
+                .sessions
+                .get(self.active)
+                .and_then(|session| session.work_dir.clone())
+                .or_else(|| self.last_workdir.clone())
+                .or_else(|| {
+                    self.resume_sessions
+                        .first()
+                        .map(|entry| entry.work_dir.clone())
+                })
+                .or_else(|| std::env::current_dir().ok());
             self.folder_pick = Some(pick_folder_async(ctx, start.as_deref()));
         }
         if refresh_resume && self.resume_listing.is_none() {

@@ -40,6 +40,10 @@ pub struct Session {
     /// Stable unique id, used to scope egui widget state per session.
     pub id: usize,
     pub title: String,
+    /// Explicitly chosen working directory (`-w`), if any; the `+` folder
+    /// picker opens here so a parallel session of the active tab is one
+    /// Enter away.
+    pub work_dir: Option<std::path::PathBuf>,
     client: WireClient,
     inbound: Receiver<Inbound>,
     transcript: Transcript,
@@ -81,6 +85,7 @@ impl Session {
         Ok(Self {
             id,
             title,
+            work_dir: None,
             client,
             inbound,
             transcript: Transcript::default(),
