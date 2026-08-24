@@ -1,13 +1,79 @@
-use std::path::PathBuf;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use kosong::message::{Message, Role};
 
 use crate::soul::message::system;
 use crate::utils::next_available_rotation;
+
+/// Raw OS error codes meaning "someone else is holding this file right now".
+/// On Windows a virus scanner, the search indexer, or an in-flight `fs::copy`
+/// of the context file (what `Fork` does to seed a child) can hold it for a
+/// few milliseconds; the lock clears on its own.
+#[cfg(windows)]
+const TRANSIENT_OS_ERRORS: &[i32] = &[5 /* ACCESS_DENIED */, 32 /* SHARING_VIOLATION */];
+#[cfg(not(windows))]
+const TRANSIENT_OS_ERRORS: &[i32] = &[26 /* ETXTBSY */];
+
+const IO_RETRIES: u32 = 12;
+const IO_RETRY_STEP: Duration = Duration::from_millis(20);
+
+/// Run a context-file operation, retrying while the OS reports the file as
+/// momentarily locked, and naming the file and operation if it still fails.
+///
+/// Every caller propagates this error up through `handle_step_result`, which
+/// aborts the whole turn — so a lock that would have cleared in 20ms must not
+/// be allowed to surface as a bare "os error 32".
+async fn with_io_retry<T, F, Fut>(operation: &str, path: &Path, mut attempt_fn: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        let err = match attempt_fn().await {
+            Ok(value) => return Ok(value),
+            Err(err) => err,
+        };
+        let transient = err
+            .raw_os_error()
+            .is_some_and(|code| TRANSIENT_OS_ERRORS.contains(&code));
+        if !transient || attempt >= IO_RETRIES {
+            error!(
+                error = ?err,
+                "Context file {} failed to {operation} after {attempt} retries",
+                path.display()
+            );
+            return Err(anyhow!(err).context(format!(
+                "failed to {operation} context file {}",
+                path.display()
+            )));
+        }
+        attempt += 1;
+        warn!(
+            "Context file {} is locked ({err}); retrying {operation} ({attempt}/{IO_RETRIES})",
+            path.display()
+        );
+        tokio::time::sleep(IO_RETRY_STEP * attempt).await;
+    }
+}
+
+/// Open the context file for appending, tolerating transient locks.
+async fn open_for_append(path: &Path) -> Result<tokio::fs::File> {
+    with_io_retry("append to", path, || async {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+    })
+    .await
+}
 
 #[derive(Debug)]
 pub struct Context {
@@ -94,11 +160,7 @@ impl Context {
         self.next_checkpoint_id += 1;
         debug!("Checkpointing, ID: {}", checkpoint_id);
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.file_backend)
-            .await?;
+        let mut file = open_for_append(&self.file_backend).await?;
         let line = serde_json::json!({"role": "_checkpoint", "id": checkpoint_id});
         file.write_all(line.to_string().as_bytes()).await?;
         file.write_all(b"\n").await?;
@@ -126,7 +188,10 @@ impl Context {
                 error!("No available rotation path found");
                 anyhow!("No available rotation path found")
             })?;
-        tokio::fs::rename(&self.file_backend, &rotated).await?;
+        with_io_retry("rotate", &self.file_backend, || {
+            tokio::fs::rename(&self.file_backend, &rotated)
+        })
+        .await?;
         debug!("Rotated context file: {}", rotated.display());
 
         self.history.clear();
@@ -173,7 +238,10 @@ impl Context {
                 error!("No available rotation path found");
                 anyhow!("No available rotation path found")
             })?;
-        tokio::fs::rename(&self.file_backend, &rotated).await?;
+        with_io_retry("rotate", &self.file_backend, || {
+            tokio::fs::rename(&self.file_backend, &rotated)
+        })
+        .await?;
         let _ = tokio::fs::File::create(&self.file_backend).await?;
         debug!("Rotated context file: {}", rotated.display());
 
@@ -194,11 +262,7 @@ impl Context {
         debug!("Appending message(s) to context: {:?}", messages);
         self.history.extend(messages.clone());
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.file_backend)
-            .await?;
+        let mut file = open_for_append(&self.file_backend).await?;
         for message in messages {
             let mut value = serde_json::to_value(&message)?;
             strip_message_nulls(&mut value);
@@ -212,11 +276,7 @@ impl Context {
     pub async fn update_token_count(&mut self, token_count: i64) -> Result<()> {
         debug!("Updating token count in context: {}", token_count);
         self.token_count = token_count;
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.file_backend)
-            .await?;
+        let mut file = open_for_append(&self.file_backend).await?;
         let line = serde_json::json!({"role": "_usage", "token_count": token_count});
         file.write_all(line.to_string().as_bytes()).await?;
         file.write_all(b"\n").await?;

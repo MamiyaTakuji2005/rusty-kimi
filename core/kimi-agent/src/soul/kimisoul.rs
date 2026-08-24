@@ -937,7 +937,12 @@ impl KimiSoul {
         let usage = result.usage.clone();
         if let Some(usage) = &usage {
             let mut context = self.context.lock().await;
-            context.update_token_count(usage.input()).await?;
+            // Bookkeeping only — the count is re-read from the next step's
+            // usage. Losing the record is not worth aborting the turn for,
+            // which is what propagating this error does.
+            if let Err(err) = context.update_token_count(usage.input()).await {
+                warn!("Failed to record token count: {err:#}");
+            }
         }
 
         let mut status = StatusUpdate {
