@@ -73,46 +73,48 @@ fn tool_call_ui(
     result: Option<&ToolReturnValue>,
     subagent: Option<&crate::transcript::SubagentSummary>,
 ) {
-    egui::Frame::group(ui.style()).inner_margin(6.0).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            match result {
-                None => {
-                    ui.spinner();
+    egui::Frame::group(ui.style())
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                match result {
+                    None => {
+                        ui.spinner();
+                    }
+                    Some(r) if r.is_error => {
+                        ui.label(RichText::new("✗").color(Color32::from_rgb(200, 80, 80)));
+                    }
+                    Some(_) => {
+                        ui.label(RichText::new("✓").color(Color32::from_rgb(80, 170, 80)));
+                    }
                 }
-                Some(r) if r.is_error => {
-                    ui.label(RichText::new("✗").color(Color32::from_rgb(200, 80, 80)));
+                ui.label(RichText::new(&call.function.name).strong().monospace());
+                if let Some(args) = &call.function.arguments {
+                    ui.label(
+                        RichText::new(truncate(&flatten(args), ARGS_PREVIEW_CHARS))
+                            .weak()
+                            .monospace(),
+                    );
                 }
-                Some(_) => {
-                    ui.label(RichText::new("✓").color(Color32::from_rgb(80, 170, 80)));
-                }
-            }
-            ui.label(RichText::new(&call.function.name).strong().monospace());
-            if let Some(args) = &call.function.arguments {
+            });
+
+            if let Some(summary) = subagent {
                 ui.label(
-                    RichText::new(truncate(&flatten(args), ARGS_PREVIEW_CHARS))
-                        .weak()
-                        .monospace(),
+                    RichText::new(format!(
+                        "subagent · {} events · recent: {}",
+                        summary.events,
+                        summary.recent_tools.join(", ")
+                    ))
+                    .weak()
+                    .small(),
                 );
             }
+
+            if let Some(result) = result {
+                tool_result_ui(ui, result);
+            }
         });
-
-        if let Some(summary) = subagent {
-            ui.label(
-                RichText::new(format!(
-                    "subagent · {} events · recent: {}",
-                    summary.events,
-                    summary.recent_tools.join(", ")
-                ))
-                .weak()
-                .small(),
-            );
-        }
-
-        if let Some(result) = result {
-            tool_result_ui(ui, result);
-        }
-    });
 }
 
 fn tool_result_ui(ui: &mut egui::Ui, result: &ToolReturnValue) {
@@ -132,7 +134,9 @@ fn tool_result_ui(ui: &mut egui::Ui, result: &ToolReturnValue) {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new(truncate(output_text, OUTPUT_PREVIEW_CHARS)).weak().monospace(),
+                    RichText::new(truncate(output_text, OUTPUT_PREVIEW_CHARS))
+                        .weak()
+                        .monospace(),
                 );
             });
     }
@@ -189,7 +193,11 @@ fn diff_ui(ui: &mut egui::Ui, path: &str, old_text: &str, new_text: &str) {
                     ChangeTag::Insert => ("+", Color32::from_rgb(90, 170, 90)),
                     ChangeTag::Equal => (" ", ui.visuals().weak_text_color()),
                 };
-                ui.label(RichText::new(format!("{sign} {line}")).monospace().color(color));
+                ui.label(
+                    RichText::new(format!("{sign} {line}"))
+                        .monospace()
+                        .color(color),
+                );
             }
         }
     }
@@ -200,30 +208,32 @@ fn approval_block_ui(
     info: &crate::transcript::ApprovalInfo,
     response: Option<&ApprovalResponseKind>,
 ) {
-    egui::Frame::group(ui.style()).inner_margin(6.0).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("approval").strong());
-            ui.label(RichText::new(format!("{} · {}", info.sender, info.action)).weak());
+    egui::Frame::group(ui.style())
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("approval").strong());
+                ui.label(RichText::new(format!("{} · {}", info.sender, info.action)).weak());
+            });
+            ui.label(&info.description);
+            match response {
+                Some(ApprovalResponseKind::Approve) => {
+                    ui.label(RichText::new("approved").color(Color32::from_rgb(80, 170, 80)));
+                }
+                Some(ApprovalResponseKind::ApproveForSession) => {
+                    ui.label(
+                        RichText::new("approved for session").color(Color32::from_rgb(80, 170, 80)),
+                    );
+                }
+                Some(ApprovalResponseKind::Reject) => {
+                    ui.label(RichText::new("rejected").color(Color32::from_rgb(200, 80, 80)));
+                }
+                None => {
+                    ui.label(RichText::new("pending").weak().italics());
+                }
+            }
         });
-        ui.label(&info.description);
-        match response {
-            Some(ApprovalResponseKind::Approve) => {
-                ui.label(RichText::new("approved").color(Color32::from_rgb(80, 170, 80)));
-            }
-            Some(ApprovalResponseKind::ApproveForSession) => {
-                ui.label(
-                    RichText::new("approved for session").color(Color32::from_rgb(80, 170, 80)),
-                );
-            }
-            Some(ApprovalResponseKind::Reject) => {
-                ui.label(RichText::new("rejected").color(Color32::from_rgb(200, 80, 80)));
-            }
-            None => {
-                ui.label(RichText::new("pending").weak().italics());
-            }
-        }
-    });
 }
 
 fn flatten(text: &str) -> String {

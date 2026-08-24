@@ -7,11 +7,22 @@ use kimi_agent::wire::{
 use kosong::tooling::ToolReturnValue;
 
 pub const MAX_SUBAGENT_TOOLS_SHOWN: usize = 4;
+const SUBAGENT_TITLE_MAX_CHARS: usize = 28;
 
 pub struct SubagentSummary {
     pub events: u64,
     /// Names of the most recent subagent tool calls (capped).
     pub recent_tools: Vec<String>,
+}
+
+/// A subagent's own event stream, folded into a nested transcript.
+/// Rendered as a second-layer tab under the session tab.
+pub struct SubagentTranscript {
+    pub task_tool_call_id: String,
+    pub title: String,
+    pub transcript: Transcript,
+    /// Set when the subagent's own turn ends (its inner TurnEnd event).
+    pub done: bool,
 }
 
 pub struct ApprovalInfo {
@@ -83,6 +94,8 @@ impl Status {
 pub struct Transcript {
     pub blocks: Vec<Block>,
     pub status: Status,
+    /// One nested transcript per subagent, keyed by the Task tool call id.
+    pub subagents: Vec<SubagentTranscript>,
 }
 
 impl Transcript {
@@ -110,7 +123,8 @@ impl Transcript {
                 true
             }
             WireMessage::CompactionBegin(_) => {
-                self.blocks.push(Block::Info("compacting context...".into()));
+                self.blocks
+                    .push(Block::Info("compacting context...".into()));
                 true
             }
             WireMessage::CompactionEnd(_) => {
@@ -136,7 +150,10 @@ impl Transcript {
             WireMessage::ToolCallPart(part) => {
                 // Streamed argument fragments merge into the newest open call.
                 for block in self.blocks.iter_mut().rev() {
-                    if let Block::ToolCall { call, result: None, .. } = block {
+                    if let Block::ToolCall {
+                        call, result: None, ..
+                    } = block
+                    {
                         call.merge_in_place(&part);
                         return true;
                     }
@@ -145,35 +162,76 @@ impl Transcript {
             }
             WireMessage::ToolResult(tool_result) => {
                 for block in self.blocks.iter_mut().rev() {
-                    if let Block::ToolCall { call, result, .. } = block {
-                        if call.id == tool_result.tool_call_id && result.is_none() {
-                            *result = Some(tool_result.return_value);
-                            return true;
-                        }
+                    if let Block::ToolCall { call, result, .. } = block
+                        && call.id == tool_result.tool_call_id
+                        && result.is_none()
+                    {
+                        *result = Some(tool_result.return_value);
+                        return true;
                     }
                 }
                 false
             }
             WireMessage::SubagentEvent(sub) => {
+                let task_id = sub.task_tool_call_id;
+                let inner = *sub.event;
+                // Inline summary on the parent Task tool-call block.
+                let mut title_hint = None;
                 for block in self.blocks.iter_mut().rev() {
-                    if let Block::ToolCall { call, subagent, .. } = block {
-                        if call.id == sub.task_tool_call_id {
-                            let summary = subagent.get_or_insert_with(|| SubagentSummary {
-                                events: 0,
-                                recent_tools: Vec::new(),
-                            });
-                            summary.events += 1;
-                            if let WireMessage::ToolCall(inner) = sub.event.as_ref() {
-                                summary.recent_tools.push(inner.function.name.clone());
-                                if summary.recent_tools.len() > MAX_SUBAGENT_TOOLS_SHOWN {
-                                    summary.recent_tools.remove(0);
-                                }
+                    if let Block::ToolCall { call, subagent, .. } = block
+                        && call.id == task_id
+                    {
+                        let summary = subagent.get_or_insert_with(|| SubagentSummary {
+                            events: 0,
+                            recent_tools: Vec::new(),
+                        });
+                        summary.events += 1;
+                        if let WireMessage::ToolCall(inner_call) = &inner {
+                            summary.recent_tools.push(inner_call.function.name.clone());
+                            if summary.recent_tools.len() > MAX_SUBAGENT_TOOLS_SHOWN {
+                                summary.recent_tools.remove(0);
                             }
-                            return true;
                         }
+                        title_hint = call.function.arguments.as_deref().and_then(subagent_title);
+                        break;
                     }
                 }
-                false
+                // Full event stream into the subagent's own transcript
+                // (creates the second-layer tab on first event). `/fork`-style
+                // spawns have no parent tool call, so the first TurnBegin's
+                // prompt supplies the tab title instead.
+                let sub_transcript = match self
+                    .subagents
+                    .iter_mut()
+                    .find(|s| s.task_tool_call_id == task_id)
+                {
+                    Some(existing) => existing,
+                    None => {
+                        let title = title_hint
+                            .or_else(|| match &inner {
+                                WireMessage::TurnBegin(turn) => {
+                                    clip_title(&user_input_text(&turn.user_input))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| {
+                                format!("task {}", task_id.chars().take(8).collect::<String>())
+                            });
+                        self.subagents.push(SubagentTranscript {
+                            task_tool_call_id: task_id,
+                            title,
+                            transcript: Transcript::default(),
+                            done: false,
+                        });
+                        self.subagents.last_mut().expect("just pushed")
+                    }
+                };
+                if matches!(inner, WireMessage::TurnEnd(_)) {
+                    // The subagent's turn is its whole life; TurnEnd means done.
+                    sub_transcript.done = true;
+                }
+                sub_transcript.transcript.apply_event(inner);
+                true
             }
             WireMessage::Notification(note) => {
                 self.blocks
@@ -182,11 +240,11 @@ impl Transcript {
             }
             WireMessage::ApprovalResponse(resp) => {
                 for block in self.blocks.iter_mut().rev() {
-                    if let Block::Approval { info, response } = block {
-                        if info.request_id == resp.request_id {
-                            *response = Some(resp.response);
-                            return true;
-                        }
+                    if let Block::Approval { info, response } = block
+                        && info.request_id == resp.request_id
+                    {
+                        *response = Some(resp.response);
+                        return true;
                     }
                 }
                 false
@@ -230,6 +288,40 @@ impl Transcript {
         });
         self.blocks.len() - 1
     }
+}
+
+/// Derive a tab title from the spawning tool call's JSON arguments
+/// (Fork has `description`/`prompt`, Agent has `agent_file`/`prompt`).
+fn subagent_title(args: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(args).ok()?;
+    for key in ["description", "agent_name", "subagent_type", "name"] {
+        if let Some(title) = value.get(key).and_then(|v| v.as_str()).and_then(clip_title) {
+            return Some(title);
+        }
+    }
+    if let Some(file) = value.get("agent_file").and_then(|v| v.as_str())
+        && let Some(stem) = std::path::Path::new(file).file_stem()
+        && let Some(title) = clip_title(&stem.to_string_lossy())
+    {
+        return Some(title);
+    }
+    value
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .and_then(clip_title)
+}
+
+/// First line of `text`, trimmed and capped, or None if empty.
+fn clip_title(text: &str) -> Option<String> {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return None;
+    }
+    let mut title: String = line.chars().take(SUBAGENT_TITLE_MAX_CHARS).collect();
+    if title.chars().count() < line.chars().count() {
+        title.push('…');
+    }
+    Some(title)
 }
 
 pub fn user_input_text(input: &UserInput) -> String {

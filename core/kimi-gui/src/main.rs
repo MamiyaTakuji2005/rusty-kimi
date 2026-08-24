@@ -12,6 +12,7 @@
 mod app;
 mod client;
 mod render;
+mod session;
 mod transcript;
 
 fn main() -> eframe::Result<()> {

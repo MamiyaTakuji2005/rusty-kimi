@@ -78,8 +78,8 @@ impl WireClient {
                     line.clear();
                     match reader.read_line(&mut line) {
                         Ok(0) => {
-                            let _ = inbound_tx
-                                .send(Inbound::AgentExited("agent stdout closed".into()));
+                            let _ =
+                                inbound_tx.send(Inbound::AgentExited("agent stdout closed".into()));
                             break;
                         }
                         Ok(_) => {
@@ -95,8 +95,8 @@ impl WireClient {
                             }
                         }
                         Err(err) => {
-                            let _ = inbound_tx
-                                .send(Inbound::AgentExited(format!("read error: {err}")));
+                            let _ =
+                                inbound_tx.send(Inbound::AgentExited(format!("read error: {err}")));
                             break;
                         }
                     }
