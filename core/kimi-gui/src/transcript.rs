@@ -48,6 +48,9 @@ pub enum Block {
         call: ToolCall,
         result: Option<ToolReturnValue>,
         subagent: Option<SubagentSummary>,
+        /// The turn ended (or the step was interrupted) with no result for
+        /// this call; render a "no result" marker instead of a live spinner.
+        abandoned: bool,
     },
     Approval {
         info: ApprovalInfo,
@@ -117,8 +120,10 @@ impl Transcript {
                 });
                 true
             }
-            WireMessage::TurnEnd(_) | WireMessage::StepBegin(_) => false,
+            WireMessage::TurnEnd(_) => self.abandon_open_tool_calls(),
+            WireMessage::StepBegin(_) => false,
             WireMessage::StepInterrupted(_) => {
+                self.abandon_open_tool_calls();
                 self.blocks.push(Block::Info("step interrupted".into()));
                 true
             }
@@ -144,6 +149,7 @@ impl Transcript {
                     call,
                     result: None,
                     subagent: None,
+                    abandoned: false,
                 });
                 true
             }
@@ -279,6 +285,25 @@ impl Transcript {
             ContentPart::AudioUrl(_) => self.blocks.push(Block::Info("[audio]".into())),
             ContentPart::VideoUrl(_) => self.blocks.push(Block::Info("[video]".into())),
         }
+    }
+
+    /// Mark result-less tool calls as abandoned so they stop rendering as
+    /// live (a perpetual spinner forces a repaint every frame). Returns true
+    /// if any call was marked.
+    fn abandon_open_tool_calls(&mut self) -> bool {
+        let mut changed = false;
+        for block in &mut self.blocks {
+            if let Block::ToolCall {
+                result: None,
+                abandoned: abandoned @ false,
+                ..
+            } = block
+            {
+                *abandoned = true;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn push_approval(&mut self, info: ApprovalInfo) -> usize {

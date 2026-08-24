@@ -32,7 +32,14 @@ pub fn block_ui(
             call,
             result,
             subagent,
-        } => tool_call_ui(ui, call, result.as_ref(), subagent.as_ref()),
+            abandoned,
+        } => tool_call_ui(
+            ui,
+            call,
+            result.as_ref(),
+            subagent.as_ref(),
+            turn_running && !abandoned,
+        ),
         Block::Approval { info, response } => approval_block_ui(ui, info, response.as_ref()),
         Block::Info(text) => {
             ui.label(RichText::new(text).weak().italics());
@@ -72,6 +79,7 @@ fn tool_call_ui(
     call: &kimi_agent::wire::ToolCall,
     result: Option<&ToolReturnValue>,
     subagent: Option<&crate::transcript::SubagentSummary>,
+    live: bool,
 ) {
     egui::Frame::group(ui.style())
         .inner_margin(6.0)
@@ -79,8 +87,15 @@ fn tool_call_ui(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 match result {
-                    None => {
+                    // Only spin while the call can still produce a result:
+                    // egui's spinner forces a repaint every frame it is
+                    // drawn, so an orphaned one would pin the render loop.
+                    None if live => {
                         ui.spinner();
+                    }
+                    None => {
+                        ui.label(RichText::new("?").weak())
+                            .on_hover_text("ended without a recorded result");
                     }
                     Some(r) if r.is_error => {
                         ui.label(RichText::new("✗").color(Color32::from_rgb(200, 80, 80)));

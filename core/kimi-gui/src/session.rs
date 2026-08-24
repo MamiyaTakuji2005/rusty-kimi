@@ -373,8 +373,10 @@ impl Session {
     }
 
     fn transcript_view(&mut self, ui: &mut egui::Ui) {
-        let blocks = match &self.active_subtab {
-            None => &self.transcript.blocks,
+        // A fork/subagent tab runs on its own clock: the child streams while
+        // the parent is Ready, so "running" comes from its done flag there.
+        let (blocks, running) = match &self.active_subtab {
+            None => (&self.transcript.blocks, self.phase == Phase::Running),
             Some(task_id) => {
                 match self
                     .transcript
@@ -382,12 +384,11 @@ impl Session {
                     .iter()
                     .find(|s| &s.task_tool_call_id == task_id)
                 {
-                    Some(sub) => &sub.transcript.blocks,
-                    None => &self.transcript.blocks,
+                    Some(sub) => (&sub.transcript.blocks, !sub.done),
+                    None => (&self.transcript.blocks, self.phase == Phase::Running),
                 }
             }
         };
-        let running = self.phase == Phase::Running;
         let md_cache = &mut self.md_cache;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
