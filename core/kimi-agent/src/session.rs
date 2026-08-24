@@ -102,7 +102,10 @@ impl Session {
             tokio::fs::create_dir_all(&session_dir)
                 .await
                 .unwrap_or_else(|err| {
-                    panic!("Failed to create session dir {}: {err}", session_dir.display())
+                    panic!(
+                        "Failed to create session dir {}: {err}",
+                        session_dir.display()
+                    )
                 });
             if tokio::fs::metadata(&context_file).await.is_ok() {
                 tokio::fs::remove_file(&context_file)
@@ -121,7 +124,10 @@ impl Session {
             tokio::fs::create_dir_all(&session_dir)
                 .await
                 .unwrap_or_else(|err| {
-                    panic!("Failed to create session dir {}: {err}", session_dir.display())
+                    panic!(
+                        "Failed to create session dir {}: {err}",
+                        session_dir.display()
+                    )
                 });
             let context_file = session_dir.join("context.jsonl");
             (session_dir, context_file)

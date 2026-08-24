@@ -453,10 +453,7 @@ async fn test_read_edge_cases() {
         .await;
 
     assert!(!result.is_error);
-    assert_eq!(
-        output_text(&result),
-        "     2\tLine 2: This is a test file"
-    );
+    assert_eq!(output_text(&result), "     2\tLine 2: This is a test file");
     assert_eq!(
         result.message,
         "1 lines read from file starting from line 2. Total lines in file: 5."

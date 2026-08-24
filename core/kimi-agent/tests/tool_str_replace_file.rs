@@ -79,7 +79,8 @@ async fn test_replace_all_occurrences() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "apple".to_string(),
                 new: "fruit".to_string(),
                 replace_all: true,
@@ -112,12 +113,14 @@ async fn test_replace_multiple_edits() {
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
             edit: vec![
-                EditParams { regex: false, 
+                EditParams {
+                    regex: false,
                     old: "Hello".to_string(),
                     new: "Hi".to_string(),
                     replace_all: false,
                 },
-                EditParams { regex: false, 
+                EditParams {
+                    regex: false,
                     old: "Goodbye".to_string(),
                     new: "See you".to_string(),
                     replace_all: false,
@@ -150,7 +153,8 @@ async fn test_replace_multiline_content() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "Line 2\nLine 3".to_string(),
                 new: "Modified line 2\nModified line 3".to_string(),
                 replace_all: false,
@@ -182,7 +186,8 @@ async fn test_replace_unicode_content() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "世界".to_string(),
                 new: "地球".to_string(),
                 replace_all: false,
@@ -214,7 +219,8 @@ async fn test_replace_no_match() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "notfound".to_string(),
                 new: "replacement".to_string(),
                 replace_all: false,
@@ -249,7 +255,8 @@ async fn test_replace_with_relative_path() {
             "StrReplaceFile",
             tool.call_typed(StrReplaceParams {
                 path: "relative/path/file.txt".to_string(),
-                edit: vec![EditParams { regex: false, 
+                edit: vec![EditParams {
+                    regex: false,
                     old: "old".to_string(),
                     new: "new".to_string(),
                     replace_all: false,
@@ -279,7 +286,8 @@ async fn test_replace_outside_work_directory() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: outside_file.to_string_lossy().to_string(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "old".to_string(),
                 new: "new".to_string(),
                 replace_all: false,
@@ -313,7 +321,8 @@ async fn test_replace_outside_work_directory_with_prefix() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: sneaky_file.to_string_lossy().to_string(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "content".to_string(),
                 new: "new".to_string(),
                 replace_all: false,
@@ -339,7 +348,8 @@ async fn test_replace_nonexistent_file() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "old".to_string(),
                 new: "new".to_string(),
                 replace_all: false,
@@ -363,7 +373,8 @@ async fn test_replace_directory_instead_of_file() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: dir_path.to_string_lossy(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "old".to_string(),
                 new: "new".to_string(),
                 replace_all: false,
@@ -392,12 +403,14 @@ async fn test_replace_mixed_multiple_edits() {
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
             edit: vec![
-                EditParams { regex: false, 
+                EditParams {
+                    regex: false,
                     old: "apple".to_string(),
                     new: "fruit".to_string(),
                     replace_all: false,
                 },
-                EditParams { regex: false, 
+                EditParams {
+                    regex: false,
                     old: "banana".to_string(),
                     new: "tasty".to_string(),
                     replace_all: true,
@@ -483,7 +496,10 @@ async fn test_regex_capture_expansion() {
     let fixture = RuntimeFixture::new();
     let tool = StrReplaceFile::new(&fixture.runtime);
     let file_path = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone() / "test.txt";
-    file_path.write_text("user@example").await.expect("write file");
+    file_path
+        .write_text("user@example")
+        .await
+        .expect("write file");
 
     let result = call_with_tool_call(
         "StrReplaceFile",
@@ -530,7 +546,11 @@ async fn test_regex_undefined_group_errors() {
 
     // Previously this silently expanded to "" and wiped the file.
     assert!(result.is_error);
-    assert!(result.message.contains("undefined capture group"), "msg: {}", result.message);
+    assert!(
+        result.message.contains("undefined capture group"),
+        "msg: {}",
+        result.message
+    );
     assert_eq!(file_path.read_text().await.expect("read file"), original);
 }
 
@@ -574,7 +594,8 @@ async fn test_replace_empty_strings() {
         "StrReplaceFile",
         tool.call_typed(StrReplaceParams {
             path: file_path.to_string_lossy(),
-            edit: vec![EditParams { regex: false, 
+            edit: vec![EditParams {
+                regex: false,
                 old: "world".to_string(),
                 new: "".to_string(),
                 replace_all: false,

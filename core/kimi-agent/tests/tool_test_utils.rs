@@ -100,7 +100,9 @@ impl RuntimeFixture {
         };
 
         let tasks_dir = share_dir.path().join("tasks");
-        let cached_kaos = Arc::new(CachedKaos::empty(PathBuf::from(work_path.to_string_lossy().to_string())));
+        let cached_kaos = Arc::new(CachedKaos::empty(PathBuf::from(
+            work_path.to_string_lossy().to_string(),
+        )));
 
         let runtime = Runtime {
             config,

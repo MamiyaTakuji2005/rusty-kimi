@@ -40,9 +40,14 @@ agent:
 "#,
     );
 
-    let agent = load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default())
-        .await
-        .expect("load agent");
+    let agent = load_agent(
+        &agent_yaml,
+        fixture.runtime.clone(),
+        &[],
+        &Default::default(),
+    )
+    .await
+    .expect("load agent");
 
     assert!(agent.system_prompt.contains("Test system prompt with"));
     assert!(
@@ -72,9 +77,14 @@ agent:
 "#,
     );
 
-    let agent = load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default())
-        .await
-        .expect("load agent");
+    let agent = load_agent(
+        &agent_yaml,
+        fixture.runtime.clone(),
+        &[],
+        &Default::default(),
+    )
+    .await
+    .expect("load agent");
 
     assert!(agent.system_prompt.contains("$100"));
     assert!(agent.system_prompt.contains("$PATH"));
@@ -104,7 +114,14 @@ agent:
 "#,
     );
 
-    let err = match load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default()).await {
+    let err = match load_agent(
+        &agent_yaml,
+        fixture.runtime.clone(),
+        &[],
+        &Default::default(),
+    )
+    .await
+    {
         Ok(_) => panic!("expected error"),
         Err(err) => err,
     };
@@ -159,7 +176,14 @@ agent:
 "#,
     );
 
-    match load_agent(&agent_yaml, fixture.runtime.clone(), &[], &Default::default()).await {
+    match load_agent(
+        &agent_yaml,
+        fixture.runtime.clone(),
+        &[],
+        &Default::default(),
+    )
+    .await
+    {
         Ok(_) => panic!("expected error"),
         Err(err) => assert!(err.to_string().contains("Invalid tools")),
     }

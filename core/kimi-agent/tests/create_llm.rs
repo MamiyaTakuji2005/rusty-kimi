@@ -78,7 +78,7 @@ fn test_augment_provider_with_env_vars_kimi() {
             api_key: "env-key".to_string(),
             env: None,
             custom_headers: None,
-        extra_body: None,
+            extra_body: None,
         }
     );
     assert_eq!(

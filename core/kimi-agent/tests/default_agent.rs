@@ -61,9 +61,14 @@ async fn test_default_agent() {
     let agent_file = default_agent_file();
     let spec = load_agent_spec(&agent_file).await.expect("load agent spec");
 
-    let agent = load_agent(&agent_file, fixture.runtime.clone(), &[], &Default::default())
-        .await
-        .expect("load agent");
+    let agent = load_agent(
+        &agent_file,
+        fixture.runtime.clone(),
+        &[],
+        &Default::default(),
+    )
+    .await
+    .expect("load agent");
 
     let template = std::fs::read_to_string(&spec.system_prompt_path).expect("read system prompt");
     let work_dir_placeholder = "/path/to/work/dir";

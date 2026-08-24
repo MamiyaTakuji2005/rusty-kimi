@@ -77,17 +77,10 @@ pub fn load_tool(
         "kimi_cli.tools.test:Plus" => Ok(Some(Arc::new(test::Plus))),
         "kimi_cli.tools.test:Compare" => Ok(Some(Arc::new(test::Compare))),
         "kimi_cli.tools.test:Panic" => Ok(Some(Arc::new(test::Panic))),
-        "kimi_cli.tools.agent:Agent" => {
-            Ok(Some(Arc::new(agent::AgentTool::new(deps.runtime))))
-        }
-        "kimi_cli.tools.fork:Fork" => {
-            Ok(Some(Arc::new(fork::ForkTool::new(deps.runtime))))
-        }
-        "kimi_cli.tools.snapshot:Undo" => {
-            Ok(Some(Arc::new(snapshot::Undo::new(deps.runtime))))
-        }
-        "kimi_cli.tools.multiagent:Task"
-        | "kimi_cli.tools.multiagent:CreateSubagent" => {
+        "kimi_cli.tools.agent:Agent" => Ok(Some(Arc::new(agent::AgentTool::new(deps.runtime)))),
+        "kimi_cli.tools.fork:Fork" => Ok(Some(Arc::new(fork::ForkTool::new(deps.runtime)))),
+        "kimi_cli.tools.snapshot:Undo" => Ok(Some(Arc::new(snapshot::Undo::new(deps.runtime)))),
+        "kimi_cli.tools.multiagent:Task" | "kimi_cli.tools.multiagent:CreateSubagent" => {
             Err(InvalidToolError::new(format!("Tool removed: {tool_path}")))
         }
         _ => Err(InvalidToolError::new(format!("Invalid tool: {tool_path}"))),
@@ -149,7 +142,10 @@ pub fn extract_key_argument(json_content: &str, tool_name: &str) -> Option<Strin
         ),
         "TaskOutput" => value.get("task_id")?.as_str()?.to_string(),
         "TaskStop" => value.get("task_id")?.as_str()?.to_string(),
-        "Undo" => format!("steps={}", value.get("steps").and_then(|v| v.as_u64()).unwrap_or(1)),
+        "Undo" => format!(
+            "steps={}",
+            value.get("steps").and_then(|v| v.as_u64()).unwrap_or(1)
+        ),
         _ => json_content.to_string(),
     };
 

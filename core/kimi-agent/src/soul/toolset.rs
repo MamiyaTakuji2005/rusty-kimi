@@ -30,7 +30,9 @@ use crate::exception::{InvalidToolError, MCPConfigError, MCPRuntimeError};
 use crate::mcp::{get_mcp_credential_store, has_oauth_tokens};
 use crate::soul::agent::Runtime;
 use crate::soul::get_current_wire_or_none;
-use crate::tools::file::{try_parse_str_replace_fallback, try_parse_write_file_fallback, WriteMode};
+use crate::tools::file::{
+    WriteMode, try_parse_str_replace_fallback, try_parse_write_file_fallback,
+};
 use crate::tools::utils::tool_rejected_error;
 use crate::tools::{ToolDeps, load_tool};
 use crate::wire::ToolCallRequest;

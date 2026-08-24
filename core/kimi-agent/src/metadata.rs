@@ -102,8 +102,7 @@ pub async fn load_metadata() -> Metadata {
     // existing sessions are not orphaned.
     if cfg!(windows) {
         let sessions_root = get_share_dir().join("sessions");
-        let mut seen: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut deduped: Vec<WorkDirMeta> = Vec::new();
         for wd in metadata.work_dirs.into_iter() {
             let normalized = normalize_path_string(&wd.path);
@@ -126,12 +125,14 @@ pub async fn load_metadata() -> Metadata {
                         if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
                             tracing::warn!(
                                 "Failed to migrate sessions dir {} -> {}: {e}",
-                                old_dir.display(), new_dir.display()
+                                old_dir.display(),
+                                new_dir.display()
                             );
                         } else {
                             tracing::info!(
                                 "Migrated sessions dir {} -> {}",
-                                old_dir.display(), new_dir.display()
+                                old_dir.display(),
+                                new_dir.display()
                             );
                         }
                     }

@@ -103,8 +103,14 @@ impl CallableTool2 for Grep {
             _ => self.work_dir.clone(),
         };
 
-        let before_ctx = params.context.unwrap_or(0).max(params.before_context.unwrap_or(0));
-        let after_ctx = params.context.unwrap_or(0).max(params.after_context.unwrap_or(0));
+        let before_ctx = params
+            .context
+            .unwrap_or(0)
+            .max(params.before_context.unwrap_or(0));
+        let after_ctx = params
+            .context
+            .unwrap_or(0)
+            .max(params.after_context.unwrap_or(0));
 
         let cfg = GrepConfig {
             pattern: params.pattern,
@@ -344,7 +350,10 @@ fn run_grep(cfg: GrepConfig) -> Result<GrepOutput, String> {
         }
     }
 
-    Ok(GrepOutput { lines: out, truncated })
+    Ok(GrepOutput {
+        lines: out,
+        truncated,
+    })
 }
 
 /// Return a path string relative to the search root when possible.

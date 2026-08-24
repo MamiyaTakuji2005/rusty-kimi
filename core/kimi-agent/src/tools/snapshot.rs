@@ -52,20 +52,13 @@ impl CallableTool2 for Undo {
         let report = match self.cached_kaos.undo(steps).await {
             Ok(r) => r,
             Err(e) => {
-                return kosong::tooling::tool_error(
-                    "",
-                    format!("Undo failed: {e}"),
-                    "Undo error",
-                )
+                return kosong::tooling::tool_error("", format!("Undo failed: {e}"), "Undo error");
             }
         };
 
         let mut out = format!(
             "steps_requested: {steps}\nsteps_available: {}\nsteps_applied: {}\nrestored: {}\ndeleted: {}",
-            report.steps_available,
-            report.steps_applied,
-            report.restored,
-            report.deleted,
+            report.steps_available, report.steps_applied, report.restored, report.deleted,
         );
         if !report.errors.is_empty() {
             out.push_str(&format!("\nerrors: {}", report.errors.len()));

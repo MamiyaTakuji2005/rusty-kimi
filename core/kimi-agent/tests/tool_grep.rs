@@ -258,7 +258,11 @@ async fn test_grep_head_limit() {
         .filter(|line| !line.trim().is_empty() && !line.starts_with("..."))
         .collect();
     assert!(lines.len() <= 2);
-    assert!(result.message.contains("Results truncated to first 2 lines"));
+    assert!(
+        result
+            .message
+            .contains("Results truncated to first 2 lines")
+    );
 }
 
 #[tokio::test]

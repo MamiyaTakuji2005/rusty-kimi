@@ -83,7 +83,11 @@ impl CallableTool2 for TaskList {
                 .unwrap_or_default();
             lines.push(format!(
                 "{}: {} [{}]{}{}",
-                task.spec.id, task.spec.description, task.status.as_str(), exit, elapsed
+                task.spec.id,
+                task.spec.description,
+                task.status.as_str(),
+                exit,
+                elapsed
             ));
         }
 

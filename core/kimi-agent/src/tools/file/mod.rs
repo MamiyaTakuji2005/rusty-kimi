@@ -17,10 +17,10 @@ pub use glob::{Glob, GlobParams};
 pub use grep::{Grep, GrepParams};
 pub use read::{ReadFile, ReadParams};
 pub use read_media::{ReadMediaFile, ReadMediaParams};
-pub use replace::{EditParams, StrReplaceFile, StrReplaceParams};
 pub(crate) use replace::try_parse_str_replace_fallback;
-pub use write::{WriteFile, WriteMode, WriteParams};
+pub use replace::{EditParams, StrReplaceFile, StrReplaceParams};
 pub(crate) use write::try_parse_write_file_fallback;
+pub use write::{WriteFile, WriteMode, WriteParams};
 
 pub const MAX_LINES: usize = 1000;
 pub const MAX_LINE_LENGTH: usize = 2000;

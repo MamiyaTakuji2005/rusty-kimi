@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use kosong::tooling::{CallableTool2, ToolReturnValue, tool_error};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use kosong::tooling::{CallableTool2, ToolReturnValue, tool_error};
 
 use crate::tasks::BackgroundTaskManager;
 use crate::tools::utils::ToolResultBuilder;
@@ -90,11 +90,9 @@ impl CallableTool2 for TaskOutput {
                     .map(|v| !v.status.is_terminal())
                     .unwrap_or(false);
                 if still_running {
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(params.timeout as u64),
-                        notified,
-                    )
-                    .await;
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(params.timeout as u64), notified)
+                            .await;
                 }
             }
         }

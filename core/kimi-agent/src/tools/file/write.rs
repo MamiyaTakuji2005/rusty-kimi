@@ -177,10 +177,20 @@ pub(crate) fn try_parse_write_file_fallback(raw: &str) -> Option<WriteParams> {
         .ok()
         .and_then(|re| re.captures(raw))
         .and_then(|caps| caps.get(1))
-        .map(|m| if m.as_str() == "append" { WriteMode::Append } else { WriteMode::Overwrite })
+        .map(|m| {
+            if m.as_str() == "append" {
+                WriteMode::Append
+            } else {
+                WriteMode::Overwrite
+            }
+        })
         .unwrap_or(WriteMode::Overwrite);
 
-    Some(WriteParams { path, content, mode })
+    Some(WriteParams {
+        path,
+        content,
+        mode,
+    })
 }
 
 fn extract_content_field(raw: &str) -> Option<String> {
@@ -233,7 +243,9 @@ fn write_unescape(s: &str) -> String {
             Some('u') => {
                 let mut hex = String::with_capacity(4);
                 for _ in 0..4 {
-                    if let Some(h) = chars.next() { hex.push(h); }
+                    if let Some(h) = chars.next() {
+                        hex.push(h);
+                    }
                 }
                 if hex.len() == 4 {
                     if let Ok(code) = u32::from_str_radix(&hex, 16) {
@@ -247,7 +259,10 @@ fn write_unescape(s: &str) -> String {
                 out.push('u');
                 out.push_str(&hex);
             }
-            Some(other) => { out.push('\\'); out.push(other); }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
             None => out.push('\\'),
         }
     }

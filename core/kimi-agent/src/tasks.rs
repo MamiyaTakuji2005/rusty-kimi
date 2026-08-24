@@ -208,7 +208,16 @@ impl BackgroundTaskManager {
         if let Ok(json) = serde_json::to_string_pretty(&control) {
             let _ = std::fs::write(dir.join("control.json"), json);
         }
-        self.write_runtime_file(&spec.id, "running", spec.child_pid, None, created_at, None, false, false);
+        self.write_runtime_file(
+            &spec.id,
+            "running",
+            spec.child_pid,
+            None,
+            created_at,
+            None,
+            false,
+            false,
+        );
     }
 
     fn write_runtime_file(
@@ -366,7 +375,14 @@ impl BackgroundTaskManager {
                     stdout_len: entry.stdout.lock().unwrap().len(),
                     stderr_len: entry.stderr.lock().unwrap().len(),
                 };
-                Some((view, started_at, child_pid, finished_at, timed_out, interrupted))
+                Some((
+                    view,
+                    started_at,
+                    child_pid,
+                    finished_at,
+                    timed_out,
+                    interrupted,
+                ))
             } else {
                 None
             }
@@ -476,7 +492,16 @@ impl BackgroundTaskManager {
         if let Ok(json) = serde_json::to_string_pretty(&control) {
             let _ = std::fs::write(self.task_dir(id).join("control.json"), json);
         }
-        self.write_runtime_file(id, "killed", child_pid, None, started_at, Some(unix_now()), true, false);
+        self.write_runtime_file(
+            id,
+            "killed",
+            child_pid,
+            None,
+            started_at,
+            Some(unix_now()),
+            true,
+            false,
+        );
 
         Ok(())
     }

@@ -423,7 +423,10 @@ async fn test_glob_skips_ignored_dirs() {
     let work_dir = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone();
     let tool = Glob::new(&fixture.runtime);
 
-    (work_dir.clone() / "src").mkdir(false, true).await.expect("mkdir");
+    (work_dir.clone() / "src")
+        .mkdir(false, true)
+        .await
+        .expect("mkdir");
     (work_dir.clone() / "src" / "app.js")
         .write_text("real")
         .await
@@ -436,7 +439,10 @@ async fn test_glob_skips_ignored_dirs() {
         .write_text("noise")
         .await
         .expect("write file");
-    (work_dir.clone() / "target").mkdir(false, true).await.expect("mkdir");
+    (work_dir.clone() / "target")
+        .mkdir(false, true)
+        .await
+        .expect("mkdir");
     (work_dir.clone() / "target" / "build.js")
         .write_text("noise")
         .await
@@ -452,7 +458,10 @@ async fn test_glob_skips_ignored_dirs() {
         _ => String::new(),
     };
     assert!(output.contains("src/app.js"));
-    assert!(!output.contains("node_modules"), "should prune node_modules: {output}");
+    assert!(
+        !output.contains("node_modules"),
+        "should prune node_modules: {output}"
+    );
     assert!(!output.contains("target"), "should prune target: {output}");
 }
 
@@ -462,9 +471,18 @@ async fn test_glob_brace_alternation() {
     let work_dir = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone();
     let tool = Glob::new(&fixture.runtime);
 
-    (work_dir.clone() / "a.js").write_text("x").await.expect("write");
-    (work_dir.clone() / "b.ts").write_text("x").await.expect("write");
-    (work_dir.clone() / "c.md").write_text("x").await.expect("write");
+    (work_dir.clone() / "a.js")
+        .write_text("x")
+        .await
+        .expect("write");
+    (work_dir.clone() / "b.ts")
+        .write_text("x")
+        .await
+        .expect("write");
+    (work_dir.clone() / "c.md")
+        .write_text("x")
+        .await
+        .expect("write");
 
     let result = tool
         .call_typed(params("*.{js,ts}", Some(&work_dir), true))

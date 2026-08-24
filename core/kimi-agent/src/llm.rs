@@ -114,7 +114,10 @@ pub fn augment_provider_with_env_vars(
             if let Ok(api_key) = env::var("OPENAI_COMPATIBLE_API_KEY") {
                 if !api_key.is_empty() {
                     provider.api_key = api_key;
-                    applied.insert("OPENAI_COMPATIBLE_API_KEY".to_string(), "******".to_string());
+                    applied.insert(
+                        "OPENAI_COMPATIBLE_API_KEY".to_string(),
+                        "******".to_string(),
+                    );
                 }
             }
             if let Ok(model_name) = env::var("OPENAI_COMPATIBLE_MODEL_NAME") {
@@ -127,7 +130,10 @@ pub fn augment_provider_with_env_vars(
                 if !max_context_size.is_empty() {
                     let value = parse_env_i64(&max_context_size)?;
                     model.max_context_size = value;
-                    applied.insert("OPENAI_COMPATIBLE_MAX_CONTEXT_SIZE".to_string(), max_context_size);
+                    applied.insert(
+                        "OPENAI_COMPATIBLE_MAX_CONTEXT_SIZE".to_string(),
+                        max_context_size,
+                    );
                 }
             }
         }
@@ -225,13 +231,14 @@ pub async fn create_llm(
                     }
                 }
             }
-            let openai_compatible = kosong::chat_provider::openai_compatible::OpenAiCompatible::new(
-                model.model.clone(),
-                Some(provider.api_key.clone()),
-                Some(provider.base_url.clone()),
-                Some(headers),
-            )
-            .map_err(map_chat_provider_error)?;
+            let openai_compatible =
+                kosong::chat_provider::openai_compatible::OpenAiCompatible::new(
+                    model.model.clone(),
+                    Some(provider.api_key.clone()),
+                    Some(provider.base_url.clone()),
+                    Some(headers),
+                )
+                .map_err(map_chat_provider_error)?;
 
             let mut kwargs = Map::new();
             if let Ok(value) = env::var("OPENAI_COMPATIBLE_TEMPERATURE") {

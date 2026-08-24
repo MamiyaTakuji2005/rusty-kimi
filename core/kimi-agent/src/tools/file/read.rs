@@ -81,7 +81,9 @@ impl CallableTool2 for ReadFile {
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
         if params.line_offset == 0 {
-            return tool_validate_error("line_offset cannot be 0; use 1 for the first line or -1 for the last line");
+            return tool_validate_error(
+                "line_offset cannot be 0; use 1 for the first line or -1 for the last line",
+            );
         }
         if params.line_offset < -(MAX_LINES as i64) {
             return tool_validate_error(&format!(
@@ -234,15 +236,7 @@ async fn read_forward(
     stream: &mut kaos::LineStream,
     line_offset: usize,
     n_lines: usize,
-) -> (
-    Vec<String>,
-    usize,
-    usize,
-    Vec<usize>,
-    bool,
-    bool,
-    bool,
-) {
+) -> (Vec<String>, usize, usize, Vec<usize>, bool, bool, bool) {
     let mut lines = Vec::new();
     let mut truncated_lines = Vec::new();
     let mut n_bytes = 0usize;
@@ -280,7 +274,15 @@ async fn read_forward(
 
     let eof_reached = !hit_n_lines && !max_lines_reached && !max_bytes_reached;
 
-    (lines, line_offset, current_line, truncated_lines, max_lines_reached, max_bytes_reached, eof_reached)
+    (
+        lines,
+        line_offset,
+        current_line,
+        truncated_lines,
+        max_lines_reached,
+        max_bytes_reached,
+        eof_reached,
+    )
 }
 
 /// Read the last `tail_count` lines, then apply n_lines / MAX_LINES / MAX_BYTES limits.
@@ -288,15 +290,7 @@ async fn read_tail(
     stream: &mut kaos::LineStream,
     tail_count: usize,
     n_lines: usize,
-) -> (
-    Vec<String>,
-    usize,
-    usize,
-    Vec<usize>,
-    bool,
-    bool,
-    bool,
-) {
+) -> (Vec<String>, usize, usize, Vec<usize>, bool, bool, bool) {
     let mut tail_buf: VecDeque<(usize, String, bool)> = VecDeque::with_capacity(tail_count);
     let mut current_line = 0usize;
 
@@ -338,7 +332,10 @@ async fn read_tail(
     }
     let final_entries = &candidates[kept..];
 
-    let start_line = final_entries.first().map(|e| e.0).unwrap_or(current_line + 1);
+    let start_line = final_entries
+        .first()
+        .map(|e| e.0)
+        .unwrap_or(current_line + 1);
     let mut lines = Vec::with_capacity(final_entries.len());
     let mut truncated_lines = Vec::new();
     for (line_no, truncated, was_truncated) in final_entries {
@@ -351,5 +348,13 @@ async fn read_tail(
     // Tail reads are inherently at EOF; don't append redundant "End of file reached".
     let eof_reached = false;
 
-    (lines, start_line, current_line, truncated_lines, max_lines_reached, max_bytes_reached, eof_reached)
+    (
+        lines,
+        start_line,
+        current_line,
+        truncated_lines,
+        max_lines_reached,
+        max_bytes_reached,
+        eof_reached,
+    )
 }

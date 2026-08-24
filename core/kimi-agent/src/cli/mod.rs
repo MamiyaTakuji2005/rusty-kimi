@@ -138,7 +138,7 @@ pub struct Cli {
         long = "context-file",
         value_name = "PATH",
         help = "Explicit path for the session context.jsonl. Used by subagent spawning to place session files in a specific directory.",
-        hide = true,
+        hide = true
     )]
     context_file: Option<PathBuf>,
 
@@ -146,7 +146,7 @@ pub struct Cli {
         long = "system-prompt-arg",
         value_name = "KEY=VALUE",
         help = "Extra system prompt template argument. Repeatable. Overrides args from the agent spec.",
-        hide = true,
+        hide = true
     )]
     system_prompt_arg: Vec<String>,
 
@@ -420,7 +420,12 @@ async fn resolve_session(
 ) -> Result<Session> {
     // --context-file bypasses all session-resume logic: the caller owns the path.
     if let Some(context_file) = context_file {
-        let session = Session::create(work_dir.clone(), session_id.map(|s| s.trim().to_string()), Some(context_file)).await;
+        let session = Session::create(
+            work_dir.clone(),
+            session_id.map(|s| s.trim().to_string()),
+            Some(context_file),
+        )
+        .await;
         info!("Created subagent session: {}", session.id);
         return Ok(session);
     }
@@ -456,7 +461,8 @@ async fn post_run(session: &Session) -> Result<()> {
     let mut metadata = load_metadata().await;
     let normalized_session_path = normalize_path_string(&session.work_dir.to_string());
     let mut index = metadata.work_dirs.iter().position(|meta| {
-        normalize_path_string(&meta.path) == normalized_session_path && meta.kaos == session.work_dir_meta.kaos
+        normalize_path_string(&meta.path) == normalized_session_path
+            && meta.kaos == session.work_dir_meta.kaos
     });
 
     if index.is_none() {

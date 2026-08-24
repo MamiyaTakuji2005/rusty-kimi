@@ -204,7 +204,11 @@ impl CallableTool2 for SearchWeb {
     }
 }
 
-fn insert_header(headers: &mut HeaderMap, name: impl AsRef<str>, value: &str) -> Result<(), String> {
+fn insert_header(
+    headers: &mut HeaderMap,
+    name: impl AsRef<str>,
+    value: &str,
+) -> Result<(), String> {
     let name = reqwest::header::HeaderName::from_bytes(name.as_ref().as_bytes())
         .map_err(|err| format!("invalid header name: {err}"))?;
     let val = value

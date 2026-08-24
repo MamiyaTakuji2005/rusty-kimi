@@ -62,17 +62,17 @@ impl CallableTool2 for TaskStop {
         if view.status.is_terminal() {
             return tool_ok(
                 "",
-                &format!("Task `{}` is already in terminal state ({}).", params.task_id, view.status.as_str()),
+                &format!(
+                    "Task `{}` is already in terminal state ({}).",
+                    params.task_id,
+                    view.status.as_str()
+                ),
                 "",
             );
         }
 
         match self.background_tasks.kill(&params.task_id) {
-            Ok(()) => tool_ok(
-                "",
-                &format!("Task `{}` stopped.", params.task_id),
-                "",
-            ),
+            Ok(()) => tool_ok("", &format!("Task `{}` stopped.", params.task_id), ""),
             Err(err) => tool_error("", &err, "Failed to stop"),
         }
     }

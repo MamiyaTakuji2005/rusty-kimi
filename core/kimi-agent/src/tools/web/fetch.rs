@@ -63,7 +63,11 @@ impl FetchURL {
 
         let mut headers = HeaderMap::new();
         if let Err(err) = insert_header(&mut headers, reqwest::header::USER_AGENT, &user_agent()) {
-            return tool_error("", format!("Invalid user agent header: {err}"), "Invalid header");
+            return tool_error(
+                "",
+                format!("Invalid user agent header: {err}"),
+                "Invalid header",
+            );
         }
         if let Err(err) = insert_header(
             &mut headers,
@@ -77,10 +81,18 @@ impl FetchURL {
             );
         }
         if let Err(err) = insert_header(&mut headers, "X-Msh-Tool-Call-Id", &tool_call.id) {
-            return tool_error("", format!("Invalid tool call id header: {err}"), "Invalid header");
+            return tool_error(
+                "",
+                format!("Invalid tool call id header: {err}"),
+                "Invalid header",
+            );
         }
         if let Err(err) = insert_header(&mut headers, reqwest::header::ACCEPT, "text/markdown") {
-            return tool_error("", format!("Invalid accept header: {err}"), "Invalid header");
+            return tool_error(
+                "",
+                format!("Invalid accept header: {err}"),
+                "Invalid header",
+            );
         }
         if let Some(custom) = &service.custom_headers {
             for (key, value) in custom {
@@ -368,7 +380,11 @@ fn extract_metadata(
     }
 }
 
-fn insert_header(headers: &mut HeaderMap, name: impl AsRef<str>, value: &str) -> Result<(), String> {
+fn insert_header(
+    headers: &mut HeaderMap,
+    name: impl AsRef<str>,
+    value: &str,
+) -> Result<(), String> {
     let name = reqwest::header::HeaderName::from_bytes(name.as_ref().as_bytes())
         .map_err(|err| format!("invalid header name: {err}"))?;
     let val = value

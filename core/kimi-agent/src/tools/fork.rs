@@ -54,7 +54,11 @@ impl ForkTool {
             session_dir,
             parent_context_file: runtime.session.context_file.clone(),
             agent_file: runtime.agent_file.clone(),
-            work_dir: runtime.builtin_args.KIMI_WORK_DIR.to_string_lossy().to_string(),
+            work_dir: runtime
+                .builtin_args
+                .KIMI_WORK_DIR
+                .to_string_lossy()
+                .to_string(),
             background_tasks: runtime.background_tasks.clone(),
         }
     }

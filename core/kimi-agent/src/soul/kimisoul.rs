@@ -410,7 +410,11 @@ impl KimiSoul {
                             // merge logic retains the previously-displayed value (e.g. from
                             // wire replay) rather than zeroing it out.
                             let tokens = if n > 0 { Some(n as i64) } else { None };
-                            (n as f64 / llm.max_context_size as f64, tokens, Some(llm.max_context_size))
+                            (
+                                n as f64 / llm.max_context_size as f64,
+                                tokens,
+                                Some(llm.max_context_size),
+                            )
                         }
                         Err(_) => (0.0, None, None),
                     }
@@ -488,9 +492,14 @@ impl KimiSoul {
                 anyhow::anyhow!("Provider \"{}\" not found for model", model.provider)
             })?;
 
-        let new_llm = create_llm(provider, model, Some(thinking), Some(&self.runtime.session.id))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create LLM: {}", e))?;
+        let new_llm = create_llm(
+            provider,
+            model,
+            Some(thinking),
+            Some(&self.runtime.session.id),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create LLM: {}", e))?;
 
         let new_llm = new_llm.map(Arc::new);
         let display_name = new_llm
@@ -635,7 +644,11 @@ impl KimiSoul {
                 .runtime
                 .background_tasks
                 .stdout(&task_id)
-                .and_then(|buf| buf.lock().ok().map(|b| String::from_utf8_lossy(&b).to_string()))
+                .and_then(|buf| {
+                    buf.lock()
+                        .ok()
+                        .map(|b| String::from_utf8_lossy(&b).to_string())
+                })
                 .unwrap_or_default();
             let output = output.trim();
             let truncated = if output.len() > MAX_FORK_OUTPUT {
@@ -1026,7 +1039,7 @@ impl KimiSoul {
         let compacted = loop {
             attempts += 1;
             let llm_guard = self.runtime.llm.read().await;
-        let llm = llm_guard.as_ref().ok_or_else(|| LLMNotSet)?;
+            let llm = llm_guard.as_ref().ok_or_else(|| LLMNotSet)?;
             let history = { self.context.lock().await.history().to_vec() };
             match self.compaction.compact(&history, llm).await {
                 Ok(compacted) => break compacted,
@@ -1077,16 +1090,12 @@ impl Soul for KimiSoul {
     }
 
     fn thinking(&self) -> Option<bool> {
-        self.runtime
-            .llm
-            .try_read()
-            .ok()
-            .and_then(|guard| {
-                guard
-                    .as_ref()
-                    .and_then(|llm| llm.chat_provider.thinking_effort())
-                    .map(|effort| effort != kosong::chat_provider::ThinkingEffort::Off)
-            })
+        self.runtime.llm.try_read().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .and_then(|llm| llm.chat_provider.thinking_effort())
+                .map(|effort| effort != kosong::chat_provider::ThinkingEffort::Off)
+        })
     }
 
     fn status(&self) -> StatusSnapshot {
@@ -1096,13 +1105,9 @@ impl Soul for KimiSoul {
             .try_read()
             .ok()
             .and_then(|guard| {
-                guard.as_ref().map(|llm| {
-                    match self.context.try_lock() {
-                        Ok(context) => {
-                            context.token_count() as f64 / llm.max_context_size as f64
-                        }
-                        Err(_) => 0.0,
-                    }
+                guard.as_ref().map(|llm| match self.context.try_lock() {
+                    Ok(context) => context.token_count() as f64 / llm.max_context_size as f64,
+                    Err(_) => 0.0,
                 })
             })
             .unwrap_or(0.0);

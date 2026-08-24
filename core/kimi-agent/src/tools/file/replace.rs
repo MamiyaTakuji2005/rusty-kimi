@@ -27,16 +27,17 @@ pub struct EditParams {
     #[schemars(description = "Whether to replace all matches.", default)]
     pub replace_all: bool,
     #[serde(default)]
-    #[schemars(description = "Whether to treat the old string as a regex pattern.", default)]
+    #[schemars(
+        description = "Whether to treat the old string as a regex pattern.",
+        default
+    )]
     pub regex: bool,
 }
 
 #[derive(Debug, JsonSchema)]
 #[schemars(schema_with = "str_replace_params_schema")]
 pub struct StrReplaceParams {
-    #[schemars(
-        description = "The path to the target file. Relative unless outside the workdir."
-    )]
+    #[schemars(description = "The path to the target file. Relative unless outside the workdir.")]
     pub path: String,
     pub edit: Vec<EditParams>,
 }
@@ -57,8 +58,8 @@ impl<'de> Deserialize<'de> for StrReplaceParams {
             if edit_value.is_array() {
                 serde_json::from_value(edit_value.clone()).map_err(serde::de::Error::custom)?
             } else {
-                let single: EditParams = serde_json::from_value(edit_value.clone())
-                    .map_err(serde::de::Error::custom)?;
+                let single: EditParams =
+                    serde_json::from_value(edit_value.clone()).map_err(serde::de::Error::custom)?;
                 vec![single]
             }
         } else {
@@ -76,7 +77,10 @@ impl<'de> Deserialize<'de> for StrReplaceParams {
                     serde::de::Error::custom("`new` is required when `old` is provided")
                 })?
                 .to_string();
-            let replace_all = value.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+            let replace_all = value
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let regex = value.get("regex").and_then(Value::as_bool).unwrap_or(false);
             vec![EditParams {
                 old,
@@ -376,7 +380,9 @@ fn replace_all_regex(text: &str, re: &Regex, new: &str) -> Option<String> {
         caps.expand(new, &mut result);
         last = m.end();
     }
-    if !found { return None; }
+    if !found {
+        return None;
+    }
     result.push_str(&text[last..]);
     Some(result)
 }
@@ -614,8 +620,7 @@ fn apply_edits(content: &mut String, edits: &[EditParams]) -> Result<bool, Strin
         }
 
         let maybe_new = if e.regex {
-            let re = Regex::new(&e.old)
-                .map_err(|err| format!("invalid regex: {err}"))?;
+            let re = Regex::new(&e.old).map_err(|err| format!("invalid regex: {err}"))?;
             validate_capture_refs(&re, &e.new)?;
             if e.replace_all {
                 replace_all_regex(content, &re, &e.new)
@@ -644,7 +649,10 @@ fn apply_edits(content: &mut String, edits: &[EditParams]) -> Result<bool, Strin
         }
 
         if changed {
-            return Err(format!("edit failed for '{}'", &e.old[..e.old.len().min(40)]));
+            return Err(format!(
+                "edit failed for '{}'",
+                &e.old[..e.old.len().min(40)]
+            ));
         }
         return Ok(false);
     }
@@ -698,7 +706,6 @@ line4"}}"#;
     }
 }
 
-
 #[cfg(test)]
 mod flat_shape_tests {
     use super::*;
@@ -717,7 +724,8 @@ mod flat_shape_tests {
 
     #[test]
     fn flat_shape_with_flags() {
-        let raw = r#"{"path": "foo.txt", "old": "a", "new": "b", "replace_all": true, "regex": true}"#;
+        let raw =
+            r#"{"path": "foo.txt", "old": "a", "new": "b", "replace_all": true, "regex": true}"#;
         let params: StrReplaceParams = serde_json::from_str(raw).unwrap();
         assert!(params.edit[0].replace_all);
         assert!(params.edit[0].regex);
