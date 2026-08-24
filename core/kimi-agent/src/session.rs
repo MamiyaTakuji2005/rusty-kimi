@@ -107,16 +107,10 @@ impl Session {
                         session_dir.display()
                     )
                 });
-            if tokio::fs::metadata(&context_file).await.is_ok() {
-                tokio::fs::remove_file(&context_file)
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!(
-                            "Failed to remove context file {}: {err}",
-                            context_file.display()
-                        )
-                    });
-            }
+            // Never truncate a caller-supplied context file: `Fork` seeds the
+            // child by copying the parent's context.jsonl here, and wiping it
+            // would leave the fork with no history at all. `Agent` is
+            // unaffected — its path is a fresh directory, so nothing exists.
             (session_dir, context_file)
         } else {
             let sessions_dir = work_dir_meta.ensure_sessions_dir().await;
@@ -133,14 +127,18 @@ impl Session {
             (session_dir, context_file)
         };
 
-        tokio::fs::File::create(&context_file)
-            .await
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Failed to create context file {}: {err}",
-                    context_file.display()
-                )
-            });
+        // `File::create` truncates, so only reach for it when there is nothing
+        // to preserve (see the context_file branch above).
+        if tokio::fs::metadata(&context_file).await.is_err() {
+            tokio::fs::File::create(&context_file)
+                .await
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to create context file {}: {err}",
+                        context_file.display()
+                    )
+                });
+        }
 
         save_metadata(&metadata).await;
 

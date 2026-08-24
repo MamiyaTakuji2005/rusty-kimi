@@ -226,3 +226,51 @@ async fn test_create_named_session() {
     assert!(found.is_some());
     assert_eq!(found.expect("session").id, session.id);
 }
+
+/// `Fork` seeds a child by copying the parent's context.jsonl to the path it
+/// then passes as `context_file`. Creating the child session must leave that
+/// snapshot alone, or the fork starts with no history at all.
+#[tokio::test]
+async fn test_create_preserves_supplied_context_file() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home_dir = TempDir::new().expect("home dir");
+    let _env = set_home_env(home_dir.path());
+
+    let work_dir = TempDir::new().expect("work dir");
+    let work_path = KaosPath::from(work_dir.path().to_path_buf());
+
+    let fork_dir = work_dir.path().join("subagents").join("fork-1");
+    std::fs::create_dir_all(&fork_dir).expect("fork dir");
+    let context_file = fork_dir.join("context.jsonl");
+    let seeded = "{\"role\":\"user\",\"content\":\"inherited\"}\n";
+    std::fs::write(&context_file, seeded).expect("seed context");
+
+    let session = Session::create(work_path, None, Some(context_file.clone())).await;
+
+    assert_eq!(session.context_file, context_file);
+    let contents = std::fs::read_to_string(&context_file).expect("read context");
+    assert_eq!(contents, seeded);
+}
+
+/// A subagent with no snapshot to inherit still gets an empty context file.
+#[tokio::test]
+async fn test_create_makes_missing_context_file() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home_dir = TempDir::new().expect("home dir");
+    let _env = set_home_env(home_dir.path());
+
+    let work_dir = TempDir::new().expect("work dir");
+    let work_path = KaosPath::from(work_dir.path().to_path_buf());
+
+    let context_file = work_dir
+        .path()
+        .join("subagents")
+        .join("agent-1")
+        .join("context.jsonl");
+
+    let session = Session::create(work_path, None, Some(context_file.clone())).await;
+
+    assert_eq!(session.context_file, context_file);
+    let metadata = std::fs::metadata(&context_file).expect("context file exists");
+    assert_eq!(metadata.len(), 0);
+}
