@@ -48,7 +48,9 @@ fn fatal(message: &str) -> ! {
 
 fn main() -> eframe::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let mut agent_bin = std::env::var("KIMI_AGENT_BIN").ok().filter(|s| !s.is_empty());
+    let mut agent_bin = std::env::var("KIMI_AGENT_BIN")
+        .ok()
+        .filter(|s| !s.is_empty());
     if let Some(pos) = args.iter().position(|a| a == "--agent-bin") {
         if pos + 1 < args.len() {
             args.remove(pos);

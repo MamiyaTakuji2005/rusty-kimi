@@ -123,6 +123,18 @@ impl Session {
         self.client.shutdown();
     }
 
+    /// Step through the second-row tabs, wrapping: main → each fork/subagent
+    /// in spawn order → back to main. A session with no forks stays on main.
+    pub fn cycle_subtab(&mut self, forward: bool) {
+        let subagents = &self.transcript.subagents;
+        let current = self
+            .active_subtab
+            .as_deref()
+            .and_then(|id| subagents.iter().position(|s| s.task_tool_call_id == id));
+        self.active_subtab = step_subtab(current, subagents.len(), forward)
+            .map(|index| subagents[index].task_tool_call_id.clone());
+    }
+
     pub fn drain_inbound(&mut self) {
         while let Ok(msg) = self.inbound.try_recv() {
             match msg {
@@ -601,5 +613,57 @@ impl Session {
         {
             response.request_focus();
         }
+    }
+}
+
+/// One step along the fork row, which is `main` followed by `subagents`
+/// entries. `None` is the main transcript, `Some(i)` the i-th fork; the walk
+/// wraps in both directions and stays on main when there are no forks.
+fn step_subtab(current: Option<usize>, subagents: usize, forward: bool) -> Option<usize> {
+    if subagents == 0 {
+        return None;
+    }
+    let slots = subagents + 1;
+    let current = current.map_or(0, |index| index + 1);
+    let next = if forward {
+        (current + 1) % slots
+    } else {
+        (current + slots - 1) % slots
+    };
+    next.checked_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_subtab;
+
+    #[test]
+    fn test_no_forks_stays_on_main() {
+        assert_eq!(step_subtab(None, 0, true), None);
+        assert_eq!(step_subtab(None, 0, false), None);
+    }
+
+    #[test]
+    fn test_forward_wraps_through_main() {
+        // main -> fork 0 -> fork 1 -> main
+        assert_eq!(step_subtab(None, 2, true), Some(0));
+        assert_eq!(step_subtab(Some(0), 2, true), Some(1));
+        assert_eq!(step_subtab(Some(1), 2, true), None);
+    }
+
+    #[test]
+    fn test_backward_is_the_mirror() {
+        // main -> fork 1 -> fork 0 -> main
+        assert_eq!(step_subtab(None, 2, false), Some(1));
+        assert_eq!(step_subtab(Some(1), 2, false), Some(0));
+        assert_eq!(step_subtab(Some(0), 2, false), None);
+    }
+
+    #[test]
+    fn test_single_fork_toggles() {
+        assert_eq!(step_subtab(None, 1, true), Some(0));
+        assert_eq!(step_subtab(Some(0), 1, true), None);
+        assert_eq!(step_subtab(None, 1, false), Some(0));
+        assert_eq!(step_subtab(Some(0), 1, false), None);
     }
 }
