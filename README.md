@@ -1,55 +1,113 @@
 # rusty-kimi
 
-A unified fork that runs the **Kimi Code CLI shell UI on a Rust agent core**,
-connected over the Wire (JSON-RPC over stdio) protocol.
+A self-contained coding agent: a **Rust agent core** with a **native Rust GUI**,
+connected over the **Wire protocol** (JSON-RPC over stdio).
 
-This repository vendors the **full source** of two Apache-2.0 projects from
-Moonshot AI (both since discontinued upstream) so they can be developed,
-referenced, and shipped together:
+The Rust side is a complete, standalone system. The agent loop, LLM calls, tools,
+context management, skills, and MCP all live in Rust, and the desktop GUI is Rust
+too — there is no Python in the runtime path.
 
-| Path    | What it is | Upstream |
-|---------|------------|----------|
-| `core/` | The Rust agent core — agent loop, tools, MCP, Wire server | [MoonshotAI/kimi-agent-rs](https://github.com/MoonshotAI/kimi-agent-rs) |
-| `cli/`  | The Python shell UI + the Wire bridge that drives an external agent | [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) |
+This repository also vendors the original **Python shell UI** (`cli/`). It is kept
+for protocol compatibility and as a reference, but it is no longer the focus of
+development.
 
-## How they fit together
+## The Rust core is a standalone system
 
-The Python shell never talked to a backend directly — each turn streams over an
-in-process `Wire`. The bridge (`cli/src/kimi_cli/wire/client.py` +
-`soul/remote.py`) lets the **same shell UI** drive an *external* Wire agent
-(`core/`'s `kimi-agent`) over stdio instead of an in-process Python soul. The
-agent owns the loop, tools, LLM and session; the UI is reused unchanged.
+**`kimi-agent`** (`core/kimi-agent/`) is a full agent server — a wire-only process
+with no UI of its own. It owns everything that does actual work:
+
+- the agent loop and step orchestration
+- LLM provider calls (Kimi, OpenAI-compatible / `openai_legacy`, Echo variants)
+- context management and auto-compaction
+- all built-in tools (Shell, file Read/Write/Replace/Glob/Grep/ReadMedia, web
+  search/fetch, todo, subagents/fork, dmail, think)
+- skills and flows
+- MCP client integration
+- session persistence under `~/.kimi`
+
+**`kimi-gui`** (`core/kimi-gui/`) is the new native frontend (egui/eframe). It
+launches and drives one or more `kimi-agent` subprocesses:
+
+- multiple sessions in tabs, each backed by its own agent
+- a `+` button opens a native folder picker to start a session in a directory
+- a resume menu lists past sessions found under `~/.kimi`
+- a live status bar (context usage, YOLO), approval prompts, and the streamed
+  transcript
 
 ```
-shell UI (cli/, Python)  ──Wire JSON-RPC / stdio──▶  kimi-agent (core/, Rust)
+kimi-gui (core/, Rust)  ──Wire JSON-RPC / stdio──▶  kimi-agent (core/, Rust)
 ```
 
-## Quick start (shell UI on the Rust core)
+## The Wire protocol is still the contract
+
+The GUI and the agent do not share an in-process API — they speak the **Wire
+protocol**: JSON-RPC messages over the agent's stdio. The GUI sends `initialize`,
+`prompt`, `cancel`, `replay`, and `steer`, plus approval replies; the agent streams
+back typed events (`TurnBegin`, `StepBegin`, `ContentPart`, `ToolResult`,
+`StatusUpdate`, `TurnEnd`, …).
+
+Keeping the agent wire-only is deliberate. The Python TUI speaks the same protocol,
+so it remains a compatible (if deprecated) frontend, and any other client — or a
+future frontend — can attach the same way. The protocol, the `~/.kimi` data layout,
+and the `kimi_cli.tools.*` identity stay stable regardless of which frontend is used.
+
+## Quick start
 
 ```sh
-# build the Rust core
-cd core && cargo build -p kimi-agent && cd ..
-
-# run the Python shell against it
-cd cli
-PYTHONPATH=src KIMI_AGENT_BIN="../core/target/debug/kimi-agent" python -m kimi_cli
+cd core
+cargo build -p kimi-agent -p kimi-gui
+./target/debug/kimi-gui --agent-bin ./target/debug/kimi-agent
 ```
 
-On Windows (PowerShell), quote the binary path and set `PYTHONUTF8=1`. The
-welcome banner shows `(remote / wire)` when it's running on the Rust core.
+- `--agent-bin <path>` (or the `KIMI_AGENT_BIN` environment variable) points the GUI
+  at the agent binary.
+- Any remaining arguments are forwarded to the agent verbatim — e.g. `-w <dir>`,
+  `--session <id>`, `--continue`, `--model <name>`.
+- Run `kimi-agent` on its own for a headless server with no UI.
 
-Without `KIMI_AGENT_BIN`, `cli/` runs its original in-process Python agent.
+> **Windows note:** if a build fails with "Access is denied" replacing
+> `kimi-agent.exe`, a running `kimi-gui`/`kimi-agent` is holding the binary — close
+> it and rebuild.
 
-## What works on the Rust core today
+## Repo layout
 
-Serve OpenAI-compatible / `openai_legacy` providers (deepseek, openrouter, glm,
-…), `prompt`, `cancel`, `replay` (resume re-render), `steer` (mid-turn
-injection), tools with approvals, model selection, YOLO. `set_plan_mode` is
-not yet implemented in the Rust Wire server.
+| Path    | What it is | Origin |
+|---------|------------|--------|
+| `core/` | Rust workspace: `kimi-agent`, `kosong`, `kaos`, `kimi-gui` | fork of [MoonshotAI/kimi-agent-rs](https://github.com/MoonshotAI/kimi-agent-rs) + the new `kimi-gui` |
+| `cli/`  | Original Python shell UI (TUI) — deprecated, kept for protocol compatibility | fork of [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) |
+
+Within `core/`:
+
+- `kimi-agent/` — the agent server (bin: `kimi-agent`), wire-only.
+- `kosong/` — LLM abstraction (messages, tooling, providers).
+- `kaos/` — OS abstraction (paths, stats, filesystem).
+- `kimi-gui/` — native egui frontend for the wire protocol (bin: `kimi-gui`).
+
+## The Python TUI (`cli/`)
+
+The fork originally set out to reconcile the Rust core with the newer Python shell
+UI. That work has been **deprioritized**: the Python TUI is no longer being
+rehabilitated or cleaned up. It stays in-tree because it shares the Wire protocol and
+the `~/.kimi` data layout, so it can still drive the Rust agent as a fallback
+frontend — but the native Rust GUI is where development effort now goes.
+
+## Build & test
+
+Rust workspace (from `core/`):
+
+```sh
+cargo build -p kimi-agent   # the agent server
+cargo build -p kimi-gui     # the GUI
+cargo test                  # whole workspace
+cargo fmt
+cargo clippy --workspace --all-targets
+```
+
+Python (from `cli/`, optional — see `cli/Makefile`): `make prepare` then `make check`.
 
 ## License & attribution
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Both
-subtrees are modified forks of Moonshot AI projects; per-subtree git history is
-preserved. This is an independent fork, not affiliated with or endorsed by
-Moonshot AI; "Kimi"/"Moonshot" are trademarks of their owners.
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Both subtrees are
+modified forks of Moonshot AI projects; per-subtree git history is preserved. This is
+an independent fork, not affiliated with or endorsed by Moonshot AI; "Kimi"/"Moonshot"
+are trademarks of their owners.
