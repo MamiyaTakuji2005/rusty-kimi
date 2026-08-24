@@ -16,8 +16,7 @@ use crate::soul::get_current_wire_or_none;
 use crate::tasks::{BackgroundTaskManager, TaskSpec, TaskStatus};
 use crate::tools::utils::{ToolResultBuilder, tool_rejected_error};
 use crate::wire::{
-    ContentPart, WIRE_PROTOCOL_VERSION, Wire, WireMessage,
-    deserialize_wire_message,
+    ContentPart, SubagentEvent, WIRE_PROTOCOL_VERSION, Wire, WireMessage, deserialize_wire_message,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -118,21 +117,13 @@ fn read_subagents_from_yaml(
 /// structural events, tool results, etc.).
 fn format_event_for_output(event: &WireMessage) -> Option<Vec<u8>> {
     match event {
-        WireMessage::ContentPart(ContentPart::Text(part)) => {
-            Some(part.text.as_bytes().to_vec())
-        }
-        WireMessage::ToolCall(call) => {
-            Some(format!("\n• {}\n", call.function.name).into_bytes())
-        }
+        WireMessage::ContentPart(ContentPart::Text(part)) => Some(part.text.as_bytes().to_vec()),
+        WireMessage::ToolCall(call) => Some(format!("\n• {}\n", call.function.name).into_bytes()),
         _ => None,
     }
 }
 
-fn send_notification(
-    bt: &BackgroundTaskManager,
-    id: &str,
-    wire: &Option<Arc<Wire>>,
-) {
+fn send_notification(bt: &BackgroundTaskManager, id: &str, wire: &Option<Arc<Wire>>) {
     if let Some(notification) = bt.build_notification(id) {
         if let Some(w) = wire {
             w.soul_side().send(WireMessage::Notification(notification));
@@ -236,7 +227,7 @@ pub(crate) async fn spawn_agent_subprocess(args: SpawnSubagentArgs<'_>) -> ToolR
             return builder.error(
                 &format!("Cannot locate kimi-agent binary: {e}"),
                 "Binary not found",
-            )
+            );
         }
     };
 
@@ -307,9 +298,7 @@ pub(crate) async fn spawn_agent_subprocess(args: SpawnSubagentArgs<'_>) -> ToolR
             Ok(v) => v,
             Err(_) => continue,
         };
-        if msg.get("id").and_then(|v| v.as_str()) == Some("1")
-            && msg.get("method").is_none()
-        {
+        if msg.get("id").and_then(|v| v.as_str()) == Some("1") && msg.get("method").is_none() {
             if msg.get("error").is_some() {
                 let err_msg = msg["error"]["message"]
                     .as_str()
@@ -358,6 +347,13 @@ pub(crate) async fn spawn_agent_subprocess(args: SpawnSubagentArgs<'_>) -> ToolR
 
     let parent_wire = get_current_wire_or_none();
 
+    // Key for SubagentEvent forwarding: the invoking tool call's id when the
+    // spawn came from a Fork/Agent tool call, or a task-derived id for
+    // /fork-style spawns that have no tool call on the wire.
+    let subagent_key = crate::soul::toolset::get_current_tool_call_or_none()
+        .map(|call| call.id)
+        .unwrap_or_else(|| format!("task-{task_id}"));
+
     let bt_clone = args.background_tasks.clone();
     let task_id_clone = task_id.clone();
 
@@ -396,6 +392,16 @@ pub(crate) async fn spawn_agent_subprocess(args: SpawnSubagentArgs<'_>) -> ToolR
                                             buf.extend_from_slice(&bytes);
                                         }
                                     }
+                                    // Mirror the child's event stream onto the
+                                    // parent wire so clients can render the
+                                    // subagent live (e.g. as its own tab).
+                                    if let Some(w) = &parent_wire {
+                                        if let Ok(sub) =
+                                            SubagentEvent::new(subagent_key.clone(), event)
+                                        {
+                                            w.soul_side().send(sub.into());
+                                        }
+                                    }
                                 }
                                 Err(e) => { debug!("Failed to deserialize subagent event: {e}"); }
                             }
@@ -416,8 +422,11 @@ pub(crate) async fn spawn_agent_subprocess(args: SpawnSubagentArgs<'_>) -> ToolR
         let (status, code) = match exit_status {
             Ok(s) => {
                 let code = s.code();
-                if code == Some(0) { (TaskStatus::Completed, code) }
-                else { (TaskStatus::Failed, code) }
+                if code == Some(0) {
+                    (TaskStatus::Completed, code)
+                } else {
+                    (TaskStatus::Failed, code)
+                }
             }
             Err(_) => (TaskStatus::Failed, None),
         };
