@@ -532,6 +532,10 @@ impl Session {
         };
         let response = ui.add(
             egui::TextEdit::multiline(&mut self.input)
+                // Stable id: the slash-command hint above toggles in and out,
+                // which would otherwise change this widget's auto-generated id
+                // and drop keyboard focus.
+                .id(egui::Id::new(("session_input", self.id)))
                 .desired_width(f32::INFINITY)
                 .desired_rows(3)
                 .hint_text(hint),
@@ -539,6 +543,17 @@ impl Session {
         self.input_had_focus = response.has_focus();
         if submit {
             self.submit_input();
+            response.request_focus();
+        }
+
+        // Keep the chat box focused so the keyboard works without a click,
+        // unless a modal/popup is open or an approval is waiting for a decision.
+        if !suppress_keys
+            && !self.has_pending_approvals()
+            && !response.has_focus()
+            && ui.input(|i| i.viewport().focused != Some(false))
+            && !egui::Popup::is_any_open(ui.ctx())
+        {
             response.request_focus();
         }
     }
