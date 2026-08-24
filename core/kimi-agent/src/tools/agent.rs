@@ -17,6 +17,7 @@ use crate::tasks::{BackgroundTaskManager, TaskSpec, TaskStatus};
 use crate::tools::utils::{ToolResultBuilder, tool_rejected_error};
 use crate::wire::{
     ContentPart, SubagentEvent, WIRE_PROTOCOL_VERSION, Wire, WireMessage, deserialize_wire_message,
+    send_out_of_turn,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -123,11 +124,22 @@ fn format_event_for_output(event: &WireMessage) -> Option<Vec<u8>> {
     }
 }
 
+/// Send an event from a detached subagent monitor to the client.
+///
+/// A subagent routinely outlives the turn that spawned it, and a `Wire` is
+/// torn down when its turn ends — publishing into it then goes nowhere. So
+/// fall back to the out-of-turn queue, which the wire server drains for the
+/// whole life of the process.
+fn forward_to_client(wire: &Option<Arc<Wire>>, msg: WireMessage) {
+    match wire {
+        Some(w) if !w.soul_side().is_closed() => w.soul_side().send(msg),
+        _ => send_out_of_turn(msg),
+    }
+}
+
 fn send_notification(bt: &BackgroundTaskManager, id: &str, wire: &Option<Arc<Wire>>) {
     if let Some(notification) = bt.build_notification(id) {
-        if let Some(w) = wire {
-            w.soul_side().send(WireMessage::Notification(notification));
-        }
+        forward_to_client(wire, WireMessage::Notification(notification));
     }
 }
 
@@ -395,12 +407,9 @@ pub(crate) async fn spawn_agent_subprocess(args: SpawnSubagentArgs<'_>) -> ToolR
                                     // Mirror the child's event stream onto the
                                     // parent wire so clients can render the
                                     // subagent live (e.g. as its own tab).
-                                    if let Some(w) = &parent_wire {
-                                        if let Ok(sub) =
-                                            SubagentEvent::new(subagent_key.clone(), event)
-                                        {
-                                            w.soul_side().send(sub.into());
-                                        }
+                                    if let Ok(sub) = SubagentEvent::new(subagent_key.clone(), event)
+                                    {
+                                        forward_to_client(&parent_wire, sub.into());
                                     }
                                 }
                                 Err(e) => { debug!("Failed to deserialize subagent event: {e}"); }

@@ -15,6 +15,7 @@ use crate::soul::{LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, Sou
 use crate::utils::{Queue, QueueShutDown};
 use crate::wire::{
     ApprovalRequest, ApprovalResponse, ToolCallRequest, ToolResult, Wire, WireMessage,
+    now_timestamp, out_of_turn_events,
 };
 
 use crate::wire::jsonrpc::{
@@ -83,6 +84,28 @@ impl WireServer {
                     break;
                 }
                 let _ = writer.flush().await;
+            }
+        });
+
+        // Background subagents keep streaming after the turn that spawned them
+        // has ended, and their `Wire` dies with that turn. Drain what they hand
+        // off here for as long as the process lives, recording it in the
+        // session's wire file too so a later replay still shows the subagent.
+        let out_of_turn = out_of_turn_events();
+        let write_queue = self.write_queue.clone();
+        let wire_file = self.soul.runtime().session.wire_file();
+        let out_of_turn_task = tokio::spawn(async move {
+            while let Ok(msg) = out_of_turn.get().await {
+                if let Err(err) = wire_file.append_message(&msg, Some(now_timestamp())).await {
+                    error!("Failed to record out-of-turn wire message: {}", err);
+                }
+                let out = build_event_message(msg);
+                if write_queue
+                    .put_nowait(serde_json::to_value(&out).unwrap_or(Value::Null))
+                    .is_err()
+                {
+                    break;
+                }
             }
         });
 
@@ -185,6 +208,7 @@ impl WireServer {
         }
 
         self.shutdown().await;
+        out_of_turn_task.abort();
         let _ = write_task.await;
         Ok(())
     }

@@ -22,7 +22,10 @@ pub enum WireError {
     Serde(String),
 }
 
-pub use channel::{Wire, WireMessageQueue, WireSoulSide, WireUISide};
+pub use channel::{
+    Wire, WireMessageQueue, WireSoulSide, WireUISide, now_timestamp, out_of_turn_events,
+    send_out_of_turn,
+};
 pub use file::{WireFile, WireFileMetadata, WireMessageRecord};
 pub use serde::{deserialize_wire_message, serialize_wire_message};
 pub use types::{

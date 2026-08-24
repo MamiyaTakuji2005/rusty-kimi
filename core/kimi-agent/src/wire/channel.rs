@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -10,6 +11,35 @@ use crate::utils::{BroadcastQueue, Queue, QueueShutDown};
 use crate::wire::{WireFile, WireMessage};
 
 pub type WireMessageQueue = BroadcastQueue<WireMessage>;
+
+/// Events produced after the turn that started them has already ended — a
+/// background subagent still streaming, or its completion notification. A
+/// `Wire` lives for exactly one turn, so those events have nowhere to go;
+/// this queue carries them to the wire server, which outlives every turn.
+///
+/// Nothing is queued until a consumer subscribes: in non-server modes there
+/// is no reader, and an unbounded queue nobody drains would just grow.
+static OUT_OF_TURN: OnceLock<Queue<WireMessage>> = OnceLock::new();
+static OUT_OF_TURN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Subscribe to the out-of-turn event stream. Called once, by the wire server.
+pub fn out_of_turn_events() -> Queue<WireMessage> {
+    let queue = OUT_OF_TURN.get_or_init(Queue::new).clone();
+    OUT_OF_TURN_ACTIVE.store(true, Ordering::SeqCst);
+    queue
+}
+
+/// Hand an event to the wire server when no live turn can carry it. A no-op
+/// when nobody is listening.
+pub fn send_out_of_turn(msg: WireMessage) {
+    if !OUT_OF_TURN_ACTIVE.load(Ordering::SeqCst) {
+        debug!("No out-of-turn consumer; dropping wire message: {:?}", msg);
+        return;
+    }
+    if let Some(queue) = OUT_OF_TURN.get() {
+        let _ = queue.put_nowait(msg);
+    }
+}
 
 pub struct Wire {
     raw_queue: Arc<WireMessageQueue>,
@@ -62,6 +92,7 @@ impl Wire {
     pub fn shutdown(&self) {
         debug!("Shutting down wire");
         self.soul_side.flush();
+        self.soul_side.closed.store(true, Ordering::SeqCst);
         self.raw_queue.shutdown(false);
         self.merged_queue.shutdown(false);
     }
@@ -77,6 +108,7 @@ pub struct WireSoulSide {
     raw_queue: Arc<WireMessageQueue>,
     merged_queue: Arc<WireMessageQueue>,
     merge_buffer: Mutex<Option<WireMessage>>,
+    closed: AtomicBool,
 }
 
 impl WireSoulSide {
@@ -85,7 +117,16 @@ impl WireSoulSide {
             raw_queue,
             merged_queue,
             merge_buffer: Mutex::new(None),
+            closed: AtomicBool::new(false),
         }
+    }
+
+    /// Whether this wire's turn has ended. `publish_nowait` cannot answer that
+    /// — shutting a `BroadcastQueue` down drops its subscribers, after which
+    /// publishing succeeds into nothing — so senders that outlive a turn
+    /// (background subagents) must check here before assuming delivery.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     pub fn send(&self, msg: WireMessage) {
@@ -287,7 +328,7 @@ impl WireRecorder {
     }
 }
 
-fn now_timestamp() -> f64 {
+pub fn now_timestamp() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64())
