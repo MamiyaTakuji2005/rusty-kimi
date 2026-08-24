@@ -15,6 +15,10 @@ use crate::tasks::{BackgroundTaskManager, TaskSpec, TaskStatus};
 use crate::tools::utils::{ToolResultBuilder, load_desc, tool_rejected_error};
 
 const DEFAULT_TIMEOUT: i64 = 60;
+/// Lower bound for the shell timeout. The model sometimes picks very short
+/// per-call timeouts (e.g. 15s) that kill legitimately slow commands, so any
+/// requested value below this is raised to it.
+const MIN_TIMEOUT: i64 = 30;
 
 const BASH_DESC: &str = include_str!("desc/shell/bash.md");
 const POWERSHELL_DESC: &str = include_str!("desc/shell/powershell.md");
@@ -414,10 +418,15 @@ impl Shell {
         });
 
         // Send notification
-        fn send_notification(bt: &BackgroundTaskManager, id: &str, wire: &Option<std::sync::Arc<crate::wire::Wire>>) {
+        fn send_notification(
+            bt: &BackgroundTaskManager,
+            id: &str,
+            wire: &Option<std::sync::Arc<crate::wire::Wire>>,
+        ) {
             if let Some(notification) = bt.build_notification(id) {
                 if let Some(w) = wire {
-                    w.soul_side().send(crate::wire::WireMessage::Notification(notification));
+                    w.soul_side()
+                        .send(crate::wire::WireMessage::Notification(notification));
                 }
             }
         }
@@ -452,10 +461,15 @@ impl CallableTool2 for Shell {
         &self.description
     }
 
-    async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
+    async fn call_typed(&self, mut params: Self::Params) -> ToolReturnValue {
         if params.command.is_empty() {
             return ToolResultBuilder::default().error("Command cannot be empty.", "Empty command");
         }
+
+        // Enforce the minimum timeout so short per-call values don't kill slow
+        // commands. Applied once here so the foreground duration, kill message,
+        // and background task spec all use the same effective value.
+        params.timeout = params.timeout.max(MIN_TIMEOUT);
 
         if params.run_in_background {
             self.run_background(&params).await
