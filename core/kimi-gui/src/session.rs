@@ -54,6 +54,9 @@ pub struct Session {
     approvals: Vec<PendingApproval>,
     input: String,
     input_had_focus: bool,
+    /// Approval request the chat box already surrendered focus for, so the
+    /// 1/2/3 shortcuts reach the modal without hijacking deliberate typing.
+    focus_released_for: Option<String>,
     init_id: Option<String>,
     replay_id: Option<String>,
     prompt_id: Option<String>,
@@ -96,6 +99,7 @@ impl Session {
             approvals: Vec::new(),
             input: String::new(),
             input_had_focus: false,
+            focus_released_for: None,
             init_id: Some(init_id),
             replay_id: None,
             prompt_id: None,
@@ -313,6 +317,18 @@ impl Session {
             self.client.send_request("cancel", json!({}));
         }
 
+        // When an approval arrives, drop the chat box's focus once so the
+        // 1/2/3 shortcuts answer the modal. Clicking back into the box
+        // restores normal typing (digits included) for this approval.
+        if let Some(pending) = self.approvals.first() {
+            if self.focus_released_for.as_deref() != Some(pending.request_id.as_str()) {
+                self.focus_released_for = Some(pending.request_id.clone());
+                ctx.memory_mut(|mem| mem.surrender_focus(self.input_id()));
+            }
+        } else {
+            self.focus_released_for = None;
+        }
+
         egui::TopBottomPanel::bottom("input_panel")
             .resizable(false)
             .show(ctx, |ui| {
@@ -412,6 +428,19 @@ impl Session {
             return;
         };
         let mut choice: Option<ApprovalResponseKind> = None;
+        // Number-key shortcuts; inert while the chat box holds focus so
+        // deliberate typing (digits included) is never hijacked.
+        if !self.input_had_focus {
+            ctx.input_mut(|i| {
+                if i.consume_key(Modifiers::NONE, Key::Num1) {
+                    choice = Some(ApprovalResponseKind::Approve);
+                } else if i.consume_key(Modifiers::NONE, Key::Num2) {
+                    choice = Some(ApprovalResponseKind::ApproveForSession);
+                } else if i.consume_key(Modifiers::NONE, Key::Num3) {
+                    choice = Some(ApprovalResponseKind::Reject);
+                }
+            });
+        }
         egui::Window::new("Approval required")
             .id(egui::Id::new(("approval_modal", self.id)))
             .collapsible(false)
@@ -433,19 +462,26 @@ impl Session {
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Approve").clicked() {
+                    if ui.button("Approve (1)").clicked() {
                         choice = Some(ApprovalResponseKind::Approve);
                     }
-                    if ui.button("Approve for session").clicked() {
+                    if ui.button("Approve for session (2)").clicked() {
                         choice = Some(ApprovalResponseKind::ApproveForSession);
                     }
                     if ui
-                        .button(RichText::new("Reject").color(Color32::from_rgb(200, 80, 80)))
+                        .button(RichText::new("Reject (3)").color(Color32::from_rgb(200, 80, 80)))
                         .clicked()
                     {
                         choice = Some(ApprovalResponseKind::Reject);
                     }
                 });
+                if self.input_had_focus {
+                    ui.label(
+                        RichText::new("number keys are off while the message box has focus")
+                            .weak()
+                            .small(),
+                    );
+                }
             });
         if let Some(kind) = choice {
             self.resolve_approval(0, kind);
@@ -502,6 +538,11 @@ impl Session {
         });
     }
 
+    /// Stable id of the chat input box (also used to surrender its focus).
+    fn input_id(&self) -> egui::Id {
+        egui::Id::new(("session_input", self.id))
+    }
+
     fn input_area(&mut self, ui: &mut egui::Ui, suppress_keys: bool) {
         // Slash-command hints while typing a command.
         if self.input.starts_with('/') && !self.slash_commands.is_empty() {
@@ -536,12 +577,13 @@ impl Session {
         } else {
             "Message the agent... (Enter to send, Shift+Enter for newline)"
         };
+        let input_id = self.input_id();
         let response = ui.add(
             egui::TextEdit::multiline(&mut self.input)
                 // Stable id: the slash-command hint above toggles in and out,
                 // which would otherwise change this widget's auto-generated id
                 // and drop keyboard focus.
-                .id(egui::Id::new(("session_input", self.id)))
+                .id(input_id)
                 .desired_width(f32::INFINITY)
                 .desired_rows(3)
                 .hint_text(hint),
