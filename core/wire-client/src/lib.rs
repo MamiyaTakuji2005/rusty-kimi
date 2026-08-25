@@ -1,5 +1,12 @@
 //! Wire protocol client: spawns `kimi-agent`, speaks newline-delimited
-//! JSON-RPC 2.0 over its stdio, and forwards everything to the UI thread.
+//! JSON-RPC 2.0 over its stdio, and hands everything to the caller through a
+//! channel.
+//!
+//! This is the shared client for every frontend of the agent — `kimi-gui`
+//! today, a terminal frontend later. It knows nothing about any UI toolkit:
+//! instead it takes a `wake` hook, invoked whenever a message arrives, and
+//! each frontend uses it to nudge its own event loop (egui:
+//! `Context::request_repaint`; a terminal UI: whatever unblocks its poll).
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -40,27 +47,65 @@ pub struct WireClient {
 }
 
 impl WireClient {
-    pub fn spawn(
+    /// Spawn the agent with the parent's console, if it has one.
+    ///
+    /// For terminal frontends: the frontend and the agent share a terminal,
+    /// and there is nowhere for a stray console window to come from.
+    pub fn spawn<W>(
         agent_bin: &str,
         agent_args: &[String],
-        egui_ctx: eframe::egui::Context,
-    ) -> std::io::Result<(Self, Receiver<Inbound>)> {
+        wake: W,
+    ) -> std::io::Result<(Self, Receiver<Inbound>)>
+    where
+        W: Fn() + Send + 'static,
+    {
+        Self::spawn_inner(agent_bin, agent_args, false, wake)
+    }
+
+    /// Spawn the agent with no console of its own.
+    ///
+    /// For windowed frontends: a console binary spawned by a windowed parent
+    /// gets a console window of its own on Windows — one terminal popping up
+    /// per session. Nothing is lost by suppressing it: the agent logs to
+    /// `~/.kimi/logs`, and its stderr tail is still captured here for crash
+    /// reporting.
+    pub fn spawn_without_console<W>(
+        agent_bin: &str,
+        agent_args: &[String],
+        wake: W,
+    ) -> std::io::Result<(Self, Receiver<Inbound>)>
+    where
+        W: Fn() + Send + 'static,
+    {
+        Self::spawn_inner(agent_bin, agent_args, true, wake)
+    }
+
+    fn spawn_inner<W>(
+        agent_bin: &str,
+        agent_args: &[String],
+        hide_console: bool,
+        wake: W,
+    ) -> std::io::Result<(Self, Receiver<Inbound>)>
+    where
+        W: Fn() + Send + 'static,
+    {
         let mut command = Command::new(agent_bin);
         command
             .args(agent_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Piped, not inherited: a windowed parent has no console to
-            // inherit, and the tail is worth keeping to explain a crash.
+            // Piped, not inherited: the tail is worth keeping to explain a
+            // crash even when the parent could have inherited it.
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // The agent is a console binary, so Windows gives it a console of
-            // its own — a terminal window popping up per session. The agent
-            // logs to ~/.kimi/logs anyway, so nothing is lost by suppressing it.
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
+        // `cfg!` keeps the operand referenced on every platform, so there is
+        // no unused-parameter warning on non-Windows builds.
+        if cfg!(windows) && hide_console {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                command.creation_flags(CREATE_NO_WINDOW);
+            }
         }
         let mut child = command.spawn()?;
 
@@ -68,8 +113,8 @@ impl WireClient {
         let stdout = child.stdout.take().expect("child stdout is piped");
         let stderr = child.stderr.take().expect("child stderr is piped");
 
-        // With no console to print to, a startup failure (bad config, missing
-        // credentials) would otherwise be completely silent.
+        // A startup failure (bad config, missing credentials) deserves an
+        // explanation even when nobody is watching a console.
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
         let collector = Arc::clone(&stderr_tail);
         std::thread::Builder::new()
@@ -129,7 +174,7 @@ impl WireClient {
                             }
                             let inbound = classify_line(trimmed);
                             let closed = inbound_tx.send(inbound).is_err();
-                            egui_ctx.request_repaint();
+                            wake();
                             if closed {
                                 break;
                             }
@@ -143,7 +188,7 @@ impl WireClient {
                         }
                     }
                 }
-                egui_ctx.request_repaint();
+                wake();
             })
             .expect("spawn wire-reader thread");
 
@@ -159,7 +204,7 @@ impl WireClient {
 
     /// Send a JSON-RPC request; returns the generated id.
     pub fn send_request(&self, method: &str, params: Value) -> String {
-        let id = format!("gui-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let id = format!("client-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         self.send_raw(json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -194,7 +239,7 @@ impl WireClient {
     }
 
     /// Close the agent's stdin (asking it to exit) and wait briefly before
-    /// killing it. Called from `App::on_exit`.
+    /// killing it. Called from the frontend's exit path.
     pub fn shutdown(&mut self) {
         self.writer_tx = None; // drops the sender => writer thread exits => stdin closes
         for _ in 0..20 {
@@ -257,5 +302,66 @@ fn classify_line(line: &str) -> Inbound {
             error: value.get("error").cloned(),
         },
         (None, None) => Inbound::ProtocolError(format!("unclassifiable line: {line}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One known-good envelope payload; the shape is owned by `kimi-agent`'s
+    /// own wire tests, this only needs *a* valid message.
+    const TURN_BEGIN: &str = r#"{"type":"TurnBegin","payload":{"user_input":"hi"}}"#;
+
+    #[test]
+    fn classifies_events_and_requests() {
+        let event = format!(r#"{{"jsonrpc":"2.0","method":"event","params":{TURN_BEGIN}}}"#);
+        assert!(matches!(classify_line(&event), Inbound::Event(_)));
+
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","method":"request","id":"agent-1","params":{TURN_BEGIN}}}"#
+        );
+        let Inbound::Request { id, .. } = classify_line(&request) else {
+            panic!("expected a request");
+        };
+        assert_eq!(id, "agent-1");
+    }
+
+    #[test]
+    fn classifies_responses() {
+        let ok = r#"{"jsonrpc":"2.0","id":"client-1","result":{"ok":true}}"#;
+        let Inbound::Response { id, result, error } = classify_line(ok) else {
+            panic!("expected a response");
+        };
+        assert_eq!(id, "client-1");
+        assert!(error.is_none());
+        assert_eq!(
+            result.and_then(|r| r.get("ok").and_then(Value::as_bool)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn classifies_protocol_garbage() {
+        assert!(matches!(
+            classify_line("not json"),
+            Inbound::ProtocolError(_)
+        ));
+        assert!(matches!(
+            classify_line(r#"{"jsonrpc":"2.0","method":"event"}"#),
+            Inbound::ProtocolError(_)
+        ));
+        assert!(matches!(
+            classify_line(r#"{"jsonrpc":"2.0","method":"event","params":{"type":"Nope"}}"#),
+            Inbound::ProtocolError(_)
+        ));
+        assert!(matches!(
+            classify_line(r#"{"jsonrpc":"2.0","method":"surprise"}"#),
+            Inbound::ProtocolError(_)
+        ));
+        assert!(matches!(
+            classify_line(r#"{"jsonrpc":"2.0"}"#),
+            Inbound::ProtocolError(_)
+        ));
     }
 }

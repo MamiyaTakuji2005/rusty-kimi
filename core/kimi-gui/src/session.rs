@@ -11,10 +11,10 @@ use serde_json::{Value, json};
 use kimi_agent::wire::protocol::WIRE_PROTOCOL_VERSION;
 use kimi_agent::wire::{ApprovalResponse, ApprovalResponseKind, WireMessage};
 
-use crate::client::{Inbound, WireClient};
 use crate::render::{block_ui, display_block_ui};
 use crate::theme;
 use crate::transcript::{ApprovalInfo, Transcript};
+use wire_client::{Inbound, WireClient};
 
 #[derive(PartialEq)]
 enum Phase {
@@ -74,8 +74,10 @@ impl Session {
         agent_args: &[String],
         egui_ctx: egui::Context,
     ) -> Result<Self, String> {
-        let (client, inbound) = WireClient::spawn(agent_bin, agent_args, egui_ctx)
-            .map_err(|err| format!("failed to spawn agent `{agent_bin}`: {err}"))?;
+        let ctx = egui_ctx;
+        let (client, inbound) =
+            WireClient::spawn_without_console(agent_bin, agent_args, move || ctx.request_repaint())
+                .map_err(|err| format!("failed to spawn agent `{agent_bin}`: {err}"))?;
         let init_id = client.send_request(
             "initialize",
             json!({

@@ -1,0 +1,9 @@
+[package]
+name = "wire-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+kimi-agent = { path = "../kimi-agent" }

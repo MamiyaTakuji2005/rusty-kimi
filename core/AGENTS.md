@@ -62,6 +62,9 @@ it by normal semver rules as the Rust system evolves.
 - `kimi-agent/` - main crate (binary: `kimi-agent`), wire-only agent server.
 - `kosong/` - LLM abstraction layer (messages, tooling, providers).
 - `kaos/` - OS abstraction layer (LocalKaos + path semantics).
+- `wire-client/` - shared wire-protocol client for frontends (kimi-gui today,
+  a terminal frontend later); spawns `kimi-agent` and speaks JSON-RPC over
+  its stdio.
 - `kimi-gui/` - native egui frontend; the canonical wire client.
 
 ## CLI behavior (kimi-agent)

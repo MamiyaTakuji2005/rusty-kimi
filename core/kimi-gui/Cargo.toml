@@ -21,3 +21,4 @@ egui_commonmark = "0.21"
 kaos = { path = "../kaos" }
 kimi-agent = { path = "../kimi-agent" }
 kosong = { path = "../kosong" }
+wire-client = { path = "../wire-client" }

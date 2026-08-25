@@ -143,12 +143,21 @@ client), `prompts/`, `skills/`, `agents/`.
 + bounded write-undo history), Python-`os.stat`-shaped results (naming is
 historical).
 
+**`core/wire-client/src/`** — the shared wire-protocol client every frontend
+uses to spawn and drive a `kimi-agent` subprocess: JSON-RPC framing, the
+`Inbound` classification (event / reverse-request / response / exit /
+protocol error), stderr tail capture, request-id generation, graceful
+shutdown. UI-toolkit-free: callers pass a `wake` hook (egui uses
+`request_repaint`; a terminal frontend would unblock its poll) and choose
+console inheritance (`spawn`) or `CREATE_NO_WINDOW`
+(`spawn_without_console`).
+
 **`core/kimi-gui/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
 `focus_owner()`), `session.rs` (one agent child + transcript + approval UI per
 tab), `render.rs` (transcript block widgets), `theme.rs` (light/dark/Kimi
 palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
-(open-in-default-app), `client.rs` (wire client), `session_list.rs` (resume
-menu), `transcript.rs` (block model).
+(open-in-default-app), `session_list.rs` (resume menu), `transcript.rs`
+(block model).
 
 ## Code style
 
