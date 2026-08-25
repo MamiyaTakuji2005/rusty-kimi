@@ -30,6 +30,20 @@ pub struct RestoreReport {
     pub errors: Vec<String>,
 }
 
+/// What a file looked like immediately before a write, as far as undo is
+/// concerned.
+#[derive(Debug, Clone)]
+pub enum PreWrite {
+    /// The file did not exist — the write created it, so undo deletes it.
+    Absent,
+    /// Content before the write, held in memory until undone or evicted.
+    Content(Arc<[u8]>),
+    /// The file existed but its content was deliberately not retained: too
+    /// large for the per-file cap, or unreadable at the moment of the write.
+    /// Undo can neither restore nor delete it, so it reports it as skipped.
+    Unrecorded,
+}
+
 /// One entry in the sequential write-undo history.
 ///
 /// Captured automatically before every `write_bytes`/`write_text` call so
@@ -37,9 +51,18 @@ pub struct RestoreReport {
 #[derive(Debug, Clone)]
 pub struct WriteEntry {
     pub path: PathBuf,
-    /// Content before the write.  `None` means the file did not exist
-    /// (the write created it), so undo should delete it.
-    pub original: Option<Arc<[u8]>>,
+    pub original: PreWrite,
+}
+
+impl WriteEntry {
+    /// Bytes this entry is holding in memory. The history is bounded by the
+    /// sum of these, so anything that retains nothing is free to keep.
+    pub fn retained_bytes(&self) -> usize {
+        match &self.original {
+            PreWrite::Content(bytes) => bytes.len(),
+            PreWrite::Absent | PreWrite::Unrecorded => 0,
+        }
+    }
 }
 
 /// Result of an `undo(steps)` call.
@@ -47,11 +70,14 @@ pub struct WriteEntry {
 pub struct UndoReport {
     /// How many writes were in the history before this call.
     pub steps_available: usize,
-    /// How many writes were actually undone (steps requested capped at steps_available).
+    /// How many history entries this call consumed.
     pub steps_applied: usize,
     /// Files restored to their pre-write content.
     pub restored: usize,
     /// New files deleted (they did not exist before the write).
     pub deleted: usize,
+    /// Writes whose pre-write content was never retained, so the file was
+    /// left exactly as it is.
+    pub skipped: usize,
     pub errors: Vec<String>,
 }

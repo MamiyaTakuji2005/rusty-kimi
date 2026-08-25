@@ -14,7 +14,7 @@ pub use current::{
 };
 pub use local::LocalKaos;
 pub use path::KaosPath;
-pub use snapshot::{KaosSnapshot, RestoreReport, UndoReport, WriteEntry};
+pub use snapshot::{KaosSnapshot, PreWrite, RestoreReport, UndoReport, WriteEntry};
 
 use std::path::PathBuf;
 use std::pin::Pin;

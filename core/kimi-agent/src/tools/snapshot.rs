@@ -8,6 +8,8 @@ use kosong::tooling::{CallableTool2, ToolReturnValue, tool_ok};
 
 use crate::soul::agent::Runtime;
 
+const UNDO_DESC: &str = include_str!("desc/snapshot/undo.md");
+
 pub struct Undo {
     cached_kaos: Arc<CachedKaos>,
 }
@@ -40,11 +42,7 @@ impl CallableTool2 for Undo {
     }
 
     fn description(&self) -> &str {
-        "Undo the last N file writes made through WriteFile or StrReplaceFile. \
-         Each write is restored in reverse order: modified files are reverted to \
-         their pre-write content; files that were created are deleted. \
-         Shell commands and subagent writes are NOT tracked and cannot be undone \
-         with this tool."
+        UNDO_DESC
     }
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
@@ -57,8 +55,12 @@ impl CallableTool2 for Undo {
         };
 
         let mut out = format!(
-            "steps_requested: {steps}\nsteps_available: {}\nsteps_applied: {}\nrestored: {}\ndeleted: {}",
-            report.steps_available, report.steps_applied, report.restored, report.deleted,
+            "steps_requested: {steps}\nsteps_available: {}\nsteps_applied: {}\nrestored: {}\ndeleted: {}\nskipped: {}",
+            report.steps_available,
+            report.steps_applied,
+            report.restored,
+            report.deleted,
+            report.skipped,
         );
         if !report.errors.is_empty() {
             out.push_str(&format!("\nerrors: {}", report.errors.len()));
@@ -70,13 +72,14 @@ impl CallableTool2 for Undo {
             out.push_str("\nnothing to undo");
         }
 
-        tool_ok(
-            out,
-            &format!(
-                "Undid {} write(s) ({} restored, {} deleted)",
-                report.steps_applied, report.restored, report.deleted
-            ),
-            "",
-        )
+        let mut summary = format!(
+            "Undid {} write(s) ({} restored, {} deleted)",
+            report.steps_applied, report.restored, report.deleted
+        );
+        if report.skipped > 0 {
+            summary.push_str(&format!(", {} skipped", report.skipped));
+        }
+
+        tool_ok(out, &summary, "")
     }
 }
