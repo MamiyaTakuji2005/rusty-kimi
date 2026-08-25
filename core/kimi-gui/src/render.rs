@@ -1,13 +1,14 @@
 //! Widget rendering for transcript blocks — the egui counterpart of the
 //! Python shell's `visualize/_blocks.py`.
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use similar::{ChangeTag, TextDiff};
 
 use kimi_agent::wire::ApprovalResponseKind;
 use kosong::tooling::{DisplayBlock, ToolOutput, ToolReturnValue};
 
+use crate::theme;
 use crate::transcript::Block;
 
 const ARGS_PREVIEW_CHARS: usize = 160;
@@ -85,23 +86,22 @@ fn tool_call_ui(
         .inner_margin(6.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let colors = theme::colors(ui.ctx());
             ui.horizontal(|ui| {
                 match result {
-                    // Only spin while the call can still produce a result:
-                    // egui's spinner forces a repaint every frame it is
-                    // drawn, so an orphaned one would pin the render loop.
-                    None if live => {
-                        ui.spinner();
-                    }
+                    // Only show an indicator while the call can still produce
+                    // a result: a spinner keeps asking for repaints, so an
+                    // orphaned one would go on costing frames forever.
+                    None if live => theme::spinner(ui),
                     None => {
                         ui.label(RichText::new("?").weak())
                             .on_hover_text("ended without a recorded result");
                     }
                     Some(r) if r.is_error => {
-                        ui.label(RichText::new("✗").color(Color32::from_rgb(200, 80, 80)));
+                        ui.label(RichText::new("✗").color(colors.error));
                     }
                     Some(_) => {
-                        ui.label(RichText::new("✓").color(Color32::from_rgb(80, 170, 80)));
+                        ui.label(RichText::new("✓").color(colors.success));
                     }
                 }
                 ui.label(RichText::new(&call.function.name).strong().monospace());
@@ -134,7 +134,7 @@ fn tool_call_ui(
 
 fn tool_result_ui(ui: &mut egui::Ui, result: &ToolReturnValue) {
     if result.is_error && !result.message.is_empty() {
-        ui.label(RichText::new(&result.message).color(Color32::from_rgb(200, 80, 80)));
+        ui.label(RichText::new(&result.message).color(theme::colors(ui.ctx()).error));
     }
     for block in &result.display {
         display_block_ui(ui, block);
@@ -192,6 +192,7 @@ pub fn display_block_ui(ui: &mut egui::Ui, block: &DisplayBlock) {
 
 fn diff_ui(ui: &mut egui::Ui, path: &str, old_text: &str, new_text: &str) {
     ui.label(RichText::new(path).strong().monospace());
+    let colors = theme::colors(ui.ctx());
     let diff = TextDiff::from_lines(old_text, new_text);
     let mut lines_shown = 0usize;
     for group in diff.grouped_ops(2) {
@@ -204,8 +205,8 @@ fn diff_ui(ui: &mut egui::Ui, path: &str, old_text: &str, new_text: &str) {
                 lines_shown += 1;
                 let line = change.value().trim_end_matches('\n');
                 let (sign, color) = match change.tag() {
-                    ChangeTag::Delete => ("-", Color32::from_rgb(200, 90, 90)),
-                    ChangeTag::Insert => ("+", Color32::from_rgb(90, 170, 90)),
+                    ChangeTag::Delete => ("-", colors.diff_del),
+                    ChangeTag::Insert => ("+", colors.diff_add),
                     ChangeTag::Equal => (" ", ui.visuals().weak_text_color()),
                 };
                 ui.label(
@@ -223,6 +224,7 @@ fn approval_block_ui(
     info: &crate::transcript::ApprovalInfo,
     response: Option<&ApprovalResponseKind>,
 ) {
+    let colors = theme::colors(ui.ctx());
     egui::Frame::group(ui.style())
         .inner_margin(6.0)
         .show(ui, |ui| {
@@ -234,15 +236,13 @@ fn approval_block_ui(
             ui.label(&info.description);
             match response {
                 Some(ApprovalResponseKind::Approve) => {
-                    ui.label(RichText::new("approved").color(Color32::from_rgb(80, 170, 80)));
+                    ui.label(RichText::new("approved").color(colors.success));
                 }
                 Some(ApprovalResponseKind::ApproveForSession) => {
-                    ui.label(
-                        RichText::new("approved for session").color(Color32::from_rgb(80, 170, 80)),
-                    );
+                    ui.label(RichText::new("approved for session").color(colors.success));
                 }
                 Some(ApprovalResponseKind::Reject) => {
-                    ui.label(RichText::new("rejected").color(Color32::from_rgb(200, 80, 80)));
+                    ui.label(RichText::new("rejected").color(colors.error));
                 }
                 None => {
                     ui.label(RichText::new("pending").weak().italics());

@@ -11,6 +11,7 @@ pub enum Command {
     NewSession,
     ResumeSession,
     CloseSession,
+    CycleTheme,
     OpenConfig,
     OpenMcpConfig,
     OpenLogFolder,
@@ -50,6 +51,13 @@ pub const COMMANDS: &[Entry] = &[
         detail: "close the active tab",
         binding: Some("Ctrl+T"),
         needs_session: true,
+    },
+    Entry {
+        command: Command::CycleTheme,
+        title: "Cycle theme",
+        detail: "light, dark, Kimi",
+        binding: Some("Ctrl+D"),
+        needs_session: false,
     },
     Entry {
         command: Command::OpenConfig,

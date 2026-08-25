@@ -4,7 +4,7 @@
 
 use std::sync::mpsc::Receiver;
 
-use eframe::egui::{self, Align2, Color32, Key, Modifiers, RichText};
+use eframe::egui::{self, Align2, Key, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use serde_json::{Value, json};
 
@@ -13,6 +13,7 @@ use kimi_agent::wire::{ApprovalResponse, ApprovalResponseKind, WireMessage};
 
 use crate::client::{Inbound, WireClient};
 use crate::render::{block_ui, display_block_ui};
+use crate::theme;
 use crate::transcript::{ApprovalInfo, Transcript};
 
 #[derive(PartialEq)]
@@ -352,7 +353,14 @@ impl Session {
                 });
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // The fork strip is the first thing in this panel, so the panel's
+        // usual top margin lands above a row of tabs rather than above text.
+        // Trim it there and keep it everywhere else.
+        let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin {
+            top: 2,
+            ..egui::Margin::same(8)
+        });
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.push_id(self.id, |ui| {
                 self.subtab_strip(ui);
                 self.transcript_view(ui);
@@ -377,27 +385,36 @@ impl Session {
         {
             self.active_subtab = None;
         }
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .selectable_label(self.active_subtab.is_none(), "main")
-                .clicked()
-            {
-                self.active_subtab = None;
-            }
-            for sub in &self.transcript.subagents {
-                let selected =
-                    self.active_subtab.as_deref() == Some(sub.task_tool_call_id.as_str());
-                let label = if sub.done {
-                    RichText::new(&sub.title)
-                } else {
-                    RichText::new(format!("▶ {}", sub.title)).color(Color32::from_rgb(220, 160, 60))
-                };
-                if ui.selectable_label(selected, label).clicked() {
-                    self.active_subtab = Some(sub.task_tool_call_id.clone());
+        let warning = theme::colors(ui.ctx()).warning;
+        // Scoped: the bar's metrics must not reach the transcript below it.
+        ui.scope(|ui| {
+            theme::FORK_BAR.apply(ui);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .selectable_label(self.active_subtab.is_none(), "main")
+                    .clicked()
+                {
+                    self.active_subtab = None;
                 }
-            }
+                for sub in &self.transcript.subagents {
+                    let selected =
+                        self.active_subtab.as_deref() == Some(sub.task_tool_call_id.as_str());
+                    let label = if sub.done {
+                        RichText::new(&sub.title)
+                    } else {
+                        RichText::new(format!("▶ {}", sub.title)).color(warning)
+                    };
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.active_subtab = Some(sub.task_tool_call_id.clone());
+                    }
+                }
+            });
+            // A hairline, not egui's default separator: that one reserves six
+            // points of its own plus a gap either side, which is most of why
+            // this row sat in a band half again its own height.
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(egui::Separator::default().spacing(1.0));
         });
-        ui.separator();
     }
 
     fn transcript_view(&mut self, ui: &mut egui::Ui) {
@@ -481,7 +498,7 @@ impl Session {
                         choice = Some(ApprovalResponseKind::ApproveForSession);
                     }
                     if ui
-                        .button(RichText::new("Reject (3)").color(Color32::from_rgb(200, 80, 80)))
+                        .button(RichText::new("Reject (3)").color(theme::colors(ui.ctx()).error))
                         .clicked()
                     {
                         choice = Some(ApprovalResponseKind::Reject);
@@ -501,25 +518,26 @@ impl Session {
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
+        let colors = theme::colors(ui.ctx());
         ui.horizontal(|ui| {
             match &self.phase {
                 Phase::Initializing => {
-                    ui.spinner();
+                    theme::spinner(ui);
                     ui.label("initializing...");
                 }
                 Phase::Replaying => {
-                    ui.spinner();
+                    theme::spinner(ui);
                     ui.label("loading history...");
                 }
                 Phase::Running => {
-                    ui.spinner();
+                    theme::spinner(ui);
                     ui.label("working... (Esc to cancel, Enter to steer)");
                 }
                 Phase::Ready => {
                     ui.label(RichText::new("ready").weak());
                 }
                 Phase::Failed(err) => {
-                    ui.label(RichText::new(err).color(Color32::from_rgb(200, 80, 80)));
+                    ui.label(RichText::new(err).color(colors.error));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -528,14 +546,14 @@ impl Session {
                     let text = RichText::new(label).monospace();
                     // Warn before compaction rather than after it surprises you.
                     let text = match status.context_ratio().unwrap_or(0.0) {
-                        r if r >= 0.95 => text.color(Color32::from_rgb(200, 80, 80)),
-                        r if r >= 0.80 => text.color(Color32::from_rgb(220, 160, 60)),
+                        r if r >= 0.95 => text.color(colors.error),
+                        r if r >= 0.80 => text.color(colors.warning),
                         _ => text.weak(),
                     };
                     ui.label(text);
                 }
                 if status.yolo_enabled == Some(true) {
-                    ui.label(RichText::new("yolo").color(Color32::from_rgb(220, 160, 60)));
+                    ui.label(RichText::new("yolo").color(colors.warning));
                 }
                 if status.thinking == Some(true) {
                     ui.label(RichText::new("thinking").weak());

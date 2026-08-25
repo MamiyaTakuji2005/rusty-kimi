@@ -4,8 +4,8 @@
 //!
 //! Session creation lives in the tab strip: the `+` button opens the native
 //! OS folder picker and instantly starts a session in the chosen directory,
-//! while the book button pinned to the right edge opens the resume menu with
-//! every past session found under `~/.kimi`.
+//! while the two buttons pinned to the right edge open the resume menu with
+//! every past session found under `~/.kimi` and cycle the theme.
 //!
 //! Everything here is also reachable from the keyboard alone — see
 //! [`KimiGuiApp::handle_shortcuts`].
@@ -13,13 +13,14 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use eframe::egui::{self, Align, Align2, Color32, Key, Modifiers, RichText};
+use eframe::egui::{self, Align, Align2, Key, Modifiers, RichText};
 
 use kimi_agent::share::get_share_dir as share_dir;
 
 use crate::palette::{Command, Palette};
 use crate::session::Session;
 use crate::session_list::{ResumeEntry, spawn_session_listing};
+use crate::theme::Theme;
 
 /// Which overlay is on top and therefore owns the keyboard. Ordered most
 /// modal first; `focus_owner` is the single place that decides.
@@ -60,6 +61,8 @@ pub struct KimiGuiApp {
     /// Directory of the session most recently opened this run (any session
     /// carries its own `work_dir`; this covers the no-active-session case).
     last_workdir: Option<PathBuf>,
+    /// Light / dark / Kimi, cycled by the toolbar button and `Ctrl+D`.
+    theme: Theme,
 }
 
 /// The shortcut keys taken out of one frame's event queue.
@@ -72,6 +75,7 @@ struct Keys {
     resume: bool,
     close: bool,
     palette: bool,
+    theme: bool,
 }
 
 impl Keys {
@@ -94,6 +98,8 @@ impl KimiGuiApp {
         agent_args: &[String],
     ) -> Result<Self, String> {
         install_fallback_fonts(&cc.egui_ctx);
+        let theme = Theme::load();
+        theme.apply(&cc.egui_ctx);
         let mut app = Self {
             agent_bin: agent_bin.to_string(),
             sessions: Vec::new(),
@@ -109,6 +115,7 @@ impl KimiGuiApp {
             palette: Palette::default(),
             error: None,
             last_workdir: None,
+            theme,
         };
         app.open_session(agent_args.to_vec(), &cc.egui_ctx, None)?;
         // List past sessions right away: it pre-warms the resume menu and
@@ -175,6 +182,7 @@ impl KimiGuiApp {
     /// * `Ctrl+O` — resume menu, browsed with `↑`/`↓`, `Enter` to open
     /// * `Ctrl+T` — close the active session, after a confirmation
     /// * `Ctrl+P` — command palette, for everything without a key of its own
+    /// * `Ctrl+D` — cycle the theme: light → dark → Kimi
     ///
     /// This runs before any widget is drawn and *consumes* the keys: the chat
     /// box holds focus permanently and would otherwise swallow `Tab` as an
@@ -208,6 +216,7 @@ impl KimiGuiApp {
                 // One pattern covers Ctrl+Shift+P as well, which is the same
                 // command everywhere else and so does the same thing here.
                 palette: i.consume_key(Modifiers::COMMAND, Key::P),
+                theme: i.consume_key(Modifiers::COMMAND, Key::D),
             }
         });
 
@@ -235,6 +244,16 @@ impl KimiGuiApp {
         if keys.palette {
             self.palette.open();
         }
+        if keys.theme {
+            self.cycle_theme(ctx);
+        }
+    }
+
+    /// Step to the next theme and remember it for the next launch.
+    fn cycle_theme(&mut self, ctx: &egui::Context) {
+        self.theme = self.theme.next();
+        self.theme.apply(ctx);
+        self.theme.save();
     }
 
     /// Keys while the palette is up. The query box owns the printable
@@ -277,6 +296,7 @@ impl KimiGuiApp {
             Command::NewSession => self.start_folder_pick(ctx),
             Command::ResumeSession => self.open_resume_menu(ctx),
             Command::CloseSession => self.request_close(self.active),
+            Command::CycleTheme => self.cycle_theme(ctx),
             Command::OpenConfig => self.open_path(kimi_agent::config::get_config_file()),
             Command::OpenMcpConfig => {
                 self.open_path(kimi_agent::mcp::get_global_mcp_config_file());
@@ -459,14 +479,28 @@ impl KimiGuiApp {
         let mut close: Option<usize> = None;
         let mut pick_folder = false;
         let mut refresh_resume = false;
+        let mut cycle_theme = false;
+        let theme = self.theme;
+        let bar = crate::theme::SESSION_BAR;
         egui::TopBottomPanel::top("session_tabs").show(ctx, |ui| {
-            // Book button: resume menu, pinned to the right edge of the strip.
-            let book = egui::SidePanel::right("tabs_right")
+            // One set of metrics for the whole strip: the tabs, their ×, the
+            // `+`, and the two buttons in the panel below all inherit it.
+            bar.apply(ui);
+            // Resume and theme, pinned to the right edge of the strip. The
+            // frame is replaced with a bare horizontal margin — a nested panel
+            // brings its own vertical padding, which stacks on the strip's own
+            // and puts the buttons in a band half again their height.
+            let (book, paint) = egui::SidePanel::right("tabs_right")
                 .resizable(false)
-                .exact_width(40.0)
+                .exact_width(66.0)
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0)))
                 .show_inside(ui, |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.button("📖").on_hover_text("resume a session (Ctrl+O)")
+                    ui.horizontal(|ui| {
+                        let book = bar
+                            .square(ui, "📖")
+                            .on_hover_text("resume a session (Ctrl+O)");
+                        let paint = bar.square(ui, theme.glyph()).on_hover_text(theme.hover());
+                        (book, paint)
                     })
                     .inner
                 })
@@ -474,33 +508,35 @@ impl KimiGuiApp {
             if book.clicked() {
                 refresh_resume = true;
             }
+            if paint.clicked() {
+                cycle_theme = true;
+            }
 
             // Session tabs plus the `+` button on the left.
+            let colors = theme.colors();
             ui.horizontal_wrapped(|ui| {
                 for (index, session) in self.sessions.iter().enumerate() {
                     let mut text = RichText::new(&session.title);
                     if session.is_failed() {
-                        text = text.color(Color32::from_rgb(200, 80, 80));
+                        text = text.color(colors.error);
                     } else if session.has_pending_approvals() {
-                        text = RichText::new(format!("⚠ {}", session.title))
-                            .color(Color32::from_rgb(220, 160, 60));
+                        text = RichText::new(format!("⚠ {}", session.title)).color(colors.warning);
                     } else if session.is_running() {
                         text = RichText::new(format!("▶ {}", session.title));
                     }
                     if ui.selectable_label(index == self.active, text).clicked() {
                         self.active = index;
                     }
-                    if ui
-                        .small_button(RichText::new("×").weak())
+                    if bar
+                        .square(ui, RichText::new("×").weak())
                         .on_hover_text("close session (Ctrl+T)")
                         .clicked()
                     {
                         close = Some(index);
                     }
-                    ui.add_space(6.0);
                 }
-                if ui
-                    .button("+")
+                if bar
+                    .square(ui, "+")
                     .on_hover_text("new session, pick a folder (Ctrl+N)")
                     .clicked()
                 {
@@ -520,6 +556,9 @@ impl KimiGuiApp {
             } else {
                 self.open_resume_menu(ctx);
             }
+        }
+        if cycle_theme {
+            self.cycle_theme(ctx);
         }
     }
 
@@ -553,7 +592,7 @@ impl KimiGuiApp {
                 ui.set_width(width);
                 if loading {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        crate::theme::spinner(ui);
                         ui.label("loading sessions...");
                     });
                     return;
@@ -611,7 +650,7 @@ impl KimiGuiApp {
                 if running {
                     ui.label(
                         RichText::new("A turn is still running and will be cancelled.")
-                            .color(Color32::from_rgb(220, 160, 60)),
+                            .color(crate::theme::colors(ui.ctx()).warning),
                     );
                 }
                 ui.label(
@@ -728,7 +767,7 @@ impl KimiGuiApp {
             .show(ctx, |ui| {
                 ui.label(
                     RichText::new(self.error.as_deref().unwrap_or_default())
-                        .color(Color32::from_rgb(200, 80, 80)),
+                        .color(crate::theme::colors(ui.ctx()).error),
                 );
                 ui.add_space(6.0);
                 if ui.button("OK").clicked() {
@@ -861,8 +900,9 @@ fn install_fallback_fonts(ctx: &egui::Context) {
         }
     }
 
-    // Monochrome symbol fallback (Segoe UI Symbol) for the 📖 glyph; egui's
-    // rasterizer cannot use color emoji fonts like Segoe UI Emoji.
+    // Monochrome symbol fallback (Segoe UI Symbol) for the 📖 glyph and the
+    // Kimi theme's moon phases; egui's rasterizer cannot use color emoji
+    // fonts like Segoe UI Emoji.
     if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\seguisym.ttf") {
         fonts.font_data.insert(
             "symbol-fallback".to_owned(),
@@ -878,4 +918,34 @@ fn install_fallback_fonts(ctx: &egui::Context) {
     }
 
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_fallback_fonts;
+    use crate::theme::{MOON_PHASES, Theme};
+
+    /// The glyphs the toolbar and the Kimi spinner are made of. Without a font
+    /// behind them they do not fail loudly — they render as tofu boxes, which
+    /// only a person looking at the window would notice.
+    #[test]
+    fn test_toolbar_and_spinner_glyphs_have_a_font() {
+        let ctx = eframe::egui::Context::default();
+        install_fallback_fonts(&ctx);
+        // Fonts are built lazily, on the first pass.
+        let _ = ctx.run(Default::default(), |_| {});
+
+        let font = eframe::egui::FontId::proportional(14.0);
+        let mut glyphs: Vec<&str> = MOON_PHASES.to_vec();
+        glyphs.push("📖");
+        for theme in [Theme::Light, Theme::Dark, Theme::Kimi] {
+            glyphs.push(theme.glyph());
+        }
+        for glyph in glyphs {
+            assert!(
+                ctx.fonts(|fonts| fonts.has_glyphs(&font, glyph)),
+                "no installed font covers {glyph}"
+            );
+        }
+    }
 }

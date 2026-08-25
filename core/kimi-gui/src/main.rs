@@ -18,6 +18,7 @@ mod palette;
 mod render;
 mod session;
 mod session_list;
+mod theme;
 mod transcript;
 
 /// The agent binary that ships alongside this one. This is what makes a
