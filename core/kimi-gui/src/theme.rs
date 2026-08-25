@@ -2,9 +2,9 @@
 //!
 //! `Light` and `Dark` are egui's own visuals with a readable set of status
 //! colors laid over them. `Kimi` is the shell UI's palette carried across
-//! intact — the slate-and-cyan scheme from `cli/src/kimi_cli/ui/theme.py`,
-//! down to swapping egui's dot spinner for the moon phases the CLI is named
-//! after.
+//! intact — the slate-and-cyan scheme from the Python shell's theme.py (now
+//! only in the archived rusty-kimi-tui repo), down to swapping egui's dot
+//! spinner for the moon phases the CLI is named after.
 //!
 //! Drawing code asks the context for colors rather than taking them as a
 //! parameter: [`Theme::apply`] stashes the active theme in egui's data store,

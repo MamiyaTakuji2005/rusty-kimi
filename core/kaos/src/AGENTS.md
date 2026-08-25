@@ -14,7 +14,7 @@
 
 ## Stat Semantics
 
-- `StatResult` fields follow Python `os.stat_result` shape.
+- `StatResult` fields follow Python `os.stat_result` shape (historical naming; the shape is a stability invariant for anything consuming stat results).
 - On Unix, use `MetadataExt`; on non-Unix, fill available fields and infer `st_mode`.
 
 ## KaosPath

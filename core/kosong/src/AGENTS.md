@@ -2,7 +2,7 @@
 
 ## Scope
 
-- `message.rs`: canonical message/content types; serialization must match Python exactly.
+- `message.rs`: canonical message/content types; serialization is a stability invariant (single `TextPart` -> JSON string, otherwise array of parts).
 - `chat_provider/`: provider traits + concrete providers (Kimi, Echo, ScriptedEcho).
 - `tooling/`: tool schemas, tool results, display blocks, and toolset dispatch.
 - `generate.rs` + `lib.rs`: streaming merge and tool-call orchestration.

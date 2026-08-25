@@ -12,7 +12,7 @@
 
 ## Compatibility Rules
 
-- Envelope `type` strings must match Python class names.
+- Envelope `type` strings must match the original Python class names (stability invariant; wire clients depend on them).
 - `ContentPart` wire messages always use `type="ContentPart"` at the envelope layer.
 - `ApprovalRequestResolved` must map to `ApprovalResponse` for backward compatibility.
 - `SubagentEvent.event` is serialized as an embedded `WireMessageEnvelope`.
