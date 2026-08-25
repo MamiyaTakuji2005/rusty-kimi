@@ -82,7 +82,7 @@ Within `core/`:
 - `kimi-agent/` — the agent server (bin: `kimi-agent`), wire-only.
 - `kosong/` — LLM abstraction (messages, tooling, providers).
 - `kaos/` — OS abstraction (paths, stats, filesystem).
-- `wire-client/` — shared wire-protocol client crate used by every frontend.
+- `wire-client/` — shared frontend client layer: JSON-RPC over stdio, transcript folding, session listing.
 - `kimi-gui/` — native egui frontend for the wire protocol (bin: `kimi-gui`).
 
 ## Build & test

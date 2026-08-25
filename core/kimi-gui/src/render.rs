@@ -9,7 +9,7 @@ use kimi_agent::wire::ApprovalResponseKind;
 use kosong::tooling::{DisplayBlock, ToolOutput, ToolReturnValue};
 
 use crate::theme;
-use crate::transcript::Block;
+use wire_client::transcript::Block;
 
 const ARGS_PREVIEW_CHARS: usize = 160;
 const OUTPUT_PREVIEW_CHARS: usize = 4000;
@@ -79,7 +79,7 @@ fn tool_call_ui(
     ui: &mut egui::Ui,
     call: &kimi_agent::wire::ToolCall,
     result: Option<&ToolReturnValue>,
-    subagent: Option<&crate::transcript::SubagentSummary>,
+    subagent: Option<&wire_client::transcript::SubagentSummary>,
     live: bool,
 ) {
     egui::Frame::group(ui.style())
@@ -221,7 +221,7 @@ fn diff_ui(ui: &mut egui::Ui, path: &str, old_text: &str, new_text: &str) {
 
 fn approval_block_ui(
     ui: &mut egui::Ui,
-    info: &crate::transcript::ApprovalInfo,
+    info: &wire_client::transcript::ApprovalInfo,
     response: Option<&ApprovalResponseKind>,
 ) {
     let colors = theme::colors(ui.ctx());

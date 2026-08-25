@@ -13,7 +13,7 @@ use kimi_agent::wire::{ApprovalResponse, ApprovalResponseKind, WireMessage};
 
 use crate::render::{block_ui, display_block_ui};
 use crate::theme;
-use crate::transcript::{ApprovalInfo, Transcript};
+use wire_client::transcript::{ApprovalInfo, Transcript};
 use wire_client::{Inbound, WireClient};
 
 #[derive(PartialEq)]
@@ -156,7 +156,9 @@ impl Session {
                 Inbound::ProtocolError(err) => {
                     self.transcript
                         .blocks
-                        .push(crate::transcript::Block::Info(format!("wire error: {err}")));
+                        .push(wire_client::transcript::Block::Info(format!(
+                            "wire error: {err}"
+                        )));
                 }
             }
         }
@@ -186,7 +188,7 @@ impl Session {
                 if self.phase == Phase::Replaying {
                     self.transcript
                         .blocks
-                        .push(crate::transcript::Block::Info(format!(
+                        .push(wire_client::transcript::Block::Info(format!(
                             "external tool call (replayed): {}",
                             req.name
                         )));
@@ -201,7 +203,7 @@ impl Session {
             other => {
                 self.transcript
                     .blocks
-                    .push(crate::transcript::Block::Info(format!(
+                    .push(wire_client::transcript::Block::Info(format!(
                         "unexpected request: {}",
                         other.type_name()
                     )));
@@ -262,7 +264,9 @@ impl Session {
                     if status == "max_steps_reached" {
                         self.transcript
                             .blocks
-                            .push(crate::transcript::Block::Info("max steps reached".into()));
+                            .push(wire_client::transcript::Block::Info(
+                                "max steps reached".into(),
+                            ));
                     }
                 }
                 (_, Some(error)) => {
@@ -272,7 +276,7 @@ impl Session {
                         .unwrap_or("unknown error");
                     self.transcript
                         .blocks
-                        .push(crate::transcript::Block::Info(format!(
+                        .push(wire_client::transcript::Block::Info(format!(
                             "turn failed: {message}"
                         )));
                 }
@@ -315,7 +319,7 @@ impl Session {
             &pending.rpc_id,
             serde_json::to_value(&response).unwrap_or(Value::Null),
         );
-        if let Some(crate::transcript::Block::Approval { response, .. }) =
+        if let Some(wire_client::transcript::Block::Approval { response, .. }) =
             self.transcript.blocks.get_mut(pending.block)
         {
             *response = Some(kind);
@@ -453,7 +457,7 @@ impl Session {
         let Some(pending) = self.approvals.first() else {
             return;
         };
-        let Some(crate::transcript::Block::Approval { info, .. }) =
+        let Some(wire_client::transcript::Block::Approval { info, .. }) =
             self.transcript.blocks.get(pending.block)
         else {
             return;

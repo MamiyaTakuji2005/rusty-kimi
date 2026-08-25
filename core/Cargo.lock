@@ -2852,7 +2852,6 @@ dependencies = [
 name = "kimi-gui"
 version = "1.8.0"
 dependencies = [
- "chrono",
  "eframe",
  "egui_commonmark",
  "kaos",
@@ -2862,7 +2861,6 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
- "tokio",
  "wire-client",
 ]
 
@@ -6981,8 +6979,12 @@ dependencies = [
 name = "wire-client"
 version = "1.8.0"
 dependencies = [
+ "chrono",
+ "kaos",
  "kimi-agent",
+ "kosong",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

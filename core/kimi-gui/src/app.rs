@@ -19,8 +19,8 @@ use kimi_agent::share::get_share_dir as share_dir;
 
 use crate::palette::{Command, Palette};
 use crate::session::Session;
-use crate::session_list::{ResumeEntry, spawn_session_listing};
 use crate::theme::Theme;
+use wire_client::session_list::{ResumeEntry, spawn_session_listing};
 
 /// Which overlay is on top and therefore owns the keyboard. Ordered most
 /// modal first; `focus_owner` is the single place that decides.
@@ -121,7 +121,8 @@ impl KimiGuiApp {
         // List past sessions right away: it pre-warms the resume menu and
         // supplies the most recent session directory as the folder-picker
         // default after a GUI restart.
-        app.resume_listing = Some(spawn_session_listing(&cc.egui_ctx));
+        let ctx = cc.egui_ctx.clone();
+        app.resume_listing = Some(spawn_session_listing(move || ctx.request_repaint()));
         Ok(app)
     }
 
@@ -426,7 +427,8 @@ impl KimiGuiApp {
         self.resume_cursor = 0;
         self.resume_scroll = true;
         if self.resume_listing.is_none() {
-            self.resume_listing = Some(spawn_session_listing(ctx));
+            let ctx = ctx.clone();
+            self.resume_listing = Some(spawn_session_listing(move || ctx.request_repaint()));
         }
     }
 

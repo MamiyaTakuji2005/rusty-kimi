@@ -67,13 +67,14 @@ impl ResumeEntry {
 
 /// Spawn a background thread that lists every session of every work directory
 /// known to `~/.kimi/kimi.json`, newest first. The result (or an error
-/// message) arrives on the returned receiver; the egui context is kicked when
-/// it lands so the UI picks it up without polling delays.
-pub fn spawn_session_listing(
-    ctx: &eframe::egui::Context,
-) -> Receiver<Result<Vec<ResumeEntry>, String>> {
+/// message) arrives on the returned receiver; `wake` is called when it lands
+/// so the caller's UI picks it up without polling delays (egui:
+/// `Context::request_repaint`).
+pub fn spawn_session_listing<W>(wake: W) -> Receiver<Result<Vec<ResumeEntry>, String>>
+where
+    W: Fn() + Send + 'static,
+{
     let (tx, rx) = channel();
-    let ctx = ctx.clone();
     std::thread::Builder::new()
         .name("session-listing".into())
         .spawn(move || {
@@ -85,7 +86,7 @@ pub fn spawn_session_listing(
                 Err(panic) => Err(format!("session listing panicked: {panic:?}")),
             };
             let _ = tx.send(result);
-            ctx.request_repaint();
+            wake();
         })
         .expect("spawn session-listing thread");
     rx

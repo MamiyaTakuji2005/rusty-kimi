@@ -156,8 +156,8 @@ console inheritance (`spawn`) or `CREATE_NO_WINDOW`
 `focus_owner()`), `session.rs` (one agent child + transcript + approval UI per
 tab), `render.rs` (transcript block widgets), `theme.rs` (light/dark/Kimi
 palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
-(open-in-default-app), `session_list.rs` (resume menu), `transcript.rs`
-(block model).
+(open-in-default-app), `session_list.rs` → moved to `wire-client`, as was
+`transcript.rs`.
 
 ## Code style
 

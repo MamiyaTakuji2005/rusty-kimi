@@ -7,6 +7,13 @@
 //! instead it takes a `wake` hook, invoked whenever a message arrives, and
 //! each frontend uses it to nudge its own event loop (egui:
 //! `Context::request_repaint`; a terminal UI: whatever unblocks its poll).
+//!
+//! The crate also holds the frontend-agnostic state every client needs:
+//! [`transcript`] folds the wire event stream into renderable blocks, and
+//! [`session_list`] lists the sessions stored under `~/.kimi` for resume.
+
+pub mod session_list;
+pub mod transcript;
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};

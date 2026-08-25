@@ -1,5 +1,6 @@
 //! Transcript state: folds the wire event stream into renderable blocks.
-//! This is the egui-side equivalent of the Python shell's `_LiveView`.
+//! Frontend-agnostic — the egui GUI renders it today, a terminal frontend
+//! renders the same blocks its own way.
 
 use kimi_agent::wire::{
     ApprovalResponseKind, ContentPart, StatusUpdate, ToolCall, UserInput, WireMessage,
