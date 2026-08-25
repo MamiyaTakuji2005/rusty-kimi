@@ -369,9 +369,9 @@ mod tests {
             ..Default::default()
         };
         // Fonts are built lazily; the first pass measures against a fallback.
-        ctx.run(input.clone(), |_| {});
+        let _ = ctx.run(input.clone(), |_| {});
         let mut sizes = Vec::new();
-        ctx.run(input, |ctx| {
+        let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 bar.apply(ui);
                 ui.horizontal(|ui| {
@@ -418,8 +418,12 @@ mod tests {
     /// The two strips are meant to read as a hierarchy, not as two equal rows.
     #[test]
     fn test_the_session_bar_is_the_bigger_and_squarer_of_the_two() {
-        assert!(SESSION_BAR.height > FORK_BAR.height);
-        assert!(SESSION_BAR.corner < FORK_BAR.corner);
+        // Height/corner are compile-time facts about the constants; check
+        // them once at the definition instead of per-test-run.
+        const _: () = {
+            assert!(SESSION_BAR.height > FORK_BAR.height);
+            assert!(SESSION_BAR.corner < FORK_BAR.corner);
+        };
         // Spacing is the one thing they share, so the two rows align.
         assert_eq!(SESSION_BAR.spacing, FORK_BAR.spacing);
     }

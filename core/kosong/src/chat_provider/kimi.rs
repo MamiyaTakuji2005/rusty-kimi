@@ -444,9 +444,7 @@ impl KimiStreamedMessage {
                 }
                 if let Some(delta) = choice.get("delta") {
                     ingest_delta(delta, &mut self.parts);
-                    if let Some(tool_calls) =
-                        delta.get("tool_calls").and_then(|v| v.as_array())
-                    {
+                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                         for tc in tool_calls {
                             super::accumulate_tool_call_delta(&mut self.tool_acc, tc);
                         }

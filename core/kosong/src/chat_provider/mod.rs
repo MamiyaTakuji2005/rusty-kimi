@@ -20,11 +20,7 @@ pub mod openai_compatible;
 /// provider fragments differently; keying by `index` is robust to that and to
 /// interleaved parallel tool calls.
 pub(crate) fn accumulate_tool_call_delta(acc: &mut Vec<ToolCall>, tc: &serde_json::Value) {
-    let index = tc
-        .get("index")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0)
-        .max(0) as usize;
+    let index = tc.get("index").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
     while acc.len() <= index {
         acc.push(ToolCall {
             kind: "function".to_string(),
