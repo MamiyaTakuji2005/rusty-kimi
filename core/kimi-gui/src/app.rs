@@ -13,10 +13,24 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use eframe::egui::{self, Align, Align2, Color32, Key, Modifiers, Popup, RichText};
+use eframe::egui::{self, Align, Align2, Color32, Key, Modifiers, RichText};
 
+use kimi_agent::share::get_share_dir as share_dir;
+
+use crate::palette::{Command, Palette};
 use crate::session::Session;
 use crate::session_list::{ResumeEntry, spawn_session_listing};
+
+/// Which overlay is on top and therefore owns the keyboard. Ordered most
+/// modal first; `focus_owner` is the single place that decides.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FocusOwner {
+    Error,
+    CloseConfirm,
+    ResumeMenu,
+    Palette,
+    Session,
+}
 
 pub struct KimiGuiApp {
     agent_bin: String,
@@ -29,15 +43,20 @@ pub struct KimiGuiApp {
     resume_sessions: Vec<ResumeEntry>,
     /// In-flight resume listing (a result is pending).
     resume_listing: Option<Receiver<Result<Vec<ResumeEntry>, String>>>,
-    /// Row highlighted in the resume menu, for arrow-key browsing.
+    /// The resume list is showing (`Ctrl+O` or the book button).
+    resume_open: bool,
+    /// Row highlighted in the resume list, for arrow-key browsing.
     resume_cursor: usize,
     /// Bring the highlighted resume row into view on the next draw. Only set
     /// when the keyboard moved it, so it never fights the mouse wheel.
     resume_scroll: bool,
     /// Session id waiting on a close confirmation (`Ctrl+T` or a tab's ×).
     close_confirm: Option<usize>,
-    /// Error message from a failed `Session::spawn`, shown in a small modal.
-    spawn_error: Option<String>,
+    /// The command palette (`Ctrl+P`).
+    palette: Palette,
+    /// Something the user needs to be told about, shown in a small modal:
+    /// a session that would not spawn, a file that would not open.
+    error: Option<String>,
     /// Directory of the session most recently opened this run (any session
     /// carries its own `work_dir`; this covers the no-active-session case).
     last_workdir: Option<PathBuf>,
@@ -52,6 +71,7 @@ struct Keys {
     new_session: bool,
     resume: bool,
     close: bool,
+    palette: bool,
 }
 
 impl Keys {
@@ -82,10 +102,12 @@ impl KimiGuiApp {
             folder_pick: None,
             resume_sessions: Vec::new(),
             resume_listing: None,
+            resume_open: false,
             resume_cursor: 0,
             resume_scroll: false,
             close_confirm: None,
-            spawn_error: None,
+            palette: Palette::default(),
+            error: None,
             last_workdir: None,
         };
         app.open_session(agent_args.to_vec(), &cc.egui_ctx, None)?;
@@ -128,6 +150,23 @@ impl KimiGuiApp {
         }
     }
 
+    /// Who owns the keyboard this frame. Overlays stack, and only the topmost
+    /// one gets keys — including `Enter` and `Escape`, which otherwise mean
+    /// "send" and "cancel the turn" to the session underneath.
+    fn focus_owner(&self) -> FocusOwner {
+        if self.error.is_some() {
+            FocusOwner::Error
+        } else if self.close_confirm.is_some() {
+            FocusOwner::CloseConfirm
+        } else if self.resume_open {
+            FocusOwner::ResumeMenu
+        } else if self.palette.open {
+            FocusOwner::Palette
+        } else {
+            FocusOwner::Session
+        }
+    }
+
     /// App-wide keyboard shortcuts, so the whole hub works without a mouse:
     ///
     /// * `Tab` / `Ctrl+Tab` — next / previous session tab (row one), wrapping
@@ -135,22 +174,19 @@ impl KimiGuiApp {
     /// * `Ctrl+N` — new session (opens the folder picker)
     /// * `Ctrl+O` — resume menu, browsed with `↑`/`↓`, `Enter` to open
     /// * `Ctrl+T` — close the active session, after a confirmation
+    /// * `Ctrl+P` — command palette, for everything without a key of its own
     ///
     /// This runs before any widget is drawn and *consumes* the keys: the chat
     /// box holds focus permanently and would otherwise swallow `Tab` as an
     /// indent, `Enter` as a newline and the arrows as cursor movement.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        // The spawn-error modal is answered before anything else.
-        if self.spawn_error.is_some() {
-            return;
-        }
-        if self.close_confirm.is_some() {
-            self.close_confirm_keys(ctx);
-            return;
-        }
-        if Popup::is_id_open(ctx, resume_popup_id()) {
-            self.resume_menu_keys(ctx);
-            return;
+        match self.focus_owner() {
+            // Answered by clicking; it takes no keys, and swallows the rest.
+            FocusOwner::Error => return,
+            FocusOwner::CloseConfirm => return self.close_confirm_keys(ctx),
+            FocusOwner::ResumeMenu => return self.resume_menu_keys(ctx),
+            FocusOwner::Palette => return self.palette_keys(ctx),
+            FocusOwner::Session => {}
         }
 
         let keys = ctx.input_mut(|i| {
@@ -169,6 +205,9 @@ impl KimiGuiApp {
                 new_session: i.consume_key(Modifiers::COMMAND, Key::N),
                 resume: i.consume_key(Modifiers::COMMAND, Key::O),
                 close: i.consume_key(Modifiers::COMMAND, Key::T),
+                // One pattern covers Ctrl+Shift+P as well, which is the same
+                // command everywhere else and so does the same thing here.
+                palette: i.consume_key(Modifiers::COMMAND, Key::P),
             }
         });
 
@@ -192,6 +231,77 @@ impl KimiGuiApp {
         }
         if keys.close {
             self.request_close(self.active);
+        }
+        if keys.palette {
+            self.palette.open();
+        }
+    }
+
+    /// Keys while the palette is up. The query box owns the printable
+    /// characters; everything that steers the list is taken here first.
+    fn palette_keys(&mut self, ctx: &egui::Context) {
+        let (down, up, accept, cancel, toggle) = ctx.input_mut(|i| {
+            // Tab steps the list, as in the resume menu: it has to be consumed
+            // regardless, or it reaches a text box as an indent.
+            let up = i.consume_key(Modifiers::SHIFT, Key::Tab)
+                | i.consume_key(Modifiers::NONE, Key::ArrowUp);
+            let down = i.consume_key(Modifiers::NONE, Key::Tab)
+                | i.consume_key(Modifiers::NONE, Key::ArrowDown);
+            let accept = i.consume_key(Modifiers::NONE, Key::Enter);
+            let cancel = i.consume_key(Modifiers::NONE, Key::Escape);
+            let toggle = i.consume_key(Modifiers::COMMAND, Key::P);
+            (down, up, accept, cancel, toggle)
+        });
+        if cancel || toggle {
+            self.palette.close();
+            return;
+        }
+        let matches = self.palette.matches(!self.sessions.is_empty());
+        if down || up {
+            self.palette.step(down, matches.len());
+        }
+        // Clamp the way the list does, so Enter always takes the row that is
+        // actually highlighted rather than silently doing nothing.
+        self.palette.cursor = self.palette.cursor.min(matches.len().saturating_sub(1));
+        if accept && let Some(entry) = matches.get(self.palette.cursor) {
+            let command = entry.command;
+            self.palette.close();
+            self.run_command(command, ctx);
+        }
+    }
+
+    /// Carry out one palette command. Adding a feature to the palette is a row
+    /// in `palette::COMMANDS` plus an arm here.
+    fn run_command(&mut self, command: Command, ctx: &egui::Context) {
+        match command {
+            Command::NewSession => self.start_folder_pick(ctx),
+            Command::ResumeSession => self.open_resume_menu(ctx),
+            Command::CloseSession => self.request_close(self.active),
+            Command::OpenConfig => self.open_path(kimi_agent::config::get_config_file()),
+            Command::OpenMcpConfig => {
+                self.open_path(kimi_agent::mcp::get_global_mcp_config_file());
+            }
+            Command::OpenLogFolder => self.open_path(share_dir().join("logs")),
+            Command::OpenShareFolder => self.open_path(share_dir()),
+            Command::OpenWorkDir => {
+                // The tab may be running in the GUI's own cwd, with no `-w`.
+                let dir = self
+                    .sessions
+                    .get(self.active)
+                    .and_then(|session| session.work_dir.clone())
+                    .or_else(|| std::env::current_dir().ok());
+                match dir {
+                    Some(dir) => self.open_path(dir),
+                    None => self.error = Some("this session has no working directory".into()),
+                }
+            }
+        }
+    }
+
+    /// Hand a path to the desktop, surfacing a failure where it can be seen.
+    fn open_path(&mut self, path: PathBuf) {
+        if let Err(err) = crate::os::open_in_default_app(&path) {
+            self.error = Some(err);
         }
     }
 
@@ -230,22 +340,26 @@ impl KimiGuiApp {
         }
     }
 
-    /// Arrow-key browsing while the resume menu is open. `Escape` closes it —
-    /// egui's popup handles that itself.
+    /// Arrow-key browsing while the resume list is open.
     ///
-    /// Tab moves within the menu instead of switching sessions: it has to be
+    /// Tab moves within the list instead of switching sessions: it has to be
     /// swallowed here either way, or it reaches the still-focused chat box as
-    /// an indent behind the menu.
+    /// an indent behind the window.
     fn resume_menu_keys(&mut self, ctx: &egui::Context) {
-        let (down, up, accept) = ctx.input_mut(|i| {
+        let (down, up, accept, cancel) = ctx.input_mut(|i| {
             // Shift+Tab before Tab; `consume_key` ignores an extra shift.
             let up = i.consume_key(Modifiers::SHIFT, Key::Tab)
                 | i.consume_key(Modifiers::NONE, Key::ArrowUp);
             let down = i.consume_key(Modifiers::NONE, Key::Tab)
                 | i.consume_key(Modifiers::NONE, Key::ArrowDown);
             let accept = i.consume_key(Modifiers::NONE, Key::Enter);
-            (down, up, accept)
+            let cancel = i.consume_key(Modifiers::NONE, Key::Escape);
+            (down, up, accept, cancel)
         });
+        if cancel {
+            self.resume_open = false;
+            return;
+        }
         let Some(last) = self.resume_sessions.len().checked_sub(1) else {
             return;
         };
@@ -259,7 +373,7 @@ impl KimiGuiApp {
         }
         if accept {
             let entry = self.resume_sessions[self.resume_cursor.min(last)].clone();
-            Popup::close_id(ctx, resume_popup_id());
+            self.resume_open = false;
             self.resume_session(&entry, ctx);
         }
     }
@@ -286,9 +400,9 @@ impl KimiGuiApp {
         self.folder_pick = Some(pick_folder_async(ctx, start.as_deref()));
     }
 
-    /// Show the resume menu and re-list what is on disk behind it.
+    /// Show the resume list and re-list what is on disk behind it.
     fn open_resume_menu(&mut self, ctx: &egui::Context) {
-        Popup::open_id(ctx, resume_popup_id());
+        self.resume_open = true;
         self.resume_cursor = 0;
         self.resume_scroll = true;
         if self.resume_listing.is_none() {
@@ -305,7 +419,7 @@ impl KimiGuiApp {
             entry.id.clone(),
         ];
         if let Err(error) = self.open_session(args, ctx, Some(entry.tab_title())) {
-            self.spawn_error = Some(error);
+            self.error = Some(error);
         }
     }
 
@@ -318,7 +432,7 @@ impl KimiGuiApp {
             Ok(Some(dir)) => {
                 let args = vec!["-w".to_string(), dir.to_string_lossy().into_owned()];
                 if let Err(error) = self.open_session(args, ctx, None) {
-                    self.spawn_error = Some(error);
+                    self.error = Some(error);
                 }
             }
             // Cancelled or the picker thread died: nothing to do.
@@ -393,8 +507,6 @@ impl KimiGuiApp {
                     pick_folder = true;
                 }
             });
-
-            self.resume_popup(ui, &book);
         });
         if let Some(index) = close {
             self.request_close(index);
@@ -403,31 +515,42 @@ impl KimiGuiApp {
             self.start_folder_pick(ctx);
         }
         if refresh_resume {
-            // The click already toggled the popup open; this only refreshes
-            // the listing and resets the keyboard cursor behind it.
-            self.resume_cursor = 0;
-            self.resume_scroll = true;
-            if self.resume_listing.is_none() {
-                self.resume_listing = Some(spawn_session_listing(ctx));
+            if self.resume_open {
+                self.resume_open = false;
+            } else {
+                self.open_resume_menu(ctx);
             }
         }
     }
 
-    /// The resume menu below the book button, also opened by `Ctrl+O`.
-    /// Clicking a row — or moving to it with the arrow keys and pressing
-    /// Enter — resumes that session in a new tab.
-    fn resume_popup(&mut self, ui: &mut egui::Ui, anchor: &egui::Response) {
+    /// The resume list, opened by `Ctrl+O` or the book button.  Clicking a row
+    /// — or moving to it with the arrow keys and pressing Enter — resumes that
+    /// session in a new tab.
+    ///
+    /// A centered window rather than a menu hanging off the book button: that
+    /// button sits in a 40px strip at the window's edge, and an anchored popup
+    /// is fitted to the room left beside it, which is almost none. Sized off
+    /// the window so it stays generous as the window grows.
+    fn resume_window(&mut self, ctx: &egui::Context) {
+        if !self.resume_open {
+            return;
+        }
         let mut resume: Option<ResumeEntry> = None;
         let cursor = self.resume_cursor;
-        let want_scroll = self.resume_scroll;
-        let mut scrolled = false;
+        let want_scroll = std::mem::take(&mut self.resume_scroll);
         let sessions = &self.resume_sessions;
         let loading = self.resume_listing.is_some();
-        // A fixed id, so `Ctrl+O` can open this without the button being hit.
-        egui::Popup::menu(anchor)
-            .id(resume_popup_id())
-            .width(1380.0)
-            .show(|ui| {
+        let screen = ctx.screen_rect();
+        let width = (screen.width() * 0.7).clamp(360.0, 1100.0);
+        let height = (screen.height() * 0.6).clamp(240.0, 800.0);
+        egui::Window::new("Resume session")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_TOP, [0.0, 60.0])
+            .default_width(width)
+            .show(ctx, |ui| {
+                ui.set_width(width);
                 if loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -441,7 +564,7 @@ impl KimiGuiApp {
                 }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .max_height(1080.0)
+                    .max_height(height)
                     .show(ui, |ui| {
                         for (index, entry) in sessions.iter().enumerate() {
                             let selected = index == cursor;
@@ -453,18 +576,15 @@ impl KimiGuiApp {
                             }
                             if selected && want_scroll {
                                 row.scroll_to_me(Some(Align::Center));
-                                scrolled = true;
                             }
                             ui.label(RichText::new(entry.meta_line()).weak().small());
                             ui.add_space(2.0);
                         }
                     });
             });
-        if scrolled {
-            self.resume_scroll = false;
-        }
         if let Some(entry) = resume {
-            self.resume_session(&entry, ui.ctx());
+            self.resume_open = false;
+            self.resume_session(&entry, ctx);
         }
     }
 
@@ -516,18 +636,98 @@ impl KimiGuiApp {
         }
     }
 
-    fn spawn_error_window(&mut self, ctx: &egui::Context) {
-        if self.spawn_error.is_none() {
+    /// The command palette: a query box over a filtered command list.
+    fn palette_window(&mut self, ctx: &egui::Context) {
+        if !self.palette.open {
+            return;
+        }
+        let has_session = !self.sessions.is_empty();
+        let matches = self.palette.matches(has_session);
+        // The cursor is an index into a list that the query just reshuffled.
+        let cursor = self.palette.cursor.min(matches.len().saturating_sub(1));
+        let want_scroll = std::mem::take(&mut self.palette.scroll);
+        let mut chosen: Option<Command> = None;
+        let query_id = egui::Id::new("palette_query");
+        egui::Window::new("Command palette")
+            // The query box and the list say what this is; a title bar over
+            // them is just chrome.
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_TOP, [0.0, 80.0])
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                let query = ui.add(
+                    egui::TextEdit::singleline(&mut self.palette.query)
+                        .id(query_id)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("type a command..."),
+                );
+                // The palette owns the keyboard while it is up, and the chat
+                // box below has stopped grabbing focus back.
+                if !query.has_focus() {
+                    query.request_focus();
+                }
+                // Another keystroke means another list; the highlight belongs
+                // back at the best match, not wherever it was in the old one.
+                if query.changed() {
+                    self.palette.cursor = 0;
+                    self.palette.scroll = true;
+                }
+                ui.add_space(4.0);
+                if matches.is_empty() {
+                    ui.label(RichText::new("no matching command").weak());
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for (index, entry) in matches.iter().enumerate() {
+                            let selected = index == cursor;
+                            let row =
+                                ui.selectable_label(selected, RichText::new(entry.title).strong());
+                            if row.clicked() {
+                                chosen = Some(entry.command);
+                            }
+                            if selected && want_scroll {
+                                row.scroll_to_me(Some(Align::Center));
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(entry.detail).weak().small());
+                                if let Some(binding) = entry.binding {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(binding).weak().small().monospace(),
+                                            );
+                                        },
+                                    );
+                                }
+                            });
+                            ui.add_space(2.0);
+                        }
+                    });
+            });
+        if let Some(command) = chosen {
+            self.palette.close();
+            self.run_command(command, ctx);
+        }
+    }
+
+    fn error_window(&mut self, ctx: &egui::Context) {
+        if self.error.is_none() {
             return;
         }
         let mut close = false;
-        egui::Window::new("Could not start session")
+        egui::Window::new("Kimi")
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.label(
-                    RichText::new(self.spawn_error.as_deref().unwrap_or_default())
+                    RichText::new(self.error.as_deref().unwrap_or_default())
                         .color(Color32::from_rgb(200, 80, 80)),
                 );
                 ui.add_space(6.0);
@@ -536,7 +736,7 @@ impl KimiGuiApp {
                 }
             });
         if close {
-            self.spawn_error = None;
+            self.error = None;
         }
     }
 }
@@ -558,8 +758,10 @@ impl eframe::App for KimiGuiApp {
         // event queue, ahead of the always-focused chat box.
         self.handle_shortcuts(ctx);
         self.tab_strip(ctx);
+        self.resume_window(ctx);
+        self.palette_window(ctx);
         self.close_confirm_window(ctx);
-        self.spawn_error_window(ctx);
+        self.error_window(ctx);
 
         if self.sessions.is_empty() {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -575,12 +777,10 @@ impl eframe::App for KimiGuiApp {
             return;
         }
 
-        // The session's own keys (Esc cancels, Enter sends) stay out of the
-        // way while a modal or the resume menu is taking input.
-        let popup_open = self.spawn_error.is_some()
-            || self.close_confirm.is_some()
-            || Popup::is_id_open(ctx, resume_popup_id());
-        self.sessions[self.active].ui(ctx, popup_open);
+        // The session's own keys (Esc cancels, Enter sends) and its habit of
+        // grabbing focus stay out of the way while anything is over it.
+        let overlaid = self.focus_owner() != FocusOwner::Session;
+        self.sessions[self.active].ui(ctx, overlaid);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -588,12 +788,6 @@ impl eframe::App for KimiGuiApp {
             session.shutdown();
         }
     }
-}
-
-/// Id of the resume menu. Fixed rather than derived from the book button's
-/// response, so `Ctrl+O` can open the same popup the button toggles.
-fn resume_popup_id() -> egui::Id {
-    egui::Id::new("resume_popup")
 }
 
 /// Open the native OS folder picker on a background thread (it blocks while

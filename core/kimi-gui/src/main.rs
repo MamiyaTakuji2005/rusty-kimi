@@ -13,6 +13,8 @@
 
 mod app;
 mod client;
+mod os;
+mod palette;
 mod render;
 mod session;
 mod session_list;
