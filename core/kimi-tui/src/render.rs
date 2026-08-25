@@ -10,13 +10,14 @@
 use std::fmt::Write as _;
 
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line as TuiLine, Span};
+use ratatui::text::{Line, Line as TuiLine, Span};
 use similar::{ChangeTag, TextDiff};
 use unicode_width::UnicodeWidthStr;
 
 use kimi_agent::wire::ApprovalResponseKind;
 use kosong::tooling::{DisplayBlock, ToolOutput, ToolReturnValue};
 
+use crate::theme;
 use wire_client::transcript::Block;
 
 const ARGS_PREVIEW_CHARS: usize = 100;
@@ -186,13 +187,13 @@ fn cut_at_width(text: &str, max: usize) -> &str {
 fn push_block(rows: &mut Vec<Row>, block: &Block, width: u16, turn_running: bool) {
     match block {
         Block::User { text, steer } => {
-            let prefix = if *steer { "↪ " } else { "❯ " };
+            // The Python shell echoed user input as plain text behind the
+            // sparkle symbol; keep the symbol, drop the heavy color.
+            let prefix = if *steer { "↪ " } else { "✨ " };
             styled(
                 rows,
                 &format!("{prefix}{text}"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().add_modifier(Modifier::BOLD),
                 width,
             );
             blank(rows);
@@ -218,7 +219,7 @@ fn push_block(rows: &mut Vec<Row>, block: &Block, width: u16, turn_running: bool
                 width,
             );
             if !body.is_empty() {
-                styled(rows, &body, Style::default().fg(Color::DarkGray), width);
+                styled(rows, &body, theme::dim(), width);
             }
             if !turn_running {
                 blank(rows);
@@ -258,7 +259,7 @@ fn push_block(rows: &mut Vec<Row>, block: &Block, width: u16, turn_running: bool
                         summary.events,
                         summary.recent_tools.join(", ")
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    theme::dim(),
                     width,
                 );
             }
@@ -275,9 +276,9 @@ fn push_block(rows: &mut Vec<Row>, block: &Block, width: u16, turn_running: bool
                 None => "pending",
             };
             let color = match response {
-                Some(ApprovalResponseKind::Reject) => Color::Red,
-                Some(_) => Color::Green,
-                None => Color::Yellow,
+                Some(ApprovalResponseKind::Reject) => theme::ERROR,
+                Some(_) => theme::SUCCESS,
+                None => theme::WARNING,
             };
             styled(
                 rows,
@@ -325,12 +326,7 @@ fn push_markdownish(rows: &mut Vec<Row>, text: &str, width: u16) {
 
 fn push_tool_result(rows: &mut Vec<Row>, result: &ToolReturnValue, width: u16) {
     if result.is_error && !result.message.is_empty() {
-        styled(
-            rows,
-            &result.message,
-            Style::default().fg(Color::Red),
-            width,
-        );
+        styled(rows, &result.message, theme::error(), width);
     }
     for block in &result.display {
         push_display_block(rows, block, width);
@@ -349,18 +345,13 @@ fn push_tool_result(rows: &mut Vec<Row>, result: &ToolReturnValue, width: u16) {
             styled(
                 rows,
                 &format!("  … {skipped} more lines"),
-                Style::default().fg(Color::DarkGray),
+                theme::dim(),
                 width,
             );
         }
         for line in lines.iter().skip(skipped) {
             let truncated: String = line.chars().take(OUTPUT_PREVIEW_CHARS).collect();
-            styled(
-                rows,
-                &format!("  {truncated}"),
-                Style::default().fg(Color::DarkGray),
-                width,
-            );
+            styled(rows, &format!("  {truncated}"), theme::dim(), width);
         }
     }
 }
@@ -404,10 +395,21 @@ fn push_display_block(rows: &mut Vec<Row>, block: &DisplayBlock, width: u16) {
                 unknown.kind,
                 truncate_chars(&unknown.data.to_string(), ARGS_PREVIEW_CHARS)
             ),
-            Style::default().fg(Color::DarkGray),
+            theme::dim(),
             width,
         ),
     }
+}
+
+/// Flatten a display block into plain `Line`s for overlay popups (approval
+/// previews), where the transcript row machinery is not in play.
+pub fn push_display_block_lines(lines: &mut Vec<Line<'static>>, block: &DisplayBlock, width: u16) {
+    let mut rows: Vec<Row> = Vec::new();
+    push_display_block(&mut rows, block, width);
+    for row in rows {
+        lines.push(row.to_span_line());
+    }
+    let _ = width;
 }
 
 fn push_diff(rows: &mut Vec<Row>, diff: &kosong::tooling::DiffDisplayBlock, width: u16) {
@@ -423,20 +425,15 @@ fn push_diff(rows: &mut Vec<Row>, diff: &kosong::tooling::DiffDisplayBlock, widt
         for op in group {
             for change in d.iter_changes(&op) {
                 if shown >= DIFF_MAX_LINES {
-                    styled(
-                        rows,
-                        "... diff truncated ...",
-                        Style::default().fg(Color::DarkGray),
-                        width,
-                    );
+                    styled(rows, "... diff truncated ...", theme::dim(), width);
                     break 'outer;
                 }
                 shown += 1;
                 let line = change.value().trim_end_matches('\n');
                 let (sign, color) = match change.tag() {
-                    ChangeTag::Delete => ("-", Color::Red),
-                    ChangeTag::Insert => ("+", Color::Green),
-                    ChangeTag::Equal => (" ", Color::DarkGray),
+                    ChangeTag::Delete => ("-", theme::ERROR),
+                    ChangeTag::Insert => ("+", theme::SUCCESS),
+                    ChangeTag::Equal => (" ", theme::DIM),
                 };
                 styled(
                     rows,
@@ -483,11 +480,11 @@ mod tests {
         }];
         let rendered = RenderedTranscript::rebuild(&blocks, 10, false);
         let text = rows_text(&rendered);
-        // "❯ " prefix counts toward the width.
+        // "✨ " prefix counts toward the width.
         assert!(text.iter().all(|line| line.trim_end().width() <= 10));
         assert_eq!(
             text.first().map(|l| l.trim_end().to_string()),
-            Some("❯ aaaa".to_string())
+            Some("✨ aaaa".to_string())
         );
         assert_eq!(text.join(" ").split_whitespace().count(), 5);
     }
@@ -501,7 +498,7 @@ mod tests {
         let rendered = RenderedTranscript::rebuild(&blocks, 8, false);
         let text = rows_text(&rendered);
         assert!(text.iter().all(|line| line.width() <= 8));
-        assert_eq!(text.join(""), "❯ 日本語テキスト");
+        assert_eq!(text.join(""), "✨ 日本語テキスト");
     }
 
     #[test]

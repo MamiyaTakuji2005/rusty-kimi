@@ -19,15 +19,16 @@
 mod agent;
 mod input;
 mod render;
+mod theme;
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -35,7 +36,7 @@ use wire_client::session_list::{ResumeEntry, spawn_session_listing};
 
 use crate::agent::{AgentSession, Phase};
 use crate::input::Editor;
-use crate::render::{RenderedTranscript, Row};
+use crate::render::{RenderedTranscript, Row, push_display_block_lines};
 
 /// What wakes the loop. Wire traffic and key presses land on one channel so a
 /// single `recv_timeout` serves both.
@@ -470,20 +471,6 @@ impl App {
         self.scroll_bottom = next;
     }
 
-    /// Label for the visible transcript: "main" or the active fork's title.
-    fn active_subtab_title(&self) -> String {
-        match &self.active_subtab {
-            None => "main".to_string(),
-            Some(task_id) => self
-                .session
-                .transcript
-                .subagents
-                .iter()
-                .find(|s| &s.task_tool_call_id == task_id)
-                .map(|sub| sub.title.clone())
-                .unwrap_or_else(|| "main".to_string()),
-        }
-    }
     /// Wheel scrolling: up unpins from the live tail, down past the end
     /// re-pins. Only wheel events reach here; other mouse activity is noise.
     fn handle_mouse(&mut self, event: &crossterm::event::MouseEvent) {
@@ -499,59 +486,91 @@ impl App {
 impl App {
     fn draw(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
-        let input_height = 3usize; // editor box
-        let status_height = 1usize;
+        // Layout, Python-shell style — no boxes anywhere:
+        //   transcript rows …
+        //   ── input · hint ──────────────────
+        //   ✨ <editor>
+        //   ─────────────────────────────────
+        //   status line (dim)
+        let separator_height = 1u16;
+        let editor_height = 1u16;
+        let status_height = 1u16;
 
-        let [transcript_area, input_area, status_area] = Layout::vertical([
+        let [
+            transcript_area,
+            input_sep,
+            editor_area,
+            status_sep,
+            status_area,
+        ] = Layout::vertical([
             Constraint::Min(1),
-            Constraint::Length(input_height as u16),
-            Constraint::Length(status_height as u16),
+            Constraint::Length(separator_height),
+            Constraint::Length(editor_height),
+            Constraint::Length(separator_height),
+            Constraint::Length(status_height),
         ])
         .areas(area);
 
         // --- transcript ---------------------------------------------------
-        // `bottom` is the exclusive end row; the window is the `height` rows
-        // before it. When pinned, bottom == len() and we show the live tail.
-        let viewport_height = transcript_area.height.saturating_sub(2) as usize; // borders
-        let viewport_height = viewport_height.max(1);
+        let viewport_height = transcript_area.height as usize;
         let bottom = self.scroll_bottom.min(self.rendered.len());
         let rows = self.rendered.viewport(bottom, viewport_height);
-        let lines: Vec<Line> = rows.iter().map(|row: &Row| row.to_span_line()).collect();
-        // Title doubles as the subtab indicator: "main" or the fork's title.
-        let title = self.active_subtab_title();
-        let transcript = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" Kimi · {title} (Tab cycles) ")),
-            )
-            .wrap(Wrap { trim: false });
-        frame.render_widget(transcript, transcript_area);
+        let mut lines: Vec<Line> = rows.iter().map(|row: &Row| row.to_span_line()).collect();
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled("starting…", theme::dim())));
+        }
+        // The title lives in the input rule; the transcript itself is bare.
+        let _ = lines.len();
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            transcript_area,
+        );
 
-        // --- editor -------------------------------------------------------
-        let cursor_col = self.editor.cursor_chars() as u16 + 1; // +1 for border
-        let text = self.editor.text().to_string();
+        // --- input rule ----------------------------------------------------
+        // Doubles as the subtab indicator: "input" or "input · <fork>".
         let hint = match self.session.phase {
-            Phase::Ready => "ready",
-            Phase::Running => "working… Esc cancels · Enter steers",
-            Phase::Initializing => "initializing…",
-            Phase::Replaying => "loading history…",
+            Phase::Ready => "",
+            Phase::Running => "working · Esc cancels · Enter steers",
+            Phase::Initializing => "initializing",
+            Phase::Replaying => "loading history",
             Phase::Failed(_) => "failed",
         };
-        let editor_title = format!(" message — {hint} ");
-        let editor = Paragraph::new(text)
-            .style(Style::default())
-            .block(Block::default().borders(Borders::ALL).title(editor_title));
-        frame.render_widget(editor, input_area);
-        if self.overlay == Overlay::None {
-            let pos = Position::new(
-                input_area.x + cursor_col.min(input_area.width.saturating_sub(1)),
-                input_area.y + 1,
-            );
-            frame.set_cursor_position(pos);
+        let mut label = String::from("input");
+        if let Some(sub) = self.subtab_suffix() {
+            label.push_str(&format!(" · {sub}"));
+        }
+        if !hint.is_empty() {
+            label.push_str(&format!(" · {hint}"));
+        }
+        let sep_style = match self.session.phase {
+            Phase::Running => Style::default().fg(theme::ACCENT),
+            Phase::Failed(_) => Style::default().fg(theme::ERROR),
+            _ => theme::dim(),
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                theme::separator_line(&label, area.width),
+                sep_style,
+            ))),
+            input_sep,
+        );
+
+        // --- editor row ----------------------------------------------------
+        let text = format!("✨ {}", self.editor.text());
+        let cursor_col = self.editor.cursor_chars() as u16 + 3; // after "✨ "
+        frame.render_widget(Paragraph::new(text), editor_area);
+        if self.overlay == Overlay::None && cursor_col < area.width {
+            frame.set_cursor_position(Position::new(cursor_col, editor_area.y));
         }
 
-        // --- status bar ---------------------------------------------------
+        // --- status rule + status bar --------------------------------------
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(area.width as usize),
+                theme::dim(),
+            ))),
+            status_sep,
+        );
         let status = self.status_line(area.width);
         frame.render_widget(status, status_area);
 
@@ -566,6 +585,17 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Label for the active fork view, if one is selected.
+    fn subtab_suffix(&self) -> Option<String> {
+        let task_id = self.active_subtab.as_deref()?;
+        self.session
+            .transcript
+            .subagents
+            .iter()
+            .find(|s| s.task_tool_call_id == task_id)
+            .map(|sub| sub.title.clone())
     }
 
     fn status_line(&self, width: u16) -> Paragraph<'static> {
@@ -603,9 +633,9 @@ impl App {
         Paragraph::new(Line::from(vec![Span::styled(
             line,
             if matches!(self.session.phase, Phase::Failed(_)) {
-                Style::default().fg(Color::Red)
+                theme::error()
             } else {
-                Style::default().fg(Color::DarkGray)
+                theme::dim()
             },
         )]))
     }
@@ -616,67 +646,81 @@ impl App {
             return;
         };
         let w = area.width.saturating_sub(8).max(40).min(area.width);
-        let h = area.height.saturating_sub(6).max(7).min(area.height);
+        let h = area.height.saturating_sub(6).max(9).min(area.height);
         let popup = centered_rect(frame.area(), w, h);
         frame.render_widget(Clear, popup);
-        let lines = vec![
-            Line::from(Span::styled(
-                format!("approval required — {} · {}", info.sender, info.action),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
+
+        // Python-shell modal look: accent title, hairline rule under it,
+        // plain content, key hints on a dim rule. No box.
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("✨ ", theme::accent()),
+                Span::styled("approval required", theme::title()),
+                Span::styled(
+                    format!(" · {} · {}", info.sender, info.action),
+                    theme::dim(),
+                ),
+            ]),
+            Line::from(Span::styled("─".repeat(popup.width as usize), theme::dim())),
             Line::from(info.description.clone()),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("[1] approve   ", Style::default().fg(Color::Green)),
-                Span::styled(
-                    "[2] approve for session   ",
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled("[3] reject   ", Style::default().fg(Color::Red)),
-                Span::styled("[Esc] later", Style::default().fg(Color::DarkGray)),
-            ]),
         ];
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(" approval "))
-                .wrap(Wrap { trim: false }),
-            popup,
-        );
+        // Display blocks (command previews etc.), dim like tool output.
+        for block in &info.display {
+            push_display_block_lines(&mut lines, block, popup.width);
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "─".repeat(popup.width as usize),
+            theme::dim(),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("[1] approve   ", theme::success()),
+            Span::styled("[2] approve for session   ", theme::success()),
+            Span::styled("[3] reject   ", theme::error()),
+            Span::styled("[Esc] later", theme::dim()),
+        ]));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), popup);
     }
 
     fn draw_resume(&mut self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
         let popup = centered_rect(area, area.width * 7 / 10, area.height * 6 / 10);
         frame.render_widget(Clear, popup);
-        let items: Vec<ListItem> = if self.resume_listing.is_some() {
-            vec![ListItem::new(Line::from("loading sessions…"))]
+
+        let mut items: Vec<ListItem> = vec![ListItem::new(Line::from(vec![
+            Span::styled("✨ ", theme::accent()),
+            Span::styled("resume", theme::title()),
+            Span::styled("  · ↑↓ move · Enter opens · Esc closes", theme::dim()),
+        ]))];
+        if self.resume_listing.is_some() {
+            items.push(ListItem::new(Line::from(Span::styled(
+                "loading sessions…",
+                theme::dim(),
+            ))));
         } else if self.resume_entries.is_empty() {
-            vec![ListItem::new(Line::from("no past sessions found"))]
+            items.push(ListItem::new(Line::from(Span::styled(
+                "no past sessions found",
+                theme::dim(),
+            ))));
         } else {
-            self.resume_entries
-                .iter()
-                .map(|entry| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            entry.tab_title(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("  {}", entry.meta_line()),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]))
-                })
-                .collect()
-        };
+            for entry in &self.resume_entries {
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(
+                        entry.tab_title(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("  {}", entry.meta_line()), theme::dim()),
+                ])));
+            }
+        }
         self.list_state.select(Some(self.resume_cursor));
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" resume (↑↓, Enter, Esc) "),
+            .highlight_style(
+                Style::default()
+                    .fg(theme::ACCENT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
             )
-            .highlight_style(Style::default().bg(Color::DarkGray));
+            .highlight_symbol("› ");
         frame.render_stateful_widget(list, popup, &mut self.list_state);
     }
 }
