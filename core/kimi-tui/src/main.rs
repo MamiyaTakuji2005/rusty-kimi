@@ -37,6 +37,7 @@ use wire_client::session_list::{ResumeEntry, spawn_session_listing};
 use crate::agent::{AgentSession, Phase};
 use crate::input::Editor;
 use crate::render::{RenderedTranscript, Row, push_display_block_lines};
+use wire_client::transcript::Block;
 
 /// What wakes the loop. Wire traffic and key presses land on one channel so a
 /// single `recv_timeout` serves both.
@@ -97,8 +98,10 @@ struct App {
     rendered: RenderedTranscript,
     /// Width the rows were wrapped at (0 = nothing rendered yet).
     rendered_width: u16,
-    /// Block count the rows were built from.
-    rendered_blocks: usize,
+    /// Transcript version the rows were built from (see `Transcript::version`).
+    rendered_version: u64,
+    /// Which transcript (main vs subagent tab) the rows were built from.
+    rendered_source: usize,
     /// Index just past the last visible row (`rendered.len()` = pinned to live).
     scroll_bottom: usize,
     overlay: Overlay,
@@ -183,6 +186,39 @@ fn run_app(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
+        // Coalesce the inbound backlog into one repaint per burst: streaming
+        // deltas arrive far faster than the terminal can usefully repaint,
+        // so drain the queue dry and draw the end state once.
+        let mut quit = false;
+        loop {
+            match rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    quit = true;
+                    break;
+                }
+                Ok(msg) => {
+                    let keep_going = match msg {
+                        Msg::Key(key) => app.handle_key(key),
+                        Msg::Mouse(mouse) => {
+                            app.handle_mouse(&mouse);
+                            true
+                        }
+                        Msg::Resize | Msg::Wake => true, /* next draw re-lays out */
+                    };
+                    if !keep_going {
+                        quit = true;
+                        break;
+                    }
+                }
+            }
+            app.session.drain_inbound();
+            app.poll_resume_listing();
+        }
+        if quit {
+            break;
+        }
+
         app.session.drain_inbound();
         app.poll_resume_listing();
 
@@ -213,7 +249,9 @@ impl App {
             editor: Editor::default(),
             rendered: RenderedTranscript::new(),
             rendered_width: 0,
-            rendered_blocks: 0,
+            rendered_version: 0,
+            // usize::MAX forces the first rebuild.
+            rendered_source: usize::MAX,
             scroll_bottom: 0, // set on first rebuild
             overlay: Overlay::None,
             resume_entries: Vec::new(),
@@ -225,9 +263,10 @@ impl App {
         })
     }
 
-    /// Rebuild the wrapped rows when content or width changed. Block *count*
-    /// is the change signal: blocks are append-only within a run (the fold
-    /// mutates in place otherwise), and a width change rewraps everything.
+    /// Rebuild the wrapped rows when content, width, or visible source
+    /// changed. The transcript exposes a monotonically bumped `version` —
+    /// streaming deltas mutate blocks in place, so block *count* would miss
+    /// them; version catches every change.
     ///
     /// Scroll policy: `scroll_bottom == rendered.len()` means "pinned to the
     /// live tail" and follows growth; once the user scrolls up, their
@@ -235,26 +274,20 @@ impl App {
     fn rebuild_if_needed(&mut self, width: u16) {
         // Which block list is visible: main, or the active subagent's.
         let mut fallback_to_main = false;
-        let (blocks, source_len) = match &self.active_subtab {
-            None => (
-                &self.session.transcript.blocks,
-                self.session.transcript.blocks.len(),
-            ),
+        let source = match &self.active_subtab {
+            None => None,
             Some(task_id) => {
                 match self
                     .session
                     .transcript
                     .subagents
                     .iter()
-                    .find(|s| &s.task_tool_call_id == task_id)
+                    .position(|s| &s.task_tool_call_id == task_id)
                 {
-                    Some(sub) => (&sub.transcript.blocks, sub.transcript.blocks.len()),
+                    Some(index) => Some(index),
                     None => {
                         fallback_to_main = true;
-                        (
-                            &self.session.transcript.blocks,
-                            self.session.transcript.blocks.len(),
-                        )
+                        None
                     }
                 }
             }
@@ -263,24 +296,31 @@ impl App {
             self.active_subtab = None;
         }
 
-        let running = match &self.active_subtab {
+        let running = match source {
             None => self.session.phase == Phase::Running,
-            Some(task_id) => self
-                .session
-                .transcript
-                .subagents
-                .iter()
-                .find(|s| &s.task_tool_call_id == task_id)
-                .is_some_and(|sub| !sub.done),
+            Some(index) => !self.session.transcript.subagents[index].done,
+        };
+        let version = match source {
+            None => self.session.transcript.version,
+            Some(index) => self.session.transcript.subagents[index].transcript.version,
         };
 
-        let force = self.rendered_blocks == usize::MAX;
-        if force || self.rendered_width != width || source_len > self.rendered_blocks {
+        let force = self.rendered_source == usize::MAX;
+        if force
+            || self.rendered_width != width
+            || self.rendered_source != source.unwrap_or(usize::MAX)
+            || self.rendered_version != version
+        {
             let was_pinned = self.scroll_bottom >= self.rendered.len();
             let from_tail = self.rendered.len().saturating_sub(self.scroll_bottom);
+            let blocks: &[Block] = match source {
+                None => &self.session.transcript.blocks,
+                Some(index) => &self.session.transcript.subagents[index].transcript.blocks,
+            };
             self.rendered = RenderedTranscript::rebuild(blocks, width, running);
             self.rendered_width = width;
-            self.rendered_blocks = if force { 0 } else { source_len };
+            self.rendered_version = version;
+            self.rendered_source = source.unwrap_or(usize::MAX);
             self.scroll_bottom = if was_pinned {
                 self.rendered.len()
             } else {
@@ -462,7 +502,7 @@ impl App {
             Some(subagents[next - 1].task_tool_call_id.clone())
         };
         // The visible block set changed; force a rebuild.
-        self.rendered_blocks = usize::MAX;
+        self.rendered_source = usize::MAX;
     }
 
     fn scroll_by(&mut self, delta: i32) {

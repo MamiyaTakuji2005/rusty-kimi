@@ -141,12 +141,28 @@ pub struct Transcript {
     pub status: Status,
     /// One nested transcript per subagent, keyed by the Task tool call id.
     pub subagents: Vec<SubagentTranscript>,
+    /// Monotonic change counter. Streaming mutates blocks *in place* (text
+    /// deltas append into the last Assistant/Thinking block, streamed tool
+    /// arguments merge into an existing ToolCall), so block count is not a
+    /// change signal — frontends compare this to decide when to re-render.
+    pub version: u64,
 }
 
 impl Transcript {
     /// Fold one wire event into the block list. Returns true if anything
     /// visible changed (callers can use this to keep scroll pinned).
+    ///
+    /// Any change also bumps [`Self::version`] — including the streaming
+    /// paths that mutate the newest block in place rather than pushing one.
     pub fn apply_event(&mut self, msg: WireMessage) -> bool {
+        let changed = self.apply_event_inner(msg);
+        if changed {
+            self.version += 1;
+        }
+        changed
+    }
+
+    fn apply_event_inner(&mut self, msg: WireMessage) -> bool {
         match msg {
             WireMessage::TurnBegin(turn) => {
                 self.blocks.push(Block::User {
@@ -353,6 +369,7 @@ impl Transcript {
             info,
             response: None,
         });
+        self.version += 1;
         self.blocks.len() - 1
     }
 }
