@@ -21,7 +21,8 @@ fn description_for(capabilities: &[ModelCapability]) -> String {
     let caps: HashSet<ModelCapability> = capabilities.iter().cloned().collect();
     let fixture = RuntimeFixture::with_capabilities(caps);
     let tool = ReadMediaFile::new(&fixture.runtime).expect("read media tool");
-    tool.description().to_string()
+    // Normalize away checkout-dependent CRLF in the embedded markdown.
+    tool.description().to_string().replace("\r\n", "\n")
 }
 
 #[test]

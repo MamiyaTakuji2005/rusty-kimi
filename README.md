@@ -9,6 +9,7 @@ Rust too. There is no Python anywhere.
 
 ```
 kimi-gui (Rust, egui)  ──Wire JSON-RPC / stdio──▶  kimi-agent (Rust)
+kimi-tui (Rust, ratatui) ──Wire JSON-RPC / stdio─▶  kimi-agent (Rust)
 ```
 
 ## The agent: `kimi-agent`
@@ -51,11 +52,9 @@ seam. The protocol, the `~/.kimi` data layout, and the `kimi_cli.tools.*` tool
 identity are treated as compatibility invariants — any client speaking the
 protocol can drive the agent.
 
-> **Terminal frontend:** the original Python TUI that spoke this protocol now
-> lives archived and unmaintained in a separate private repo (`rusty-kimi-tui`).
-> It still works against a wire-compatible `kimi-agent` for terminal-only
-> environments, but nothing develops it. A minimal Rust TUI client would be the
-> path back to a terminal frontend, not resurrecting the Python tree.
+> **Terminal frontend:** the original Python TUI that spoke this protocol was
+> archived to a separate private repo (`rusty-kimi-tui`). The Rust-native
+> replacement now ships in this repo as **`kimi-tui`** (below).
 
 ## Quick start
 
@@ -82,8 +81,9 @@ Within `core/`:
 - `kimi-agent/` — the agent server (bin: `kimi-agent`), wire-only.
 - `kosong/` — LLM abstraction (messages, tooling, providers).
 - `kaos/` — OS abstraction (paths, stats, filesystem).
-- `wire-client/` — shared frontend client layer: JSON-RPC over stdio, transcript folding, session listing.
+- `wire-client/` — shared frontend kit: JSON-RPC over stdio, transcript folding, session listing, agent-binary resolution.
 - `kimi-gui/` — native egui frontend for the wire protocol (bin: `kimi-gui`).
+- `kimi-tui/` — ratatui terminal frontend (bin: `kimi-tui`); one session per invocation.
 
 ## Build & test
 
@@ -92,9 +92,18 @@ Rust workspace (from `core/`):
 ```sh
 cargo build -p kimi-agent   # the agent server
 cargo build -p kimi-gui     # the GUI
+cargo build -p kimi-tui     # the terminal UI
 cargo test                  # whole workspace
 cargo fmt
 cargo clippy --workspace --all-targets
+```
+
+Run the TUI from a real terminal — it takes over the screen and restores it on exit:
+
+```sh
+./target/debug/kimi-tui -w /some/dir        # start a session in a directory
+# Enter sends · Esc cancels the turn · 1/2/3 answer approvals · Tab cycles fork views
+# PgUp/PgDn or mouse wheel scrolls · Ctrl+O resume menu · Ctrl+C quits
 ```
 
 ## License & attribution

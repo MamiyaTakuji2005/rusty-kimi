@@ -41,9 +41,14 @@ async fn test_load_default_agent_spec() {
     assert_eq!(
         as_strs(&spec.tools),
         vec![
-            "kimi_cli.tools.multiagent:Task",
+            "kimi_cli.tools.agent:Agent",
+            "kimi_cli.tools.fork:Fork",
             "kimi_cli.tools.todo:SetTodoList",
             "kimi_cli.tools.shell:Shell",
+            "kimi_cli.tools.background:TaskList",
+            "kimi_cli.tools.background:TaskOutput",
+            "kimi_cli.tools.background:TaskStop",
+            "kimi_cli.tools.snapshot:Undo",
             "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
@@ -62,7 +67,7 @@ async fn test_load_default_agent_spec() {
     );
     assert_eq!(
         subagent.path,
-        canonical_or(agent_file.parent().unwrap().join("sub.yaml"))
+        canonical_or(agent_file.parent().unwrap().join("coder.yaml"))
     );
 
     let sub_spec = load_agent_spec(&subagent.path)
@@ -77,25 +82,25 @@ async fn test_load_default_agent_spec() {
         sub_spec.system_prompt_args,
         HashMap::from([(
             "ROLE_ADDITIONAL".to_string(),
-            "You are now running as a subagent. All the `user` messages are sent by the main agent. The main agent cannot see your context, it can only see your last message when you finish the task. You need to provide a comprehensive summary on what you have done and learned in your final message. If you wrote or modified any files, you must mention them in the summary.\n"
+            "You are now running as a subagent. All the `user` messages are sent by the main agent. The main agent cannot see your context, it can only see your last message when you finish the task. You must treat the parent agent as your caller. Do not directly ask the end user questions. If something is unclear, explain the ambiguity in your final summary to the parent agent.\n"
                 .to_string(),
         )])
     );
     assert_eq!(
         as_strs(&sub_spec.exclude_tools),
-        vec![
-            "kimi_cli.tools.multiagent:Task",
-            "kimi_cli.tools.multiagent:CreateSubagent",
-            "kimi_cli.tools.dmail:SendDMail",
-            "kimi_cli.tools.todo:SetTodoList",
-        ]
+        vec!["kimi_cli.tools.agent:Agent"]
     );
     assert_eq!(
         as_strs(&sub_spec.tools),
         vec![
-            "kimi_cli.tools.multiagent:Task",
+            "kimi_cli.tools.agent:Agent",
+            "kimi_cli.tools.fork:Fork",
             "kimi_cli.tools.todo:SetTodoList",
             "kimi_cli.tools.shell:Shell",
+            "kimi_cli.tools.background:TaskList",
+            "kimi_cli.tools.background:TaskOutput",
+            "kimi_cli.tools.background:TaskStop",
+            "kimi_cli.tools.snapshot:Undo",
             "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",
@@ -298,9 +303,14 @@ agent:
     assert_eq!(
         as_strs(&spec.tools),
         vec![
-            "kimi_cli.tools.multiagent:Task",
+            "kimi_cli.tools.agent:Agent",
+            "kimi_cli.tools.fork:Fork",
             "kimi_cli.tools.todo:SetTodoList",
             "kimi_cli.tools.shell:Shell",
+            "kimi_cli.tools.background:TaskList",
+            "kimi_cli.tools.background:TaskOutput",
+            "kimi_cli.tools.background:TaskStop",
+            "kimi_cli.tools.snapshot:Undo",
             "kimi_cli.tools.file:ReadFile",
             "kimi_cli.tools.file:ReadMediaFile",
             "kimi_cli.tools.file:Glob",

@@ -62,10 +62,12 @@ it by normal semver rules as the Rust system evolves.
 - `kimi-agent/` - main crate (binary: `kimi-agent`), wire-only agent server.
 - `kosong/` - LLM abstraction layer (messages, tooling, providers).
 - `kaos/` - OS abstraction layer (LocalKaos + path semantics).
-- `wire-client/` - shared frontend client layer: spawns `kimi-agent`, speaks
-  JSON-RPC over its stdio, folds events into transcript blocks, lists
-  sessions under `~/.kimi` for resume.
-- `kimi-gui/` - native egui frontend; the canonical wire client.
+- `wire-client/` - shared frontend kit: spawns `kimi-agent`, speaks JSON-RPC
+  over its stdio, folds events into transcript blocks, lists sessions under
+  `~/.kimi` for resume, resolves the agent binary (`launch.rs`).
+- `kimi-gui/` - native egui frontend.
+- `kimi-tui/` - ratatui terminal frontend; one session per invocation,
+  reuses everything in `wire-client`.
 
 ## CLI behavior (kimi-agent)
 
@@ -122,7 +124,7 @@ it by normal semver rules as the Rust system evolves.
 ## Tests
 
 - Rust tests live under `kimi-agent/tests`, `kosong/tests`, `kaos/tests`,
-  `kimi-gui` (inline).
+  `wire-client` and `kimi-tui` (inline `#[cfg(test)]` units).
 - E2E tests cover wire-mode behavior using ScriptedEcho and mock services
   (`wiremock`, `axum`) — including a GUI-side wire client against a scripted
   agent.

@@ -9,8 +9,12 @@ async fn test_environment_detection() {
     assert!(!env.os_version.is_empty());
 
     if env.os_kind == "Windows" {
-        assert_eq!(env.shell_name, "Windows PowerShell");
-        assert_eq!(env.shell_path.to_string_lossy(), "powershell.exe");
+        // Windows prefers Git Bash; the fallback is PowerShell.
+        let is_bash =
+            env.shell_name == "bash" && env.shell_path.to_string_lossy().ends_with("bash.exe");
+        let is_pwsh = env.shell_name == "Windows PowerShell"
+            && env.shell_path.to_string_lossy() == "powershell.exe";
+        assert!(is_bash || is_pwsh, "unexpected shell: {env:?}");
     } else {
         assert!(env.shell_name == "bash" || env.shell_name == "sh");
         let shell_path = env.shell_path.to_string_lossy();

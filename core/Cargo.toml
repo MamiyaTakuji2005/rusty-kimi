@@ -1,5 +1,5 @@
 [workspace]
-members = ["kaos", "kosong", "kimi-agent", "kimi-gui", "wire-client"]
+members = ["kaos", "kosong", "kimi-agent", "kimi-gui", "kimi-tui", "wire-client"]
 resolver = "2"
 
 [workspace.package]

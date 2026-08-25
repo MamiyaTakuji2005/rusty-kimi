@@ -12,6 +12,7 @@
 //! [`transcript`] folds the wire event stream into renderable blocks, and
 //! [`session_list`] lists the sessions stored under `~/.kimi` for resume.
 
+pub mod launch;
 pub mod session_list;
 pub mod transcript;
 

@@ -7,15 +7,17 @@ conflict with reality, trust the code.
 ## Project overview
 
 **rusty-kimi** is a Rust-only coding agent system: a wire-only **agent core**
-(`kimi-agent`) driven by a native **egui frontend** (`kimi-gui`) over the
-**Wire protocol** (JSON-RPC over stdio).
+(`kimi-agent`) driven by frontends over the **Wire protocol** (JSON-RPC over
+stdio): a native **egui GUI** (`kimi-gui`) and a **terminal UI**
+(`kimi-tui`, ratatui).
 
 | Path | What it is | Origin |
 |------|------------|--------|
-| `core/` | Rust workspace: agent core, LLM/OS abstractions, native GUI | fork of MoonshotAI/kimi-agent-rs + the fork-authored `kimi-gui` |
+| `core/` | Rust workspace: agent core, LLM/OS abstractions, native GUI, terminal UI | fork of MoonshotAI/kimi-agent-rs + the fork-authored `kimi-gui` / `kimi-tui` |
 
 ```
 kimi-gui (core/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (core/, Rust)
+kimi-tui (core/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (core/, Rust)
 ```
 
 ### History, for context only
@@ -35,6 +37,8 @@ core/                  Rust workspace (run cargo here)
   kosong/              LLM abstraction (messages, tooling, chat providers)
   kaos/                OS abstraction (LocalKaos, path semantics)
   kimi-gui/            egui frontend (bin: kimi-gui)
+  kimi-tui/            ratatui terminal frontend (bin: kimi-tui)
+  wire-client/         shared frontend kit: client + transcript + session list
   _/                   historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
 ```
 
@@ -100,6 +104,7 @@ assume Git Bash.
 ```sh
 cargo build -p kimi-agent          # agent binary → core/target/{debug,release}/kimi-agent
 cargo build -p kimi-gui            # native GUI frontend
+cargo build -p kimi-tui            # terminal UI frontend
 cargo test                         # whole workspace
 cargo test -p kimi-agent <name>    # single test
 cargo fmt                          # formatting is enforced (see git history)
@@ -115,6 +120,11 @@ Prefer async I/O (tokio); avoid blocking locks in async contexts.
 # native GUI (from core/):
 cargo build -p kimi-gui && ./target/debug/kimi-gui --agent-bin ./target/debug/kimi-agent
 # (or set KIMI_AGENT_BIN; remaining args are forwarded to the agent verbatim)
+
+# terminal UI (from core/) — run inside a real terminal, one session per invocation:
+cargo build -p kimi-tui && ./target/debug/kimi-tui -w /some/dir
+# (agent binary resolved the same way: --agent-bin flag, KIMI_AGENT_BIN,
+#  sibling executable, PATH)
 
 # headless agent with no UI:
 ./target/debug/kimi-agent
@@ -143,21 +153,34 @@ client), `prompts/`, `skills/`, `agents/`.
 + bounded write-undo history), Python-`os.stat`-shaped results (naming is
 historical).
 
-**`core/wire-client/src/`** — the shared wire-protocol client every frontend
-uses to spawn and drive a `kimi-agent` subprocess: JSON-RPC framing, the
-`Inbound` classification (event / reverse-request / response / exit /
-protocol error), stderr tail capture, request-id generation, graceful
-shutdown. UI-toolkit-free: callers pass a `wake` hook (egui uses
-`request_repaint`; a terminal frontend would unblock its poll) and choose
-console inheritance (`spawn`) or `CREATE_NO_WINDOW`
-(`spawn_without_console`).
+**`core/wire-client/src/`** — the shared frontend kit every frontend builds on:
+- `lib.rs` — the wire-protocol client used to spawn and drive a `kimi-agent`
+  subprocess: JSON-RPC framing, the `Inbound` classification (event /
+  reverse-request / response / exit / protocol error), stderr tail capture,
+  request-id generation, graceful shutdown. UI-toolkit-free: callers pass a
+  `wake` hook (egui: `request_repaint`; the TUI: a channel send) and choose
+  console inheritance (`spawn`) or `CREATE_NO_WINDOW`
+  (`spawn_without_console`).
+- `launch.rs` — agent-binary resolution shared by both mains (`--agent-bin`
+  flag → `KIMI_AGENT_BIN` → sibling executable → `PATH`).
+- `transcript.rs` — folds wire events into renderable blocks (moved here from
+  kimi-gui so any frontend gets identical state).
+- `session_list.rs` — background listing of resumable sessions under `~/.kimi`.
+
+**`core/kimi-tui/src/`** — the ratatui terminal frontend. One conversation per
+invocation (a TUI owns the whole terminal). `main.rs` (event loop over one mpsc
+channel fed by crossterm input and the client's wake hook; overlays for
+approvals and resume; status bar), `agent.rs` (protocol state machine:
+initialize → replay → ready/running/failed, request-id correlation, approval
+answering), `input.rs` (single-line editor, char-boundary safe),
+`render.rs` (blocks → pre-wrapped styled rows with width-aware wrapping;
+scrollback is index arithmetic on the row list).
 
 **`core/kimi-gui/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
 `focus_owner()`), `session.rs` (one agent child + transcript + approval UI per
 tab), `render.rs` (transcript block widgets), `theme.rs` (light/dark/Kimi
 palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
-(open-in-default-app), `session_list.rs` → moved to `wire-client`, as was
-`transcript.rs`.
+(open-in-default-app); transcript/session-list moved to `wire-client`.
 
 ## Code style
 
@@ -169,16 +192,16 @@ palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
 
 ## Testing strategy
 
-- Rust tests live in `core/{kimi-agent,kosong,kaos,kimi-gui}/tests/` (integration)
-  and inline `#[cfg(test)]` units; E2E wire tests use ScriptedEcho and mock HTTP
-  (`wiremock`, `axum`).
+- Rust tests live in `core/{kimi-agent,kosong,kaos,kimi-gui,kimi-tui,wire-client}/`
+  (integration dirs and inline `#[cfg(test)]` units); E2E wire tests use
+  ScriptedEcho and mock HTTP (`wiremock`, `axum`).
 - Wire/data compatibility is verified read-only against real `~/.kimi` data in
   tests — never mutate user session dirs in tests or tooling.
 
 ## Build & release
 
-`cargo build -p kimi-agent` / `-p kimi-gui` produce self-contained binaries
-(no Python dependency; macOS/Linux/Windows).
+`cargo build -p kimi-agent` / `-p kimi-gui` / `-p kimi-tui` produce
+self-contained binaries (macOS/Linux/Windows).
 
 ## Security considerations
 
