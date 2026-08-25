@@ -14,7 +14,7 @@ use crate::soul::agent::Runtime;
 use crate::soul::approval::Approval;
 use crate::soul::get_current_wire_or_none;
 use crate::tasks::{BackgroundTaskManager, TaskSpec, TaskStatus};
-use crate::tools::utils::{ToolResultBuilder, tool_rejected_error};
+use crate::tools::utils::{ToolResultBuilder, load_desc, tool_rejected_error};
 use crate::wire::{
     ContentPart, SubagentEvent, WIRE_PROTOCOL_VERSION, Wire, WireMessage, deserialize_wire_message,
     send_out_of_turn,
@@ -57,28 +57,27 @@ impl AgentTool {
     }
 }
 
+const AGENT_DESC: &str = include_str!("desc/agent/agent.md");
+
 /// Build the Agent tool description, injecting the list of available built-in
 /// agents from the agents/default/agent.yaml subagents map.
 fn build_agent_description() -> String {
     let agents_dir = get_agents_dir().join("default");
     let base_yaml = agents_dir.join("agent.yaml");
 
-    let mut desc = "Run a separate agent process to handle a task and return its text output. \
-         The child agent gets its own session and tool access. \
-         Prefer this only when the task genuinely benefits from isolation; \
-         for most things, just do it directly."
-        .to_string();
-
-    if let Some(agents) = read_subagents_from_yaml(&base_yaml, &agents_dir) {
-        if !agents.is_empty() {
-            desc.push_str("\n\nAvailable agents (pass the path as agent_file):");
-            for (name, path, description) in agents {
-                desc.push_str(&format!("\n- {name} ({path}): {description}"));
-            }
+    let mut agents_section = String::new();
+    if let Some(agents) = read_subagents_from_yaml(&base_yaml, &agents_dir)
+        && !agents.is_empty()
+    {
+        agents_section.push_str("\nAvailable agents (pass the path as `agent_file`):");
+        for (name, path, description) in agents {
+            agents_section.push_str(&format!("\n- {name} ({path}): {description}"));
         }
     }
 
-    desc
+    load_desc(AGENT_DESC, &[("AGENTS", agents_section)])
+        .trim_end()
+        .to_string()
 }
 
 /// Synchronously read the subagents map from a base agent YAML and return

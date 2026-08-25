@@ -10,6 +10,8 @@ use crate::tasks::BackgroundTaskManager;
 use crate::tools::agent::{SpawnSubagentArgs, spawn_agent_subprocess};
 use crate::tools::utils::ToolResultBuilder;
 
+const FORK_DESC: &str = include_str!("desc/agent/fork.md");
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ForkParams {
     #[schemars(
@@ -45,12 +47,7 @@ impl ForkTool {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         Self {
-            description: "Fork the current agent into a concurrent background copy that shares \
-                 this conversation's full context. The fork receives your `prompt` as its next \
-                 user message and runs independently while you continue. Use it to explore a \
-                 tangent or parallelize a sub-task without losing the shared history. Returns a \
-                 task ID; retrieve its result with TaskOutput."
-                .to_string(),
+            description: FORK_DESC.to_string(),
             session_dir,
             parent_context_file: runtime.session.context_file.clone(),
             agent_file: runtime.agent_file.clone(),

@@ -21,6 +21,8 @@ fn default_reason() -> String {
     "Stopped by TaskStop".to_string()
 }
 
+const STOP_DESC: &str = include_str!("../desc/task/stop.md");
+
 pub struct TaskStop {
     description: String,
     background_tasks: BackgroundTaskManager,
@@ -29,7 +31,7 @@ pub struct TaskStop {
 impl TaskStop {
     pub fn new(runtime: &crate::soul::agent::Runtime) -> Self {
         Self {
-            description: "Stop a running background task.\n\nUse this only when a background task must be cancelled. For normal task completion, prefer waiting for the automatic notification or using `TaskOutput`.\n\nGuidelines:\n- This is a generic task stop capability, not a bash-specific kill tool.\n- Use it sparingly because stopping a task is destructive and may leave partial side effects.\n- If the task is already complete, this tool will simply return its current state.".to_string(),
+            description: STOP_DESC.to_string(),
             background_tasks: runtime.background_tasks.clone(),
         }
     }

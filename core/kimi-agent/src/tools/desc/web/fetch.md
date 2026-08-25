@@ -1,1 +1,1 @@
-Fetch a web page from a URL and get an extracted clean text from it.
+Fetch a URL and return the page as extracted, readable text.

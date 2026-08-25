@@ -1,1 +1,4 @@
-Use the tool to think about something. It will not obtain new information or change the database, but just append the thought to the log. Use it when complex reasoning or some cache memory is needed.
+Record a thought in the log.
+
+- Nothing is executed and no information is gathered; the thought is only appended.
+- Use it to reason through a hard step, or to park something you will need later.

@@ -30,6 +30,8 @@ fn default_limit() -> i64 {
     20
 }
 
+const LIST_DESC: &str = include_str!("../desc/task/list.md");
+
 pub struct TaskList {
     description: String,
     background_tasks: BackgroundTaskManager,
@@ -38,7 +40,7 @@ pub struct TaskList {
 impl TaskList {
     pub fn new(runtime: &crate::soul::agent::Runtime) -> Self {
         Self {
-            description: "List background tasks from the current session.\n\nUse this when you need to re-enumerate which background tasks still exist, especially after context compaction or when you are no longer confident which task IDs are still active.\n\nGuidelines:\n\n- Prefer the default `active_only=true` unless you specifically need completed or failed tasks.\n- Use `TaskOutput` to inspect one task in detail after you have identified the correct task ID.\n- Do not guess which tasks are still running when you can call this tool directly.\n- This tool is read-only and safe to use in plan mode.".to_string(),
+            description: LIST_DESC.to_string(),
             background_tasks: runtime.background_tasks.clone(),
         }
     }

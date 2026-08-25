@@ -15,6 +15,7 @@ use crate::config::ModelCapability;
 use crate::llm::LLM;
 use crate::soul::agent::Runtime;
 use crate::tools::SkipThisTool;
+use crate::tools::utils::load_desc;
 use crate::utils::wrap_media_part;
 
 use super::{
@@ -258,41 +259,24 @@ impl CallableTool2 for ReadMediaFile {
     }
 }
 
+/// Render the description, closing with what this model can actually take.
+/// The capability line is a bullet like the rest, appended rather than slotted
+/// into a placeholder, so the markdown reads the same as every other tool's.
 fn render_read_media_description(max_mb: usize, capabilities: &HashSet<ModelCapability>) -> String {
-    let desc = READ_MEDIA_DESC.replace("${MAX_MEDIA_MEGABYTES}", &max_mb.to_string());
-
     let image = capabilities.contains(&ModelCapability::ImageIn);
     let video = capabilities.contains(&ModelCapability::VideoIn);
-
-    let capability_lines = if image && video {
-        "- This tool supports image and video files for the current model."
-    } else if image {
-        "- This tool supports image files for the current model.\n- Video files are not supported by the current model."
-    } else if video {
-        "- This tool supports video files for the current model.\n- Image files are not supported by the current model."
-    } else {
-        "- The current model does not support image or video input."
+    let supported = match (image, video) {
+        (true, true) => "The current model accepts both images and video.",
+        (true, false) => "The current model accepts images but not video.",
+        (false, true) => "The current model accepts video but not images.",
+        (false, false) => "The current model accepts neither images nor video.",
     };
 
-    let mut output = String::new();
-    for line in desc.lines() {
-        if line.starts_with("{%") {
-            continue;
-        }
-        output.push_str(line);
-        output.push('\n');
-    }
-
-    let marker = "**Capabilities**\n";
-    if let Some(idx) = output.find(marker) {
-        let prefix = output[..idx + marker.len()].to_string();
-        return format!("{prefix}{capability_lines}\n");
-    }
-
-    output.push_str("**Capabilities**\n");
-    output.push_str(capability_lines);
-    output.push('\n');
-    output
+    let desc = load_desc(
+        READ_MEDIA_DESC,
+        &[("MAX_MEDIA_MEGABYTES", max_mb.to_string())],
+    );
+    format!("{}\n- {supported}\n", desc.trim_end())
 }
 
 fn to_data_url(mime_type: &str, data: &[u8]) -> String {

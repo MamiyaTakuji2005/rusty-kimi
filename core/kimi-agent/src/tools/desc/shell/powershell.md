@@ -1,13 +1,8 @@
-Execute a ${SHELL} command. Use this tool to run scripts, build/test projects, manage processes, and perform operations that have no dedicated tool. For file reading, writing, searching, and editing use ReadFile, WriteFile, StrReplaceFile, Grep, and Glob instead.
-**Output:**
-- Every tool call starts a fresh ${SHELL} session. Environment variables, `cd` changes, and command history do not persist between calls.
-- The stdout and stderr streams are combined and returned as a single string. Extremely long output may be truncated. When a command fails, the exit code is provided in a system tag.
-**Input**
-- Chain related commands with `&&` or `;` and use `if ($?)` / `if (-not $?)` for conditional execution.
-- Redirect or pipe output with `>`, `>>`, `|`.
-- Use PowerShell cmdlets (`Get-ChildItem`, `Select-String`, `Where-Object`) for filtering rather than separate tool calls.
-- Shell environment: `Set-Location`, `Get-Location`, `$env:VAR`, `where`
-- File system operations: `Get-ChildItem`, `New-Item`, `Copy-Item`, `Move-Item`, `Remove-Item`, `mkdir`
-- System info: `Get-Process`, `Stop-Process`, `Get-Service`, `hostname`, `systeminfo`
-- Archives/scripts: `Compress-Archive`, `Expand-Archive`, `tar`, `python`, `node`
-- Other: Any other binaries available on the system PATH; run `where <command>` first if unsure.
+Execute a ${SHELL} command. Use it for scripts, builds, tests, process management, and anything without a dedicated tool.
+
+- Every call runs in a fresh session: environment variables, `Set-Location`, and history do not carry over between calls.
+- Put related work in one call with `&&`, `;`, `if ($?)`, pipes, and redirects, rather than making several.
+- The call returns only when the command exits, so never start an interactive or unbounded command, and set `timeout` for slow ones.
+- stdout and stderr come back combined and may be truncated; a failed command reports its exit code in a system tag.
+- For reading, writing, searching, and editing files, prefer ReadFile, WriteFile, StrReplaceFile, Grep, and Glob.
+- Stay inside the working directory, and do not use elevated privileges unless the user asked for it.

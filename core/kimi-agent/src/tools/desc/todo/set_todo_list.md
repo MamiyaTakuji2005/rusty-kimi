@@ -1,4 +1,4 @@
-Update the whole todo list. Each call replaces the entire list — this is the only todo tool available.
+Replace the whole todo list. Every call overwrites the previous one.
 
-- Use it when a request involves multiple distinct subtasks or milestones. Update statuses as work completes.
-- Don't use it for simple tasks that take a few tool calls, direct questions, or single-step instructions — the overhead outweighs the benefit.
+- Use it when a request breaks into several distinct subtasks or milestones, and update statuses as work completes.
+- Skip it for single-step instructions and direct questions, where the overhead outweighs the benefit.

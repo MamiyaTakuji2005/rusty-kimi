@@ -32,6 +32,8 @@ fn default_timeout() -> i64 {
     30
 }
 
+const OUTPUT_DESC: &str = include_str!("../desc/task/output.md");
+
 pub struct TaskOutput {
     description: String,
     background_tasks: BackgroundTaskManager,
@@ -40,7 +42,7 @@ pub struct TaskOutput {
 impl TaskOutput {
     pub fn new(runtime: &crate::soul::agent::Runtime) -> Self {
         Self {
-            description: "Retrieve output from a running or completed background task.\n\nUse this after `Shell(run_in_background=true)` when you need to inspect progress or explicitly wait for completion.\n\nGuidelines:\n- Prefer relying on automatic completion notifications. Use this tool only when you need task output before the automatic notification arrives.\n- By default this tool is non-blocking and returns a current status/output snapshot.\n- Use `block=true` only when you intentionally want to wait for completion or timeout.".to_string(),
+            description: OUTPUT_DESC.to_string(),
             background_tasks: runtime.background_tasks.clone(),
         }
     }
