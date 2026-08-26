@@ -8,16 +8,24 @@
 //! each frontend uses it to nudge its own event loop (egui:
 //! `Context::request_repaint`; a terminal UI: whatever unblocks its poll).
 //!
+//! The transport is not fixed to a child process: [`WireClient::connect_tcp`]
+//! reaches the same wire protocol through a `kimi-bridge` daemon
+//! ([`bridge`]) — the agent then runs on a remote machine and everything
+//! except process management behaves identically.
+//!
 //! The crate also holds the frontend-agnostic state every client needs:
 //! [`transcript`] folds the wire event stream into renderable blocks, and
-//! [`session_list`] lists the sessions stored under `~/.kimi` for resume.
+//! [`session_list`] lists the sessions stored under `~/.kimi` for resume
+//! (locally, or through a bridge daemon).
 
+pub mod bridge;
 pub mod launch;
 pub mod session_list;
 pub mod transcript;
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Shutdown, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -49,9 +57,21 @@ pub enum Inbound {
 }
 
 pub struct WireClient {
-    child: Child,
+    transport: Transport,
     writer_tx: Option<Sender<String>>,
     next_id: AtomicU64,
+}
+
+/// What a client is connected to — how it shuts down depends on this.
+enum Transport {
+    /// A locally spawned agent process.
+    Child(Child),
+    /// A byte stream to a bridge daemon: the boxed closure half-closes the
+    /// write side, which the daemon turns into the remote agent's stdin
+    /// EOF (the graceful "please exit").
+    Stream(Option<Box<dyn Fn() + Send + Sync>>),
+    /// Already shut down.
+    Closed,
 }
 
 impl WireClient {
@@ -86,6 +106,68 @@ impl WireClient {
         W: Fn() + Send + 'static,
     {
         Self::spawn_inner(agent_bin, agent_args, true, wake)
+    }
+
+    /// Connect to a `kimi-bridge` daemon at `endpoint` (`host:port`) and
+    /// have it spawn an agent with `agent_args`, then speak the wire
+    /// protocol over the resulting byte stream.
+    ///
+    /// The bridge handshake happens here, synchronously: a refused spawn
+    /// (unreachable daemon, missing agent binary) surfaces as a connect
+    /// error instead of a confusing protocol error once the session is
+    /// already running.
+    pub fn connect_tcp<W>(
+        endpoint: &str,
+        agent_args: &[String],
+        wake: W,
+    ) -> std::io::Result<(Self, Receiver<Inbound>)>
+    where
+        W: Fn() + Send + 'static,
+    {
+        let mut stream = TcpStream::connect(endpoint).map_err(|err| {
+            std::io::Error::other(format!("failed to connect to bridge `{endpoint}`: {err}"))
+        })?;
+        stream.set_nodelay(true).ok();
+
+        let header = bridge::spawn_header(agent_args);
+        stream.write_all(header.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+
+        // Exactly one reply frame before the relay starts.
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut ack = String::new();
+        reader.read_line(&mut ack)?;
+        let reply = bridge::decode_reply(ack.trim_end())
+            .map_err(|err| std::io::Error::other(format!("bad bridge handshake: {err}")))?;
+        if !reply.ok {
+            let reason = reply.error.unwrap_or_else(|| "bridge refused spawn".into());
+            return Err(std::io::Error::other(format!(
+                "bridge `{endpoint}` refused spawn: {reason}"
+            )));
+        }
+
+        // The ack read may have buffered early agent output; the BufReader
+        // itself becomes the reader so nothing is lost.
+        let reader: Box<dyn BufRead + Send> = Box::new(reader);
+        let writer: Box<dyn Write + Send> = Box::new(stream.try_clone()?);
+        // Half-close on shutdown: the daemon turns it into the agent's
+        // stdin EOF, which is how the agent is asked to exit.
+        let shutdown_handle = stream;
+        let half_close = Box::new(move || {
+            let _ = shutdown_handle.shutdown(Shutdown::Write);
+        });
+
+        let (writer_tx, inbound_rx) =
+            Self::start_io(reader, writer, None, "remote connection closed", wake);
+        Ok((
+            Self {
+                transport: Transport::Stream(Some(half_close)),
+                writer_tx: Some(writer_tx),
+                next_id: AtomicU64::new(1),
+            },
+            inbound_rx,
+        ))
     }
 
     fn spawn_inner<W>(
@@ -140,38 +222,76 @@ impl WireClient {
             })
             .expect("spawn wire-stderr thread");
 
+        let reader: Box<dyn BufRead + Send> =
+            Box::new(BufReader::with_capacity(1024 * 1024, stdout));
+        let writer: Box<dyn Write + Send> = Box::new(stdin);
+        let (writer_tx, inbound_rx) = Self::start_io(
+            reader,
+            writer,
+            Some(stderr_tail),
+            "agent stdout closed",
+            wake,
+        );
+
+        Ok((
+            Self {
+                transport: Transport::Child(child),
+                writer_tx: Some(writer_tx),
+                next_id: AtomicU64::new(1),
+            },
+            inbound_rx,
+        ))
+    }
+
+    /// Wire up the writer/reader threads around any duplex byte stream.
+    /// Both ends must be line-oriented: the wire protocol is
+    /// newline-delimited JSON regardless of the transport.
+    fn start_io<W>(
+        reader: Box<dyn BufRead + Send>,
+        writer: Box<dyn Write + Send>,
+        stderr_tail: Option<Arc<Mutex<VecDeque<String>>>>,
+        eof_reason: &'static str,
+        wake: W,
+    ) -> (Sender<String>, Receiver<Inbound>)
+    where
+        W: Fn() + Send + 'static,
+    {
+        // An empty tail for stream transports (no child stderr to keep).
+        let exit_tail = stderr_tail.unwrap_or_else(|| Arc::new(Mutex::new(VecDeque::new())));
+
         let (writer_tx, writer_rx) = channel::<String>();
         std::thread::Builder::new()
             .name("wire-writer".into())
             .spawn(move || {
-                let mut stdin = stdin;
+                let mut writer = writer;
                 while let Ok(line) = writer_rx.recv() {
-                    if stdin.write_all(line.as_bytes()).is_err() {
+                    if writer.write_all(line.as_bytes()).is_err() {
                         break;
                     }
-                    if stdin.write_all(b"\n").is_err() {
+                    if writer.write_all(b"\n").is_err() {
                         break;
                     }
-                    let _ = stdin.flush();
+                    let _ = writer.flush();
                 }
-                // Dropping stdin closes the agent's stdin => graceful exit.
+                // Dropping the writer closes the peer's stdin => graceful
+                // exit (for a socket, dropping only this handle does *not*
+                // close the connection — `shutdown()` on the client is what
+                // half-closes it).
             })
             .expect("spawn wire-writer thread");
 
         let (inbound_tx, inbound_rx) = channel::<Inbound>();
-        let exit_tail = Arc::clone(&stderr_tail);
         std::thread::Builder::new()
             .name("wire-reader".into())
             .spawn(move || {
-                let mut reader = BufReader::with_capacity(1024 * 1024, stdout);
+                let mut reader = reader;
                 let mut line = String::new();
                 loop {
                     line.clear();
                     match reader.read_line(&mut line) {
                         Ok(0) => {
                             let _ = inbound_tx.send(Inbound::AgentExited(with_stderr_tail(
-                                "agent stdout closed",
-                                &exit_tail,
+                                eof_reason, &exit_tail,
                             )));
                             break;
                         }
@@ -200,14 +320,7 @@ impl WireClient {
             })
             .expect("spawn wire-reader thread");
 
-        Ok((
-            Self {
-                child,
-                writer_tx: Some(writer_tx),
-                next_id: AtomicU64::new(1),
-            },
-            inbound_rx,
-        ))
+        (writer_tx, inbound_rx)
     }
 
     /// Send a JSON-RPC request; returns the generated id.
@@ -246,25 +359,51 @@ impl WireClient {
         }
     }
 
-    /// Close the agent's stdin (asking it to exit) and wait briefly before
-    /// killing it. Called from the frontend's exit path.
+    /// Ask the peer to exit and wait briefly before killing it. Called from
+    /// the frontend's exit path.
+    ///
+    /// - child: close stdin, wait up to 2 s, kill,
+    /// - stream: half-close the write side (the remote agent sees stdin EOF
+    ///   and exits on its own).
     pub fn shutdown(&mut self) {
         self.writer_tx = None; // drops the sender => writer thread exits => stdin closes
-        for _ in 0..20 {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                Err(_) => break,
+        match std::mem::replace(&mut self.transport, Transport::Closed) {
+            Transport::Child(mut child) => {
+                for _ in 0..20 {
+                    match child.try_wait() {
+                        Ok(Some(_)) => return,
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                        Err(_) => break,
+                    }
+                }
+                let _ = child.kill();
             }
+            Transport::Stream(half_close) => {
+                if let Some(half_close) = half_close {
+                    half_close();
+                }
+            }
+            Transport::Closed => {}
         }
-        let _ = self.child.kill();
     }
 }
 
 impl Drop for WireClient {
     fn drop(&mut self) {
-        self.writer_tx = None;
-        let _ = self.child.kill();
+        match std::mem::replace(&mut self.transport, Transport::Closed) {
+            Transport::Child(mut child) => {
+                self.writer_tx = None;
+                let _ = child.kill();
+            }
+            // Half-close (not abort): the remote agent may still be
+            // streaming its final output into our reader.
+            Transport::Stream(half_close) => {
+                if let Some(half_close) = half_close {
+                    half_close();
+                }
+            }
+            Transport::Closed => {}
+        }
     }
 }
 
@@ -371,5 +510,133 @@ mod tests {
             classify_line(r#"{"jsonrpc":"2.0"}"#),
             Inbound::ProtocolError(_)
         ));
+    }
+
+    // --- connect_tcp (fake bridge daemon on loopback) ----------------------
+
+    /// A minimal in-test bridge daemon: reads the header line, answers
+    /// `handler(header)`, then closes the socket. Returns the endpoint.
+    fn fake_daemon<F>(handler: F) -> String
+    where
+        F: FnOnce(&str) -> String + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::Builder::new()
+            .name("fake-bridge".into())
+            .spawn(move || {
+                let (sock, _) = listener.accept().unwrap();
+                let mut writer = sock.try_clone().unwrap();
+                let mut reader = BufReader::new(sock);
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                writeln!(writer, "{}", handler(header.trim_end())).unwrap();
+                // Dropping both halves closes the connection.
+            })
+            .unwrap();
+        addr
+    }
+
+    #[test]
+    fn connect_tcp_handshake_round_trip_and_stream_eof() {
+        // A scripted peer: ack the spawn, answer the client's first request,
+        // then close — the client must see the response, then a clean
+        // stream EOF (the peer drains our request first; closing with
+        // unread data would RST on Windows instead of FIN).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        std::thread::Builder::new()
+            .name("fake-bridge".into())
+            .spawn(move || {
+                let (sock, _) = listener.accept().unwrap();
+                let mut writer = sock.try_clone().unwrap();
+                let mut reader = BufReader::new(sock);
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                let header = header.trim_end();
+                assert!(header.starts_with("BRIDGE1 "), "header: {header}");
+                assert!(header.contains(r#""op":"spawn""#), "header: {header}");
+                assert!(
+                    header.contains(r#""args":["-w","/remote"]"#),
+                    "header: {header}"
+                );
+                writeln!(writer, r#"BRIDGE1 {{"ok":true}}"#).unwrap();
+
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                assert!(request.contains(r#""method":"initialize""#), "{request}");
+                writeln!(
+                    writer,
+                    r#"{{"jsonrpc":"2.0","id":"client-1","result":{{"server":"fake"}}}}"#
+                )
+                .unwrap();
+                writer.flush().unwrap();
+                // Both halves drop here: the client's reader sees EOF.
+            })
+            .unwrap();
+
+        let wake_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&wake_count);
+        let (mut client, inbound) =
+            WireClient::connect_tcp(&endpoint, &["-w".into(), "/remote".into()], move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
+            .expect("connect");
+
+        let id = client.send_request("initialize", json!({}));
+        assert_eq!(id, "client-1");
+
+        let next = || {
+            inbound
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("inbound message")
+        };
+        match next() {
+            Inbound::Response { id, result, .. } => {
+                assert_eq!(id, "client-1");
+                let server = result
+                    .as_ref()
+                    .and_then(|r| r.get("server"))
+                    .and_then(Value::as_str);
+                assert_eq!(server, Some("fake"));
+            }
+            _ => panic!("expected the JSON-RPC response first"),
+        }
+        match next() {
+            Inbound::AgentExited(reason) => {
+                assert!(reason.contains("remote connection closed"), "{reason}")
+            }
+            _ => panic!("expected AgentExited after the daemon closed the stream"),
+        }
+
+        // Shutdown half-closes; nothing may panic on a closed stream.
+        client.shutdown();
+        assert!(wake_count.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn connect_tcp_surfaces_refused_spawn() {
+        let endpoint = fake_daemon(|_| {
+            r#"BRIDGE1 {"ok":false,"error":"failed to spawn agent `x`: not found"}"#.to_string()
+        });
+        let err = match WireClient::connect_tcp(&endpoint, &[], || {}) {
+            Ok(_) => panic!("spawn must be refused"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("not found"), "{err}");
+        assert!(err.to_string().contains("refused spawn"), "{err}");
+    }
+
+    #[test]
+    fn connect_tcp_reports_unreachable_daemon() {
+        // Bind and immediately drop: a port with no listener.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let err = match WireClient::connect_tcp(&endpoint, &[], || {}) {
+            Ok(_) => panic!("connect must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("failed to connect"), "{err}");
     }
 }

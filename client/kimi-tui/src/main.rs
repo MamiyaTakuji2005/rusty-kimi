@@ -1,12 +1,16 @@
 //! kimi-tui: a terminal frontend for the kimi-agent wire protocol.
 //!
 //! Usage:
-//!   kimi-tui [--agent-bin <path>] [agent args...]
+//!   kimi-tui [--agent-bin <path>] [--remote <host:port>] [agent args...]
 //!
 //! One conversation per invocation — a TUI owns the whole terminal. The agent
 //! binary is resolved by [`wire_client::launch`] exactly as in kimi-gui; the
 //! remaining arguments go to the agent verbatim (`-w <dir>`, `--session <id>`,
 //! `--continue`, ...).
+//!
+//! `--remote <host:port>` (or `$KIMI_REMOTE`) routes the session through a
+//! `kimi-bridge` daemon instead of spawning a local agent: the agent runs on
+//! the daemon's machine, and agent arguments like `-w` name paths *there*.
 //!
 //! Keys:
 //!   Enter   send the message (or steer mid-turn)
@@ -32,7 +36,8 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragra
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use wire_client::session_list::{ResumeEntry, spawn_session_listing};
+use wire_client::launch::AgentLaunch;
+use wire_client::session_list::{ResumeEntry, spawn_remote_session_listing, spawn_session_listing};
 
 use crate::agent::{AgentSession, Phase};
 use crate::input::Editor;
@@ -62,7 +67,7 @@ fn main() -> std::io::Result<()> {
 
     // Terminal setup before anything that can fail visibly.
     let mut terminal = init_terminal()?;
-    let result = run_app(&mut terminal, &launch.agent_bin, &launch.agent_args);
+    let result = run_app(&mut terminal, &launch);
     restore_terminal(&mut terminal)?;
     result
 }
@@ -92,6 +97,8 @@ fn restore_terminal(
 }
 
 struct App {
+    /// Remote bridge endpoint in use, if any (drives the resume listing).
+    remote: Option<String>,
     session: AgentSession,
     editor: Editor,
     /// Cached wrapped rows for the current transcript state.
@@ -121,8 +128,7 @@ struct App {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    agent_bin: &str,
-    agent_args: &[String],
+    launch: &AgentLaunch,
 ) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel::<Msg>();
     // The wake hook lands on the same channel: wire messages trigger an
@@ -156,7 +162,7 @@ fn run_app(
         })
         .expect("spawn ct-events thread");
 
-    let mut app = App::new(agent_bin, agent_args, move || {
+    let mut app = App::new(launch, move || {
         let _ = wake_tx.send(Msg::Wake);
     })
     .map_err(std::io::Error::other)?;
@@ -241,13 +247,10 @@ fn run_app(
 }
 
 impl App {
-    fn new(
-        agent_bin: &str,
-        agent_args: &[String],
-        wake: impl Fn() + Send + Sync + 'static,
-    ) -> Result<Self, String> {
-        let session = AgentSession::spawn(agent_bin, agent_args, wake)?;
+    fn new(launch: &AgentLaunch, wake: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
+        let session = AgentSession::launch(launch, wake)?;
         Ok(Self {
+            remote: launch.remote.clone(),
             session,
             editor: Editor::default(),
             rendered: RenderedTranscript::new(),
@@ -451,7 +454,12 @@ impl App {
                     // cleanest flow is to exit and let a wrapper re-launch.
                     // We print the exact command before restoring the
                     // terminal so it survives into the normal buffer.
-                    self.resume_command = Some(format!("--session {}", entry.id));
+                    let mut command = String::new();
+                    if let Some(endpoint) = &self.remote {
+                        command.push_str(&format!("--remote {endpoint} "));
+                    }
+                    command.push_str(&format!("--session {}", entry.id));
+                    self.resume_command = Some(command);
                     return false;
                 }
             }
@@ -465,7 +473,12 @@ impl App {
         self.resume_cursor = 0;
         // A fresh listing each time the menu opens; it finishes quickly, and
         // draw() shows "loading" until poll_resume_listing lands the result.
-        self.resume_listing = Some(spawn_session_listing(move || {}));
+        // Remote sessions live on the bridge's machine, so ask it.
+        if let Some(endpoint) = self.remote.clone() {
+            self.resume_listing = Some(spawn_remote_session_listing(&endpoint, move || {}));
+        } else {
+            self.resume_listing = Some(spawn_session_listing(move || {}));
+        }
     }
 
     fn poll_resume_listing(&mut self) {
@@ -745,7 +758,7 @@ impl App {
 
         // Build the inner content once to measure it; the box then hugs the
         // text instead of eating the screen.
-        let content_width = area.width.saturating_sub(4).max(20).min(100);
+        let content_width = area.width.saturating_sub(4).clamp(20, 100);
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("✨ ", theme::accent()),

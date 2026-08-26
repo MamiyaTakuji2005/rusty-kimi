@@ -20,7 +20,7 @@ use kimi_agent::share::get_share_dir as share_dir;
 use crate::palette::{Command, Palette};
 use crate::session::Session;
 use crate::theme::Theme;
-use wire_client::session_list::{ResumeEntry, spawn_session_listing};
+use wire_client::session_list::{ResumeEntry, spawn_remote_session_listing, spawn_session_listing};
 
 /// Which overlay is on top and therefore owns the keyboard. Ordered most
 /// modal first; `focus_owner` is the single place that decides.
@@ -35,6 +35,9 @@ enum FocusOwner {
 
 pub struct KimiGuiApp {
     agent_bin: String,
+    /// Remote bridge endpoint (`--remote` / `KIMI_REMOTE`), when set: every
+    /// session and the resume listing go through the daemon instead.
+    remote: Option<String>,
     sessions: Vec<Session>,
     active: usize,
     next_session_id: usize,
@@ -95,6 +98,7 @@ impl KimiGuiApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         agent_bin: &str,
+        remote: Option<String>,
         agent_args: &[String],
     ) -> Result<Self, String> {
         install_fallback_fonts(&cc.egui_ctx);
@@ -102,6 +106,7 @@ impl KimiGuiApp {
         theme.apply(&cc.egui_ctx);
         let mut app = Self {
             agent_bin: agent_bin.to_string(),
+            remote,
             sessions: Vec::new(),
             active: 0,
             next_session_id: 1,
@@ -120,9 +125,16 @@ impl KimiGuiApp {
         app.open_session(agent_args.to_vec(), &cc.egui_ctx, None)?;
         // List past sessions right away: it pre-warms the resume menu and
         // supplies the most recent session directory as the folder-picker
-        // default after a GUI restart.
+        // default after a GUI restart. Through a remote bridge the sessions
+        // live on the daemon's machine, so ask there instead.
         let ctx = cc.egui_ctx.clone();
-        app.resume_listing = Some(spawn_session_listing(move || ctx.request_repaint()));
+        let endpoint = app.remote.clone();
+        app.resume_listing = Some(match endpoint {
+            Some(endpoint) => {
+                spawn_remote_session_listing(&endpoint, move || ctx.request_repaint())
+            }
+            None => spawn_session_listing(move || ctx.request_repaint()),
+        });
         Ok(app)
     }
 
@@ -139,7 +151,11 @@ impl KimiGuiApp {
         let id = self.next_session_id;
         self.next_session_id += 1;
         let title = title.unwrap_or_else(|| session_title(&args, id));
-        let mut session = Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?;
+        let mut session = match &self.remote {
+            // Paths in `args` (e.g. `-w`) resolve on the remote machine.
+            Some(endpoint) => Session::connect(id, title, endpoint, &args, ctx.clone())?,
+            None => Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?,
+        };
         session.work_dir = work_dir.clone();
         self.last_workdir = work_dir.or(self.last_workdir.take());
         self.sessions.push(session);
@@ -428,7 +444,13 @@ impl KimiGuiApp {
         self.resume_scroll = true;
         if self.resume_listing.is_none() {
             let ctx = ctx.clone();
-            self.resume_listing = Some(spawn_session_listing(move || ctx.request_repaint()));
+            self.resume_listing = Some(match self.remote.clone() {
+                // Remote sessions live on the bridge's machine.
+                Some(endpoint) => {
+                    spawn_remote_session_listing(&endpoint, move || ctx.request_repaint())
+                }
+                None => spawn_session_listing(move || ctx.request_repaint()),
+            });
         }
     }
 

@@ -6,6 +6,7 @@ members = [
     "client/kimi-gui",
     "client/kimi-tui",
     "client/wire-client",
+    "remote/kimi-bridge",
 ]
 resolver = "2"
 

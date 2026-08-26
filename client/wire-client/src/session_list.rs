@@ -6,6 +6,7 @@
 //! a background thread with a private tokio runtime, and hands the flattened
 //! result back to the UI thread through a channel.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,9 +15,13 @@ use chrono::{DateTime, Local};
 use kaos::KaosPath;
 use kimi_agent::metadata::load_metadata;
 use kimi_agent::session::Session as AgentSession;
+use serde::{Deserialize, Serialize};
+
+use crate::bridge;
 
 /// One resumable past session, flattened across all known work directories.
-#[derive(Clone, Debug)]
+/// Also the wire shape of a bridge daemon's `list_sessions` reply.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResumeEntry {
     pub id: String,
     /// First user input of the session, as computed by the agent.
@@ -90,6 +95,54 @@ where
         })
         .expect("spawn session-listing thread");
     rx
+}
+
+/// Remote twin of [`spawn_session_listing`]: ask the bridge daemon at
+/// `endpoint` for the sessions living on *its* machine (the daemon answers
+/// from its own `~/.kimi` — see `remote/kimi-bridge`). Same receiver and
+/// wake contract as the local variant.
+pub fn spawn_remote_session_listing<W>(
+    endpoint: &str,
+    wake: W,
+) -> Receiver<Result<Vec<ResumeEntry>, String>>
+where
+    W: Fn() + Send + 'static,
+{
+    let (tx, rx) = channel();
+    let endpoint = endpoint.to_string();
+    std::thread::Builder::new()
+        .name("remote-session-listing".into())
+        .spawn(move || {
+            let _ = tx.send(list_remote_sessions(&endpoint));
+            wake();
+        })
+        .expect("spawn remote-session-listing thread");
+    rx
+}
+
+fn list_remote_sessions(endpoint: &str) -> Result<Vec<ResumeEntry>, String> {
+    let mut stream = std::net::TcpStream::connect(endpoint)
+        .map_err(|err| format!("failed to connect to bridge `{endpoint}`: {err}"))?;
+    let header = bridge::list_sessions_header();
+    stream
+        .write_all(header.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .and_then(|_| stream.flush())
+        .map_err(|err| format!("bridge `{endpoint}` write failed: {err}"))?;
+
+    let mut line = String::new();
+    BufReader::new(&mut stream)
+        .read_line(&mut line)
+        .map_err(|err| format!("bridge `{endpoint}` read failed: {err}"))?;
+    let reply = bridge::decode_reply(line.trim_end())?;
+    if !reply.ok {
+        return Err(reply
+            .error
+            .unwrap_or_else(|| "bridge listing failed".into()));
+    }
+    let mut entries = reply.sessions.unwrap_or_default();
+    entries.sort_by(|a, b| b.updated_at.total_cmp(&a.updated_at));
+    Ok(entries)
 }
 
 fn list_all_sessions() -> Result<Vec<ResumeEntry>, String> {

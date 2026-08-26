@@ -3102,6 +3102,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kimi-bridge"
+version = "1.8.0"
+dependencies = [
+ "clap",
+ "kaos",
+ "kimi-agent",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kimi-gui"
 version = "1.8.0"
 dependencies = [
@@ -7744,7 +7756,9 @@ dependencies = [
  "chrono",
  "kaos",
  "kimi-agent",
+ "kimi-bridge",
  "kosong",
+ "serde",
  "serde_json",
  "tokio",
 ]

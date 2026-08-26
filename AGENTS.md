@@ -20,6 +20,7 @@ stdio): a native **egui GUI** (`kimi-gui`) and a **terminal UI**
 ```
 kimi-gui (client/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (server/, Rust)
 kimi-tui (client/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (server/, Rust)
+                       └─(optional)─ kimi-bridge ──TCP (ssh -L)──▶ kimi-agent on a remote box
 ```
 
 ### History, for context only
@@ -33,8 +34,8 @@ and the old `core/` layout — treat them as read-only history; do not resurrect
 re-vendor Python code, and do not reintroduce a top-level `core/` directory.
 
 The workspace was later reorganized from a single `core/` directory into
-`server/` + `client/` (and a planned `remote/` for the relay daemons). The
-dependency graph deliberately keeps the client depending on the server crate
+`server/` + `client/` + `remote/` (the relay daemons live in `remote/kimi-bridge`).
+The dependency graph deliberately keeps the client depending on the server crate
 (`kimi_agent::wire` types, `Session::list`); extracting those into a shared
 `wire-protocol` crate is a deferred refactor.
 
@@ -50,7 +51,8 @@ client/                  frontends + shared frontend kit
   kimi-gui/              egui frontend (bin: kimi-gui)
   kimi-tui/              ratatui terminal frontend (bin: kimi-tui)
   wire-client/           shared frontend kit: client + transcript + session list
-remote/                  (planned) relay daemons for remote access — not yet created
+remote/                  relay daemons for remote access
+  kimi-bridge/           byte-relay daemon pair (bin: kimi-bridge; design in remote/PLAN.md)
 _history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
 ```
 
@@ -139,6 +141,13 @@ cargo build -p kimi-tui && ./target/debug/kimi-tui -w /some/dir
 
 # headless agent with no UI:
 ./target/debug/kimi-agent
+
+# remote: agent on another box (loopback + ssh tunnel, never raw internet):
+#   (VPS)      ./kimi-bridge remote --listen 127.0.0.1:9000
+#   (local)    ssh -N -L 9000:127.0.0.1:9000 user@vps
+#   (local)    ./kimi-tui --remote 127.0.0.1:9000 -w /path/on/vps
+# (agent args resolve on the remote machine; the resume menu lists the
+#  remote ~/.kimi; kimi-bridge local --upstream … is an optional extra hop)
 ```
 
 ## Module map
@@ -172,11 +181,16 @@ historical).
   `wake` hook (egui: `request_repaint`; the TUI: a channel send) and choose
   console inheritance (`spawn`) or `CREATE_NO_WINDOW`
   (`spawn_without_console`).
-- `launch.rs` — agent-binary resolution shared by both mains (`--agent-bin`
-  flag → `KIMI_AGENT_BIN` → sibling executable → `PATH`).
+- `launch.rs` — agent-binary and remote-endpoint resolution shared by both
+  mains (`--agent-bin` → `KIMI_AGENT_BIN` → sibling executable → `PATH`;
+  `--remote` → `KIMI_REMOTE`).
+- `bridge.rs` — client side of the `kimi-bridge` control framing (the
+  daemon-side twin is `remote/kimi-bridge/src/proto.rs`; a drift-guard test
+  pins them byte-for-byte).
 - `transcript.rs` — folds wire events into renderable blocks (moved here from
   kimi-gui so any frontend gets identical state).
-- `session_list.rs` — background listing of resumable sessions under `~/.kimi`.
+- `session_list.rs` — background listing of resumable sessions under `~/.kimi`,
+  locally or through a bridge daemon (`spawn_remote_session_listing`).
 
 **`client/kimi-tui/src/`** — the ratatui terminal frontend. One conversation per
 invocation (a TUI owns the whole terminal). `main.rs` (event loop over one mpsc
@@ -192,6 +206,15 @@ scrollback is index arithmetic on the row list).
 tab), `render.rs` (transcript block widgets), `theme.rs` (light/dark/Kimi
 palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
 (open-in-default-app); transcript/session-list moved to `wire-client`.
+
+**`remote/kimi-bridge/`** — the relay daemon pair (`remote/AGENTS.md` has the
+map; `remote/PLAN.md` the design record). One binary, two subcommands:
+`remote` (agent machine: spawns `kimi-agent` per connection, relays bytes,
+answers `list_sessions` from its own `~/.kimi`) and `local` (frontend
+machine: forwards frames/bytes upstream). Dumb byte relays — the only thing
+either parses is the `BRIDGE1` header line; wire protocol stays untouched.
+`WireClient::connect_tcp` is the client-side entry; frontends reach it via
+`--remote <host:port>` / `KIMI_REMOTE`.
 
 ## CLI behavior (kimi-agent)
 

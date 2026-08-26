@@ -59,7 +59,6 @@ protocol can drive the agent.
 ## Quick start
 
 ```sh
-cd core
 cargo build -p kimi-agent -p kimi-gui
 ./target/debug/kimi-gui --agent-bin ./target/debug/kimi-agent
 ```
@@ -74,6 +73,32 @@ cargo build -p kimi-agent -p kimi-gui
 > `kimi-agent.exe`, a running `kimi-gui`/`kimi-agent` is holding the binary — close
 > it and rebuild.
 
+## Remote access: `kimi-bridge`
+
+Run the agent on another machine (a VPS, a beefy build box) and drive it from
+your local `kimi-tui` / `kimi-gui`. The bridge is a pair of **dumb byte
+relays** — they never parse the wire protocol, so they stay independent of
+protocol versions. No auth, no TLS: keep both ends on loopback and cross the
+network through an ssh tunnel.
+
+```sh
+# on the remote box:
+./kimi-bridge remote --listen 127.0.0.1:9000
+
+# on the local box (kept open):
+ssh -N -L 9000:127.0.0.1:9000 user@remote
+
+# from any local terminal:
+./kimi-tui --remote 127.0.0.1:9000 -w /path/on/remote
+```
+
+`--remote` (or `$KIMI_REMOTE`) makes every frontend connect through the
+daemon: agent arguments like `-w` resolve **on the remote machine**, and the
+resume menu lists the remote `~/.kimi` sessions. One agent per connection.
+`kimi-bridge local --upstream <addr>` is an optional extra hop for when the
+frontends shouldn't know where the upstream lives. Design record:
+[`remote/PLAN.md`](remote/PLAN.md).
+
 ## Repo layout
 
 The workspace root is the top-level `Cargo.toml`; run cargo from the repo root.
@@ -84,7 +109,7 @@ The workspace root is the top-level `Cargo.toml`; run cargo from the repo root.
 - `client/wire-client/` — shared frontend kit: JSON-RPC over stdio, transcript folding, session listing, agent-binary resolution.
 - `client/kimi-gui/` — native egui frontend for the wire protocol (bin: `kimi-gui`).
 - `client/kimi-tui/` — ratatui terminal frontend (bin: `kimi-tui`); one session per invocation.
-- `remote/` — (planned) relay daemons for remote access.
+- `remote/kimi-bridge/` — relay daemons for remote access (bin: `kimi-bridge`).
 
 ## Build & test
 
@@ -94,6 +119,7 @@ Rust workspace (from the repo root):
 cargo build -p kimi-agent   # the agent server
 cargo build -p kimi-gui     # the GUI
 cargo build -p kimi-tui     # the terminal UI
+cargo build -p kimi-bridge  # the remote relay daemons
 cargo test                  # whole workspace
 cargo fmt
 cargo clippy --workspace --all-targets

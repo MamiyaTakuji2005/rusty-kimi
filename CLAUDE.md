@@ -29,7 +29,7 @@ Two processes, one language. **`kimi-gui`** (egui frontend, the canonical client
 
 The repo began as a reconciliation of an older Rust core (fork of MoonshotAI/kimi-agent-rs) with a newer Python shell UI (fork of MoonshotAI/kimi-cli, vendored under `cli/`). All functionality was ported to Rust; the Python TUI was reduced to a pure frontend and then **archived to a separate private repo (`rusty-kimi-tui`) and removed from this tree**. This repo is Rust-only. Do not resurrect Python code from history — `git log` has it if ever truly needed.
 
-The workspace was later reorganized from a single `core/` directory into `server/` + `client/` (and a planned `remote/` for relay daemons). The client deliberately depends on the server crate for `kimi_agent::wire` types and `Session::list`; extracting those into a shared crate is a deferred refactor.
+The workspace was later reorganized from a single `core/` directory into `server/` + `client/` + `remote/` (`remote/kimi-bridge` holds the relay daemons). The client deliberately depends on the server crate for `kimi_agent::wire` types and `Session::list`; extracting those into a shared crate is a deferred refactor.
 
 ## Compatibility contract (must-follow)
 
@@ -50,6 +50,6 @@ Breaking any of these needs a deliberate protocol version bump, not a casual edi
 - `client/kimi-gui/` — egui frontend (bin: `kimi-gui`)
 - `client/kimi-tui/` — ratatui terminal frontend (bin: `kimi-tui`)
 - `client/wire-client/` — shared frontend kit (JSON-RPC client, transcript, session listing)
-- `remote/` — (planned) relay daemons for remote access
+- `remote/kimi-bridge/` — relay daemons for remote access (see `remote/PLAN.md`)
 
 See `AGENTS.md` (repo root) and the sub-tree `AGENTS.md` files for module-level detail.

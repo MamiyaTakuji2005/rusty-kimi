@@ -1,0 +1,30 @@
+[package]
+name = "kimi-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "kimi_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kimi-bridge"
+path = "src/main.rs"
+
+# Scripted stand-in for kimi-agent, spawned by the e2e tests as if it were
+# the real binary. It ships with the package only so `CARGO_BIN_EXE_…` works
+# in integration tests; it is not part of any deployment.
+[[bin]]
+name = "kimi-bridge-mock-agent"
+path = "tests/bin/mock_agent.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The workspace tokio feature set lacks `net` (nothing else listens on
+# sockets); layer it on locally.
+tokio = { workspace = true, features = ["net"] }
+kaos = { path = "../../server/kaos" }
+kimi-agent = { path = "../../server/kimi-agent" }

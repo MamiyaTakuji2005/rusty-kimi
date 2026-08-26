@@ -6,8 +6,14 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 kaos = { path = "../../server/kaos" }
 kimi-agent = { path = "../../server/kimi-agent" }
 kosong = { path = "../../server/kosong" }
+
+[dev-dependencies]
+# Only for the drift-guard test: the client- and daemon-side bridge framings
+# live in separate crates by design; the test pins them byte-for-byte.
+kimi-bridge = { path = "../../remote/kimi-bridge" }

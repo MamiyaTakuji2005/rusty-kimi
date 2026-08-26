@@ -1,12 +1,17 @@
 //! kimi-gui: a native egui frontend for the kimi-agent wire protocol.
 //!
 //! Usage:
-//!   kimi-gui [--agent-bin <path>] [agent args...]
+//!   kimi-gui [--agent-bin <path>] [--remote <host:port>] [agent args...]
 //!
 //! The agent binary is resolved by [`wire_client::launch`] (flag, then
 //! environment, then a sibling executable, then `PATH`); everything else on
 //! the command line goes to the agent verbatim (e.g. `-w <dir>`,
 //! `--session <id>`, `--continue`).
+//!
+//! `--remote <host:port>` (or `$KIMI_REMOTE`) connects through a
+//! `kimi-bridge` daemon instead: the agent — and its sessions, config and
+//! skills — live on the daemon's machine, and agent arguments like `-w`
+//! name paths *there*.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -25,6 +30,7 @@ fn main() -> eframe::Result<()> {
         Err(message) => fatal(&message),
     };
     let agent_bin = launch.agent_bin;
+    let remote = launch.remote;
     let args = launch.agent_args;
 
     let options = eframe::NativeOptions {
@@ -37,7 +43,7 @@ fn main() -> eframe::Result<()> {
         "Kimi",
         options,
         Box::new(move |cc| {
-            let app = app::KimiGuiApp::new(cc, &agent_bin, &args)
+            let app = app::KimiGuiApp::new(cc, &agent_bin, remote, &args)
                 .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err.into() })?;
             Ok(Box::new(app))
         }),

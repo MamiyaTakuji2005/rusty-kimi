@@ -13,6 +13,12 @@
 //! The last fallback is deliberate rather than an error: frontends surface a
 //! missing agent through their normal failure paths (spawn error → transcript
 //! info / exit message) instead of refusing to start.
+//!
+//! The same resolution handles **remote** connections: `--remote
+//! <host:port>` (or `KIMI_REMOTE`) routes the frontend through a
+//! `kimi-bridge` daemon instead of spawning a local agent. Both flags are
+//! stripped from the agent args; everything else is forwarded verbatim —
+//! over remote, `-w <dir>` and friends name paths on the *remote* machine.
 
 use std::path::PathBuf;
 
@@ -23,33 +29,64 @@ pub struct AgentLaunch {
     pub agent_bin: String,
     /// Remaining command-line arguments for the agent, verbatim.
     pub agent_args: Vec<String>,
+    /// Remote bridge endpoint (`--remote <host:port>` / `KIMI_REMOTE`):
+    /// when set, frontends connect through a `kimi-bridge` daemon instead
+    /// of spawning, and `agent_bin` is unused.
+    pub remote: Option<String>,
 }
 
 impl AgentLaunch {
     /// Resolve from this process's arguments (`argv[1..]`) and the
-    /// environment. Returns the usage error for a malformed `--agent-bin`.
+    /// environment. Returns the usage error for a malformed flag.
     pub fn from_env() -> Result<Self, String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        Self::from_args(args, std::env::var("KIMI_AGENT_BIN").ok())
+        Self::from_args(
+            args,
+            std::env::var("KIMI_AGENT_BIN").ok(),
+            std::env::var("KIMI_REMOTE").ok(),
+        )
     }
 
     /// Resolve from explicit pieces; exposed for tests and for frontends that
     /// pre-parse their own flags.
-    pub fn from_args(mut args: Vec<String>, env_bin: Option<String>) -> Result<Self, String> {
+    pub fn from_args(
+        mut args: Vec<String>,
+        env_bin: Option<String>,
+        env_remote: Option<String>,
+    ) -> Result<Self, String> {
         let mut agent_bin = env_bin.filter(|s| !s.is_empty());
         if let Some(pos) = args.iter().position(|a| a == "--agent-bin") {
-            if pos + 1 < args.len() {
-                args.remove(pos);
-                agent_bin = Some(args.remove(pos));
-            } else {
-                return Err("--agent-bin requires a path argument".into());
-            }
+            let value = args
+                .get(pos + 1)
+                .cloned()
+                .ok_or("--agent-bin requires a path argument")?;
+            args.drain(pos..pos + 2);
+            agent_bin = Some(value);
         }
+
+        let mut remote = env_remote.filter(|s| !s.is_empty());
+        if let Some(pos) = args.iter().position(|a| a == "--remote") {
+            let value = args
+                .get(pos + 1)
+                .cloned()
+                .ok_or("--remote requires a host:port argument")?;
+            args.drain(pos..pos + 2);
+            remote = Some(value);
+        }
+        if let Some(endpoint) = &remote
+            && !endpoint.contains(':')
+        {
+            return Err(format!(
+                "--remote expects host:port (e.g. 127.0.0.1:9000), got `{endpoint}`"
+            ));
+        }
+
         Ok(Self {
             agent_bin: agent_bin
                 .or_else(sibling_agent_bin)
                 .unwrap_or_else(|| "kimi-agent".to_string()),
             agent_args: args,
+            remote,
         })
     }
 }
@@ -81,14 +118,15 @@ mod tests {
         let r = AgentLaunch::from_args(
             vec!["--agent-bin".into(), "/x/a".into()],
             Some("/y/b".into()),
+            None,
         );
         assert_eq!(bin(&r), "/x/a");
         assert!(r.unwrap().agent_args.is_empty());
 
-        let r = AgentLaunch::from_args(vec![], Some("/y/b".into()));
+        let r = AgentLaunch::from_args(vec![], Some("/y/b".into()), None);
         assert_eq!(bin(&r), "/y/b");
 
-        let r = AgentLaunch::from_args(vec![], None);
+        let r = AgentLaunch::from_args(vec![], None, None);
         assert_eq!(bin(&r), "kimi-agent");
     }
 
@@ -102,6 +140,7 @@ mod tests {
                 "/tmp".into(),
             ],
             None,
+            None,
         );
         let launch = r.expect("resolved");
         assert_eq!(launch.agent_bin, "/x/a");
@@ -110,13 +149,47 @@ mod tests {
 
     #[test]
     fn dangling_flag_is_a_usage_error() {
-        let err = AgentLaunch::from_args(vec!["--agent-bin".into()], None).unwrap_err();
+        let err = AgentLaunch::from_args(vec!["--agent-bin".into()], None, None).unwrap_err();
         assert!(err.contains("--agent-bin"));
     }
 
     #[test]
     fn empty_env_var_is_ignored() {
-        let r = AgentLaunch::from_args(vec![], Some(String::new()));
+        let r = AgentLaunch::from_args(vec![], Some(String::new()), Some(String::new()));
         assert_eq!(bin(&r), "kimi-agent");
+        assert!(r.unwrap().remote.is_none());
+    }
+
+    #[test]
+    fn remote_flag_beats_env_and_is_stripped() {
+        let r = AgentLaunch::from_args(
+            vec![
+                "--remote".into(),
+                "127.0.0.1:9000".into(),
+                "-w".into(),
+                "/remote/dir".into(),
+            ],
+            None,
+            Some("10.0.0.1:1".into()),
+        );
+        let launch = r.expect("resolved");
+        assert_eq!(launch.remote.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(launch.agent_args, vec!["-w", "/remote/dir"]);
+
+        let r = AgentLaunch::from_args(vec![], None, Some("10.0.0.1:1".into()));
+        assert_eq!(r.unwrap().remote.as_deref(), Some("10.0.0.1:1"));
+    }
+
+    #[test]
+    fn remote_without_port_is_a_usage_error() {
+        let err = AgentLaunch::from_args(vec!["--remote".into(), "example.com".into()], None, None)
+            .unwrap_err();
+        assert!(err.contains("host:port"));
+    }
+
+    #[test]
+    fn dangling_remote_flag_is_a_usage_error() {
+        let err = AgentLaunch::from_args(vec!["--remote".into()], None, None).unwrap_err();
+        assert!(err.contains("--remote"));
     }
 }

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use kimi_agent::wire::protocol::WIRE_PROTOCOL_VERSION;
 use kimi_agent::wire::{ApprovalResponse, ApprovalResponseKind, WireMessage};
 
+use wire_client::launch::AgentLaunch;
 use wire_client::transcript::{ApprovalInfo, Block, Transcript};
 use wire_client::{Inbound, WireClient};
 
@@ -44,15 +45,22 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    pub fn spawn(
-        agent_bin: &str,
-        agent_args: &[String],
+    /// Start a session per the launch configuration: spawn a local agent,
+    /// or connect through a remote bridge daemon when `--remote` is set.
+    pub fn launch(
+        launch: &AgentLaunch,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
-        // Plain `spawn`: a terminal frontend shares its console with the
-        // agent, and there is no window to suppress.
-        let (client, inbound) = WireClient::spawn(agent_bin, agent_args, wake)
-            .map_err(|err| format!("failed to spawn agent `{agent_bin}`: {err}"))?;
+        let (client, inbound) = match &launch.remote {
+            Some(endpoint) => WireClient::connect_tcp(endpoint, &launch.agent_args, wake)
+                .map_err(|err| format!("remote bridge `{endpoint}`: {err}"))?,
+            None => {
+                // Plain `spawn`: a terminal frontend shares its console with
+                // the agent, and there is no window to suppress.
+                WireClient::spawn(&launch.agent_bin, &launch.agent_args, wake)
+                    .map_err(|err| format!("failed to spawn agent `{}`: {err}", launch.agent_bin))?
+            }
+        };
         let init_id = client.send_request(
             "initialize",
             json!({

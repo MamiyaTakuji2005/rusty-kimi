@@ -67,6 +67,7 @@ pub struct Session {
 }
 
 impl Session {
+    /// Spawn a local agent for this tab.
     pub fn spawn(
         id: usize,
         title: String,
@@ -78,6 +79,32 @@ impl Session {
         let (client, inbound) =
             WireClient::spawn_without_console(agent_bin, agent_args, move || ctx.request_repaint())
                 .map_err(|err| format!("failed to spawn agent `{agent_bin}`: {err}"))?;
+        Self::from_client(id, title, client, inbound)
+    }
+
+    /// Connect this tab through a remote `kimi-bridge` daemon instead of
+    /// spawning a local agent; the agent (and its `~/.kimi`) lives on the
+    /// daemon's machine.
+    pub fn connect(
+        id: usize,
+        title: String,
+        endpoint: &str,
+        agent_args: &[String],
+        egui_ctx: egui::Context,
+    ) -> Result<Self, String> {
+        let ctx = egui_ctx;
+        let (client, inbound) =
+            WireClient::connect_tcp(endpoint, agent_args, move || ctx.request_repaint())
+                .map_err(|err| format!("remote bridge `{endpoint}`: {err}"))?;
+        Self::from_client(id, title, client, inbound)
+    }
+
+    fn from_client(
+        id: usize,
+        title: String,
+        client: WireClient,
+        inbound: Receiver<Inbound>,
+    ) -> Result<Self, String> {
         let init_id = client.send_request(
             "initialize",
             json!({
