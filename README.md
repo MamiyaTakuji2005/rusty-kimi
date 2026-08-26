@@ -14,7 +14,7 @@ kimi-tui (Rust, ratatui) ──Wire JSON-RPC / stdio─▶  kimi-agent (Rust)
 
 ## The agent: `kimi-agent`
 
-**`kimi-agent`** (`core/kimi-agent/`) is a full agent server — a wire-only process
+**`kimi-agent`** (`server/kimi-agent/`) is a full agent server — a wire-only process
 with no UI of its own. It owns everything that does actual work:
 
 - the agent loop and step orchestration
@@ -28,7 +28,7 @@ with no UI of its own. It owns everything that does actual work:
 
 ## The GUI: `kimi-gui`
 
-**`kimi-gui`** (`core/kimi-gui/`) is the native frontend (egui/eframe) and the
+**`kimi-gui`** (`client/kimi-gui/`) is the native frontend (egui/eframe) and the
 canonical client. It launches and drives one or more `kimi-agent` subprocesses:
 
 - multiple sessions in tabs, each backed by its own agent; forks as sub-tabs
@@ -76,18 +76,19 @@ cargo build -p kimi-agent -p kimi-gui
 
 ## Repo layout
 
-Within `core/`:
+The workspace root is the top-level `Cargo.toml`; run cargo from the repo root.
 
-- `kimi-agent/` — the agent server (bin: `kimi-agent`), wire-only.
-- `kosong/` — LLM abstraction (messages, tooling, providers).
-- `kaos/` — OS abstraction (paths, stats, filesystem).
-- `wire-client/` — shared frontend kit: JSON-RPC over stdio, transcript folding, session listing, agent-binary resolution.
-- `kimi-gui/` — native egui frontend for the wire protocol (bin: `kimi-gui`).
-- `kimi-tui/` — ratatui terminal frontend (bin: `kimi-tui`); one session per invocation.
+- `server/kimi-agent/` — the agent server (bin: `kimi-agent`), wire-only.
+- `server/kosong/` — LLM abstraction (messages, tooling, providers).
+- `server/kaos/` — OS abstraction (paths, stats, filesystem).
+- `client/wire-client/` — shared frontend kit: JSON-RPC over stdio, transcript folding, session listing, agent-binary resolution.
+- `client/kimi-gui/` — native egui frontend for the wire protocol (bin: `kimi-gui`).
+- `client/kimi-tui/` — ratatui terminal frontend (bin: `kimi-tui`); one session per invocation.
+- `remote/` — (planned) relay daemons for remote access.
 
 ## Build & test
 
-Rust workspace (from `core/`):
+Rust workspace (from the repo root):
 
 ```sh
 cargo build -p kimi-agent   # the agent server

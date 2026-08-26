@@ -17,9 +17,9 @@ Version 2.0:
        the remaining Python TUI was archived to a separate repository
        (rusty-kimi-tui) and is no longer part of this product
 
-The files under core/ have been modified from their originals.
-See the project git history for the specific changes (history also retains
-the pre-extraction cli/ tree).
+The files under server/, client/, and remote/ have been modified from their
+originals. See the project git history for the specific changes (history also
+retains the pre-extraction cli/ tree).
 
 Both upstream projects contain or reuse code licensed under the Apache 2.0
 license from:
@@ -34,3 +34,4 @@ NOTE ON TRADEMARKS: This is an independent fork and is not affiliated with,
 sponsored by, or endorsed by Moonshot AI. "Kimi" and "Moonshot" are
 trademarks of their respective owners; this project's use of the upstream
 code under Apache-2.0 does not grant any rights to those marks.
+ not grant any rights to those marks.

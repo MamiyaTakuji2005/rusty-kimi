@@ -17,7 +17,7 @@ rfd = "0.15"
 eframe = "0.32"
 egui_commonmark = "0.21"
 
-kaos = { path = "../kaos" }
-kimi-agent = { path = "../kimi-agent" }
-kosong = { path = "../kosong" }
+kaos = { path = "../../server/kaos" }
+kimi-agent = { path = "../../server/kimi-agent" }
+kosong = { path = "../../server/kosong" }
 wire-client = { path = "../wire-client" }

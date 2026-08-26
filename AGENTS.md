@@ -13,11 +13,13 @@ stdio): a native **egui GUI** (`kimi-gui`) and a **terminal UI**
 
 | Path | What it is | Origin |
 |------|------------|--------|
-| `core/` | Rust workspace: agent core, LLM/OS abstractions, native GUI, terminal UI | fork of MoonshotAI/kimi-agent-rs + the fork-authored `kimi-gui` / `kimi-tui` |
+| `server/` | Rust workspace, server side: agent core + LLM/OS abstractions | fork of MoonshotAI/kimi-agent-rs |
+| `client/` | Rust workspace, frontends: native GUI, terminal UI, shared frontend kit | fork-authored |
+| `_history/` | Historical rewrite PROMPT.md / PLAN.md and dead dev artifacts | context only |
 
 ```
-kimi-gui (core/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (core/, Rust)
-kimi-tui (core/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (core/, Rust)
+kimi-gui (client/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (server/, Rust)
+kimi-tui (client/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (server/, Rust)
 ```
 
 ### History, for context only
@@ -27,32 +29,41 @@ The fork set out to reconcile an older Rust core with a newer Python shell UI
 to Rust; the Python TUI was then reduced to a pure frontend, and once the egui
 GUI made it redundant it was **archived to a separate private repo
 (`rusty-kimi-tui`) and removed from this tree**. Old commits still contain `cli/`
-— treat it as read-only history; do not resurrect or re-vendor Python code.
+and the old `core/` layout — treat them as read-only history; do not resurrect or
+re-vendor Python code, and do not reintroduce a top-level `core/` directory.
+
+The workspace was later reorganized from a single `core/` directory into
+`server/` + `client/` (and a planned `remote/` for the relay daemons). The
+dependency graph deliberately keeps the client depending on the server crate
+(`kimi_agent::wire` types, `Session::list`); extracting those into a shared
+`wire-protocol` crate is a deferred refactor.
 
 ## Repository layout
 
 ```
-core/                  Rust workspace (run cargo here)
-  kimi-agent/          main crate — wire-only agent server (bin: kimi-agent)
-  kosong/              LLM abstraction (messages, tooling, chat providers)
-  kaos/                OS abstraction (LocalKaos, path semantics)
-  kimi-gui/            egui frontend (bin: kimi-gui)
-  kimi-tui/            ratatui terminal frontend (bin: kimi-tui)
-  wire-client/         shared frontend kit: client + transcript + session list
-  _/                   historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
+Cargo.toml               workspace root (run cargo here)
+server/                  agent server + its abstractions
+  kimi-agent/            main crate — wire-only agent server (bin: kimi-agent)
+  kosong/                LLM abstraction (messages, tooling, chat providers)
+  kaos/                  OS abstraction (LocalKaos, path semantics)
+client/                  frontends + shared frontend kit
+  kimi-gui/              egui frontend (bin: kimi-gui)
+  kimi-tui/              ratatui terminal frontend (bin: kimi-tui)
+  wire-client/           shared frontend kit: client + transcript + session list
+remote/                  (planned) relay daemons for remote access — not yet created
+_history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
 ```
 
 Per-module notes live in sub-tree `AGENTS.md` files — read them before touching
-those areas: `core/AGENTS.md` (workspace overview, compatibility contract), and
-under `core/kimi-agent/src/`: `cli/`, `soul/`, `wire/`, `tools/`, `skill/`; plus
-`core/kosong/src/AGENTS.md`, `core/kaos/src/AGENTS.md`.
+those areas, and under `server/kimi-agent/src/`: `cli/`, `soul/`, `wire/`,
+`tools/`, `skill/`; plus `server/kosong/src/AGENTS.md`, `server/kaos/src/AGENTS.md`.
 
 ## Architecture
 
 Two Rust processes. The **frontend never executes LLM steps**; the **agent owns
 the loop**.
 
-| Concern | kimi-gui (`core/kimi-gui/`) | kimi-agent (`core/kimi-agent/`) |
+| Concern | kimi-gui (`client/kimi-gui/`) | kimi-agent (`server/kimi-agent/`) |
 |---|---|---|
 | GUI, tabs, themes, palette, shortcuts | ✓ | |
 | Approval prompts (render + reply) | ✓ | |
@@ -75,13 +86,13 @@ the loop**.
 
 ## Compatibility contract (must-follow)
 
-With the Python tree archived out, this repo defines its own invariants. These
-exist to keep existing `~/.kimi` data readable and any wire-protocol client —
-including the archived TUI — working against the agent:
+This repo defines its own invariants. They exist to keep existing `~/.kimi` data
+readable and any wire-protocol client — including the archived TUI — working
+against the agent:
 
 - **Wire protocol**: envelopes, `type` strings, error codes stay stable.
   Version negotiation via `initialize`; current protocol version constant lives
-  in `wire/` (see `core/kimi-agent/src/wire/AGENTS.md`).
+  in `wire/` (see `server/kimi-agent/src/wire/AGENTS.md`).
 - **`~/.kimi` data layout** stays identical: `config.toml`, `kimi.json`,
   `mcp.json`, session dirs with `context.jsonl` + `wire.jsonl`.
 - **`kosong.message` serde** (e.g. single-`TextPart` `Message.content` → JSON
@@ -89,20 +100,20 @@ including the archived TUI — working against the agent:
 - **Tool identifiers** remain `kimi_cli.tools.*`; **wire identity** stays
   "Kimi Code CLI" / `KimiCLI/<VERSION>` even in the Rust binary. These are
   historical IDs, not Python parity — they must simply never change casually.
-- Tool schemas, descriptions (`kimi-agent/src/tools/desc/`), approvals, prompts,
-  and compaction behavior are this repo's own canonical definition now.
+- Tool schemas, descriptions (`server/kimi-agent/src/tools/desc/`), approvals,
+  prompts, and compaction behavior are this repo's own canonical definition now.
 
 Breaking any of these requires a deliberate wire-protocol version bump, not a
 casual edit. **Versioning**: the Rust workspace owns its version
-(`core/Cargo.toml`); it is no longer tied to any Python release numbering.
+(`Cargo.toml`); it is no longer tied to any Python release numbering.
 
 ## Build and test commands
 
-Single toolchain — **run cargo from `core/`**. Dev machine is Windows; commands
-assume Git Bash.
+Single toolchain — **run cargo from the repo root** (the workspace root is the
+top-level `Cargo.toml`). Dev machine is Windows; commands assume Git Bash.
 
 ```sh
-cargo build -p kimi-agent          # agent binary → core/target/{debug,release}/kimi-agent
+cargo build -p kimi-agent          # agent binary → target/{debug,release}/kimi-agent
 cargo build -p kimi-gui            # native GUI frontend
 cargo build -p kimi-tui            # terminal UI frontend
 cargo test                         # whole workspace
@@ -117,11 +128,11 @@ Prefer async I/O (tokio); avoid blocking locks in async contexts.
 ### Running the app
 
 ```sh
-# native GUI (from core/):
+# native GUI:
 cargo build -p kimi-gui && ./target/debug/kimi-gui --agent-bin ./target/debug/kimi-agent
 # (or set KIMI_AGENT_BIN; remaining args are forwarded to the agent verbatim)
 
-# terminal UI (from core/) — run inside a real terminal, one session per invocation:
+# terminal UI — run inside a real terminal, one session per invocation:
 cargo build -p kimi-tui && ./target/debug/kimi-tui -w /some/dir
 # (agent binary resolved the same way: --agent-bin flag, KIMI_AGENT_BIN,
 #  sibling executable, PATH)
@@ -132,7 +143,7 @@ cargo build -p kimi-tui && ./target/debug/kimi-tui -w /some/dir
 
 ## Module map
 
-**`core/kimi-agent/src/`** — `cli/` (arg parsing; `info`, `mcp` subcommands),
+**`server/kimi-agent/src/`** — `cli/` (arg parsing; `info`, `mcp` subcommands),
 `app.rs` (`KimiCLI::create` wiring), `soul/` (`kimisoul.rs` loop; `context.rs`
 JSONL history with checkpoints/rotations; `approval.rs` queue + YOLO;
 `compaction.rs`; `toolset.rs` dispatch + MCP bridge), `wire/` (`types.rs`,
@@ -144,16 +155,16 @@ plus/compare/panic), `skill/` (skill discovery, mermaid/d2 flows),
 `config.rs`/`metadata.rs`/`session.rs`/`share.rs` (persistence), `mcp.rs` (rmcp
 client), `prompts/`, `skills/`, `agents/`.
 
-**`core/kosong/src/`** — `message.rs` (canonical message types), `chat_provider/`
+**`server/kosong/src/`** — `message.rs` (canonical message types), `chat_provider/`
 (Kimi, Echo, ScriptedEcho — the latter two for tests), `tooling/`, `generate.rs`
 (streaming merge + tool-call orchestration).
 
-**`core/kaos/src/`** — `Kaos` trait + `LocalKaos`, task-local `current` override,
+**`server/kaos/src/`** — `Kaos` trait + `LocalKaos`, task-local `current` override,
 `KaosPath` (canonical/expanduser, no symlink resolution), `cached.rs` (glob cache
 + bounded write-undo history), Python-`os.stat`-shaped results (naming is
 historical).
 
-**`core/wire-client/src/`** — the shared frontend kit every frontend builds on:
+**`client/wire-client/src/`** — the shared frontend kit every frontend builds on:
 - `lib.rs` — the wire-protocol client used to spawn and drive a `kimi-agent`
   subprocess: JSON-RPC framing, the `Inbound` classification (event /
   reverse-request / response / exit / protocol error), stderr tail capture,
@@ -167,7 +178,7 @@ historical).
   kimi-gui so any frontend gets identical state).
 - `session_list.rs` — background listing of resumable sessions under `~/.kimi`.
 
-**`core/kimi-tui/src/`** — the ratatui terminal frontend. One conversation per
+**`client/kimi-tui/src/`** — the ratatui terminal frontend. One conversation per
 invocation (a TUI owns the whole terminal). `main.rs` (event loop over one mpsc
 channel fed by crossterm input and the client's wake hook; overlays for
 approvals and resume; status bar), `agent.rs` (protocol state machine:
@@ -176,32 +187,47 @@ answering), `input.rs` (single-line editor, char-boundary safe),
 `render.rs` (blocks → pre-wrapped styled rows with width-aware wrapping;
 scrollback is index arithmetic on the row list).
 
-**`core/kimi-gui/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
+**`client/kimi-gui/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
 `focus_owner()`), `session.rs` (one agent child + transcript + approval UI per
 tab), `render.rs` (transcript block widgets), `theme.rs` (light/dark/Kimi
 palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
 (open-in-default-app); transcript/session-list moved to `wire-client`.
+
+## CLI behavior (kimi-agent)
+
+- Wire-only server; no UI selection flags.
+- `--wire` exists but is hidden and ignored (legacy compatibility).
+- No `--prompt`/`--command` because the wire server does not accept an initial prompt.
+- Subcommands: `info`, `mcp` only.
+- Help text mirrors the original Python CLI; some MCP examples still show `kimi`.
+- Options kept from the original: `--work-dir`, `--session`, `--continue`,
+  `--config`, `--config-file`, `--model`, `--thinking/--no-thinking`, `--yolo`,
+  `--agent`, `--agent-file`, `--mcp-config-file`, `--mcp-config`, `--skills-dir`,
+  `--max-steps-per-turn`, `--max-retries-per-step`, `--max-ralph-iterations`.
+- `help_expected` is enabled in clap, so every CLI arg must define help text.
 
 ## Code style
 
 - **Rust**: rustfmt clean; community naming/concurrency/error-handling conventions
   (anyhow/thiserror); write detailed comments for public APIs and tricky
   implementations; sub-directory `AGENTS.md` notes for key modules. No `unsafe`.
-- **Comments/docs language**: English (the historical rewrite plan in `core/_` is
+- **Comments/docs language**: English (the historical rewrite plan in `_history/` is
   Chinese).
 
 ## Testing strategy
 
-- Rust tests live in `core/{kimi-agent,kosong,kaos,kimi-gui,kimi-tui,wire-client}/`
-  (integration dirs and inline `#[cfg(test)]` units); E2E wire tests use
-  ScriptedEcho and mock HTTP (`wiremock`, `axum`).
+- Rust tests live in `server/{kimi-agent,kosong,kaos}` and
+  `client/{kimi-gui,kimi-tui,wire-client}/` (integration dirs and inline
+  `#[cfg(test)]` units); E2E wire tests use ScriptedEcho and mock HTTP
+  (`wiremock`, `axum`).
 - Wire/data compatibility is verified read-only against real `~/.kimi` data in
   tests — never mutate user session dirs in tests or tooling.
 
 ## Build & release
 
 `cargo build -p kimi-agent` / `-p kimi-gui` / `-p kimi-tui` produce
-self-contained binaries (macOS/Linux/Windows).
+self-contained binaries (macOS/Linux/Windows). CI lives in `.github/workflows/`
+(workspace-wide checks; release job packages the `kimi-agent` binary).
 
 ## Security considerations
 
@@ -218,8 +244,11 @@ self-contained binaries (macOS/Linux/Windows).
 - Git: single `main` branch; subtree history preserved. Do not run
   `git commit/push/reset/rebase` unless explicitly asked.
 - The repo lives at `C:\Users\MamiyaTakuji\.rusty-kimi\rusty-kimi` on this
-  machine; the shell tool may start in a different cwd — always `cd` into
-  `core/` explicitly.
+  machine; the shell tool may start in a different cwd — always `cd` into the
+  repo root explicitly.
 - When changing wire-visible behavior, update the tests and the relevant
   sub-tree `AGENTS.md` in the same change. If the change breaks wire/data
   compatibility, bump the protocol version deliberately.
+- The client intentionally depends on the server crate (`kimi_agent::wire`
+  types, `Session::list`). Extracting those into a shared crate is a deferred
+  refactor; do not start it as a side quest.

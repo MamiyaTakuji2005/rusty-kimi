@@ -1,0 +1,60 @@
+name: CI (workspace)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "README.md"
+      - "server/**"
+      - "client/**"
+      - "remote/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "README.md"
+      - "server/**"
+      - "client/**"
+      - "remote/**"
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+          - runner: ubuntu-22.04-arm
+          - runner: macos-14
+          - runner: windows-2022
+          - runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Cargo check
+        run: cargo check
+
+      - name: Cargo test
+        run: cargo test
+
+      - name: Build kimi-agent
+        run: cargo build -p kimi-agent

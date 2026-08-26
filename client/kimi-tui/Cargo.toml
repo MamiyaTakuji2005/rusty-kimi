@@ -16,6 +16,6 @@ unicode-width = "0.2"
 crossterm = "0.29"
 ratatui = "0.30"
 
-kimi-agent = { path = "../kimi-agent" }
-kosong = { path = "../kosong" }
+kimi-agent = { path = "../../server/kimi-agent" }
+kosong = { path = "../../server/kosong" }
 wire-client = { path = "../wire-client" }
