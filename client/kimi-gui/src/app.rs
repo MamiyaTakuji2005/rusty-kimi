@@ -4,8 +4,15 @@
 //!
 //! Session creation lives in the tab strip: the `+` button opens the native
 //! OS folder picker and instantly starts a session in the chosen directory,
-//! while the two buttons pinned to the right edge open the resume menu with
-//! every past session found under `~/.kimi` and cycle the theme.
+//! while the three buttons pinned to the right edge open the resume menu
+//! with every past session found under `~/.kimi`, connect to the configured
+//! remote, and cycle the theme.
+//!
+//! Sessions are **per-tab local or remote**: a tab either owns a
+//! `kimi-agent` child process here, or speaks to one through a `kimi-bridge`
+//! daemon on another machine ([`SessionTarget`]). `+` follows the active
+//! tab's machine — a parallel session of what you are looking at — and the
+//! connect button always opens one on the configured remote.
 //!
 //! Everything here is also reachable from the keyboard alone — see
 //! [`KimiGuiApp::handle_shortcuts`].
@@ -18,9 +25,32 @@ use eframe::egui::{self, Align, Align2, Key, Modifiers, RichText};
 use kimi_agent::share::get_share_dir as share_dir;
 
 use crate::palette::{Command, Palette};
+use crate::remote_link::{LinkLight, RemoteLink};
 use crate::session::Session;
 use crate::theme::Theme;
+use wire_client::remotes;
 use wire_client::session_list::{ResumeEntry, spawn_remote_session_listing, spawn_session_listing};
+
+/// Which machine a session runs on. Sessions are per-tab, so both kinds live
+/// in one window and every path in `args` means whatever it means *there*.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum SessionTarget {
+    /// A `kimi-agent` child process on this machine.
+    #[default]
+    Local,
+    /// An agent behind a `kimi-bridge` daemon: `(name, endpoint)`.
+    Remote(String, String),
+}
+
+impl SessionTarget {
+    /// The endpoint to talk to, for the listing and connect paths.
+    fn endpoint(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Remote(_, endpoint) => Some(endpoint),
+        }
+    }
+}
 
 /// Which overlay is on top and therefore owns the keyboard. Ordered most
 /// modal first; `focus_owner` is the single place that decides.
@@ -35,9 +65,10 @@ enum FocusOwner {
 
 pub struct KimiGuiApp {
     agent_bin: String,
-    /// Remote bridge endpoint (`--remote` / `KIMI_REMOTE`), when set: every
-    /// session and the resume listing go through the daemon instead.
-    remote: Option<String>,
+    /// The configured remote and its connection state, when this machine
+    /// knows of one. Sessions are per-tab: this is what the tab strip's
+    /// connect button opens new remote tabs against, not a window-wide mode.
+    link: Option<RemoteLink>,
     sessions: Vec<Session>,
     active: usize,
     next_session_id: usize,
@@ -45,6 +76,9 @@ pub struct KimiGuiApp {
     folder_pick: Option<Receiver<Option<PathBuf>>>,
     /// Sessions shown by the resume menu, newest first.
     resume_sessions: Vec<ResumeEntry>,
+    /// Which machine the current resume list came from, so resuming a row
+    /// opens it where it actually lives.
+    resume_source: SessionTarget,
     /// In-flight resume listing (a result is pending).
     resume_listing: Option<Receiver<Result<Vec<ResumeEntry>, String>>>,
     /// The resume list is showing (`Ctrl+O` or the book button).
@@ -104,14 +138,38 @@ impl KimiGuiApp {
         install_fallback_fonts(&cc.egui_ctx);
         let theme = Theme::load();
         theme.apply(&cc.egui_ctx);
+
+        // `--remote` names the remote the first tab opens on; without it a
+        // configured default still gets a button, just no session yet.
+        let configured = remotes::load()?;
+        let chosen = match &remote {
+            Some(spec) => Some(remotes::resolve(spec, &configured)?),
+            None => remotes::default_remote(&configured).cloned(),
+        };
+        let first_target = match (&remote, &chosen) {
+            (Some(_), Some(remote)) => {
+                SessionTarget::Remote(remote.name.clone(), remote.endpoint.clone())
+            }
+            _ => SessionTarget::Local,
+        };
+        let mut link = chosen.map(RemoteLink::new);
+        // A tab was asked for on the remote, so the connection is wanted:
+        // the light starts yellow and goes green on its own.
+        if let Some(link) = &mut link
+            && first_target != SessionTarget::Local
+        {
+            link.connect();
+        }
+
         let mut app = Self {
             agent_bin: agent_bin.to_string(),
-            remote,
+            link,
             sessions: Vec::new(),
             active: 0,
             next_session_id: 1,
             folder_pick: None,
             resume_sessions: Vec::new(),
+            resume_source: SessionTarget::Local,
             resume_listing: None,
             resume_open: false,
             resume_cursor: 0,
@@ -122,20 +180,39 @@ impl KimiGuiApp {
             last_workdir: None,
             theme,
         };
-        app.open_session(agent_args.to_vec(), &cc.egui_ctx, None)?;
+        app.open_session(agent_args.to_vec(), &cc.egui_ctx, None, &first_target)?;
         // List past sessions right away: it pre-warms the resume menu and
         // supplies the most recent session directory as the folder-picker
-        // default after a GUI restart. Through a remote bridge the sessions
-        // live on the daemon's machine, so ask there instead.
-        let ctx = cc.egui_ctx.clone();
-        let endpoint = app.remote.clone();
-        app.resume_listing = Some(match endpoint {
-            Some(endpoint) => {
-                spawn_remote_session_listing(&endpoint, move || ctx.request_repaint())
-            }
-            None => spawn_session_listing(move || ctx.request_repaint()),
-        });
+        // default after a GUI restart. Sessions live on the machine that ran
+        // them, so the listing follows the first tab.
+        app.start_resume_listing(&cc.egui_ctx, first_target);
         Ok(app)
+    }
+
+    /// Ask one machine for its past sessions, remembering which machine
+    /// answered so a resumed row opens where it actually lives.
+    fn start_resume_listing(&mut self, ctx: &egui::Context, target: SessionTarget) {
+        let egui_ctx = ctx.clone();
+        self.resume_listing = Some(match target.endpoint() {
+            Some(endpoint) => {
+                spawn_remote_session_listing(endpoint, move || egui_ctx.request_repaint())
+            }
+            None => spawn_session_listing(move || egui_ctx.request_repaint()),
+        });
+        self.resume_source = target;
+    }
+
+    /// The machine the active tab runs on. `+` and the resume menu follow it,
+    /// so both mean "more of what I am looking at".
+    fn active_target(&self) -> SessionTarget {
+        match self
+            .sessions
+            .get(self.active)
+            .and_then(|s| s.remote.clone())
+        {
+            Some((name, endpoint)) => SessionTarget::Remote(name, endpoint),
+            None => SessionTarget::Local,
+        }
     }
 
     fn open_session(
@@ -143,6 +220,7 @@ impl KimiGuiApp {
         args: Vec<String>,
         ctx: &egui::Context,
         title: Option<String>,
+        target: &SessionTarget,
     ) -> Result<(), String> {
         // Only an explicit `-w` counts as a chosen directory; a session
         // launched without one runs in the GUI's incidental cwd, which must
@@ -150,17 +228,39 @@ impl KimiGuiApp {
         let work_dir = args_workdir(&args).map(PathBuf::from);
         let id = self.next_session_id;
         self.next_session_id += 1;
-        let title = title.unwrap_or_else(|| session_title(&args, id));
-        let mut session = match &self.remote {
-            // Paths in `args` (e.g. `-w`) resolve on the remote machine.
-            Some(endpoint) => Session::connect(id, title, endpoint, &args, ctx.clone())?,
-            None => Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?,
+        let title = title.unwrap_or_else(|| session_title(&args, id, target));
+        let mut session = match target {
+            // Paths in `args` (e.g. `-w`) resolve on the remote machine, and
+            // a remote session naming none gets the daemon's default.
+            SessionTarget::Remote(name, endpoint) => {
+                Session::connect(id, title, name, endpoint, &args, ctx.clone())?
+            }
+            SessionTarget::Local => Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?,
         };
         session.work_dir = work_dir.clone();
-        self.last_workdir = work_dir.or(self.last_workdir.take());
+        // Only a local directory belongs in the folder picker's memory: a
+        // remote path does not exist on this machine.
+        if matches!(target, SessionTarget::Local) {
+            self.last_workdir = work_dir.or(self.last_workdir.take());
+        }
         self.sessions.push(session);
         self.active = self.sessions.len() - 1;
         Ok(())
+    }
+
+    /// Open a session on the configured remote — what the connect button
+    /// does once it is green.
+    fn open_remote_session(&mut self, ctx: &egui::Context) {
+        let Some(link) = &self.link else {
+            return;
+        };
+        let remote = link.remote();
+        let target = SessionTarget::Remote(remote.name.clone(), remote.endpoint.clone());
+        // No args: the daemon supplies the work directory, because this
+        // machine cannot name a path that exists on that one.
+        if let Err(error) = self.open_session(Vec::new(), ctx, None, &target) {
+            self.error = Some(error);
+        }
     }
 
     fn close_session(&mut self, index: usize) {
@@ -415,8 +515,22 @@ impl KimiGuiApp {
         }
     }
 
-    /// Open the folder picker for a new session, unless one is already up.
+    /// Start a session on the active tab's machine — a parallel session of
+    /// what you are looking at.
+    ///
+    /// Locally that means the folder picker. On a remote there is nothing to
+    /// pick: this machine's directories do not exist over there, and a
+    /// Windows path sent to a Linux box only produces a session that dies on
+    /// startup. The daemon supplies its own default instead, so a new remote
+    /// tab simply asks for one.
     fn start_folder_pick(&mut self, ctx: &egui::Context) {
+        let target = self.active_target();
+        if target != SessionTarget::Local {
+            if let Err(error) = self.open_session(Vec::new(), ctx, None, &target) {
+                self.error = Some(error);
+            }
+            return;
+        }
         if self.folder_pick.is_some() {
             return;
         }
@@ -442,19 +556,21 @@ impl KimiGuiApp {
         self.resume_open = true;
         self.resume_cursor = 0;
         self.resume_scroll = true;
+        // A different tab may be active than last time: re-list from the
+        // machine being looked at now, and drop rows from the other one.
+        let target = self.active_target();
+        if target != self.resume_source {
+            self.resume_sessions.clear();
+            self.resume_listing = None;
+        }
         if self.resume_listing.is_none() {
-            let ctx = ctx.clone();
-            self.resume_listing = Some(match self.remote.clone() {
-                // Remote sessions live on the bridge's machine.
-                Some(endpoint) => {
-                    spawn_remote_session_listing(&endpoint, move || ctx.request_repaint())
-                }
-                None => spawn_session_listing(move || ctx.request_repaint()),
-            });
+            self.start_resume_listing(ctx, target);
         }
     }
 
-    /// Open a past session in a new tab (`kimi-agent -w <dir> --session <id>`).
+    /// Open a past session in a new tab (`kimi-agent -w <dir> --session <id>`)
+    /// on whichever machine the listing came from — its `work_dir` only means
+    /// anything there.
     fn resume_session(&mut self, entry: &ResumeEntry, ctx: &egui::Context) {
         let args = vec![
             "-w".to_string(),
@@ -462,7 +578,8 @@ impl KimiGuiApp {
             "--session".to_string(),
             entry.id.clone(),
         ];
-        if let Err(error) = self.open_session(args, ctx, Some(entry.tab_title())) {
+        let target = self.resume_source.clone();
+        if let Err(error) = self.open_session(args, ctx, Some(entry.tab_title()), &target) {
             self.error = Some(error);
         }
     }
@@ -475,7 +592,7 @@ impl KimiGuiApp {
         match rx.try_recv() {
             Ok(Some(dir)) => {
                 let args = vec!["-w".to_string(), dir.to_string_lossy().into_owned()];
-                if let Err(error) = self.open_session(args, ctx, None) {
+                if let Err(error) = self.open_session(args, ctx, None, &SessionTarget::Local) {
                     self.error = Some(error);
                 }
             }
@@ -504,7 +621,9 @@ impl KimiGuiApp {
         let mut pick_folder = false;
         let mut refresh_resume = false;
         let mut cycle_theme = false;
+        let mut link_click = None;
         let theme = self.theme;
+        let colors = theme.colors();
         let bar = crate::theme::SESSION_BAR;
         egui::TopBottomPanel::top("session_tabs").show(ctx, |ui| {
             // One set of metrics for the whole strip: the tabs, their ×, the
@@ -514,17 +633,32 @@ impl KimiGuiApp {
             // frame is replaced with a bare horizontal margin — a nested panel
             // brings its own vertical padding, which stacks on the strip's own
             // and puts the buttons in a band half again their height.
-            let (book, paint) = egui::SidePanel::right("tabs_right")
+            // The connect button only exists when a remote is configured;
+            // the strip is that much narrower without one.
+            let link_state = self
+                .link
+                .as_ref()
+                .map(|link| (link.light(), link.hover_text()));
+            let width = if link_state.is_some() { 99.0 } else { 66.0 };
+            let (book, link, paint) = egui::SidePanel::right("tabs_right")
                 .resizable(false)
-                .exact_width(66.0)
+                .exact_width(width)
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0)))
                 .show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
                         let book = bar
                             .square(ui, "📖")
                             .on_hover_text("resume a session (Ctrl+O)");
+                        let link = link_state.map(|(light, hover)| {
+                            let glyph = RichText::new("●").color(match light {
+                                LinkLight::Connected => colors.success,
+                                LinkLight::Trying => colors.warning,
+                                LinkLight::Blank => ui.visuals().weak_text_color(),
+                            });
+                            bar.square(ui, glyph).on_hover_text(hover)
+                        });
                         let paint = bar.square(ui, theme.glyph()).on_hover_text(theme.hover());
-                        (book, paint)
+                        (book, link, paint)
                     })
                     .inner
                 })
@@ -532,12 +666,20 @@ impl KimiGuiApp {
             if book.clicked() {
                 refresh_resume = true;
             }
+            if let Some(link) = link {
+                // Left: connect, or open a session once connected. Right:
+                // hang up, which is the only way to stop the tunnel.
+                if link.clicked() {
+                    link_click = Some(true);
+                } else if link.secondary_clicked() {
+                    link_click = Some(false);
+                }
+            }
             if paint.clicked() {
                 cycle_theme = true;
             }
 
             // Session tabs plus the `+` button on the left.
-            let colors = theme.colors();
             ui.horizontal_wrapped(|ui| {
                 for (index, session) in self.sessions.iter().enumerate() {
                     let mut text = RichText::new(&session.title);
@@ -583,6 +725,21 @@ impl KimiGuiApp {
         }
         if cycle_theme {
             self.cycle_theme(ctx);
+        }
+        match link_click {
+            // Green means there is something to open; anything else means
+            // the user wants the connection to start (or to retry now).
+            Some(true) => match self.link.as_mut() {
+                Some(link) if link.light() == LinkLight::Connected => self.open_remote_session(ctx),
+                Some(link) => link.connect(),
+                None => {}
+            },
+            Some(false) => {
+                if let Some(link) = self.link.as_mut() {
+                    link.disconnect();
+                }
+            }
+            None => {}
         }
     }
 
@@ -817,6 +974,15 @@ impl eframe::App for KimiGuiApp {
 
         self.poll_folder_pick(ctx);
         self.poll_resume_listing();
+        if let Some(link) = &mut self.link {
+            let repaint_ctx = ctx.clone();
+            link.poll(move || repaint_ctx.request_repaint());
+            if link.wants_repaint() {
+                // A probe is in flight or due: come back for its result even
+                // if the user never touches anything.
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+        }
         // Before any widget: the shortcuts take the keys they need out of the
         // event queue, ahead of the always-focused chat box.
         self.handle_shortcuts(ctx);
@@ -884,14 +1050,18 @@ fn args_workdir(args: &[String]) -> Option<&str> {
     args.get(pos + 1).map(String::as_str)
 }
 
-/// Tab title: the workdir's basename when `-w <dir>` is present, else a number.
-fn session_title(args: &[String], id: usize) -> String {
-    if let Some(dir) = args_workdir(args)
-        && let Some(name) = std::path::Path::new(dir).file_name()
-    {
-        return name.to_string_lossy().to_string();
+/// Tab title: the workdir's basename when `-w <dir>` is present, else a
+/// number — prefixed with the remote's name when the session is not on this
+/// machine, since that is the one thing two identical-looking tabs differ by.
+fn session_title(args: &[String], id: usize, target: &SessionTarget) -> String {
+    let base = match args_workdir(args).map(|dir| std::path::Path::new(dir).file_name()) {
+        Some(Some(name)) => name.to_string_lossy().to_string(),
+        _ => format!("session {id}"),
+    };
+    match target {
+        SessionTarget::Local => base,
+        SessionTarget::Remote(name, _) => format!("{name}:{base}"),
     }
-    format!("session {id}")
 }
 
 /// egui's bundled fonts have no CJK coverage and no emoji-presentation

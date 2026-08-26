@@ -6,7 +6,7 @@
 //! a background thread with a private tokio runtime, and hands the flattened
 //! result back to the UI thread through a channel.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -121,8 +121,12 @@ where
 }
 
 fn list_remote_sessions(endpoint: &str) -> Result<Vec<ResumeEntry>, String> {
-    let mut stream = std::net::TcpStream::connect(endpoint)
-        .map_err(|err| format!("failed to connect to bridge `{endpoint}`: {err}"))?;
+    let mut stream = bridge::connect(endpoint, bridge::CONNECT_TIMEOUT)?;
+    // Bounded like the spawn handshake: a menu that never answers is worse
+    // than one that says why, and this thread would otherwise hang forever.
+    stream
+        .set_read_timeout(Some(bridge::HANDSHAKE_TIMEOUT))
+        .map_err(|err| format!("bridge `{endpoint}`: {err}"))?;
     let header = bridge::list_sessions_header();
     stream
         .write_all(header.as_bytes())
@@ -130,11 +134,9 @@ fn list_remote_sessions(endpoint: &str) -> Result<Vec<ResumeEntry>, String> {
         .and_then(|_| stream.flush())
         .map_err(|err| format!("bridge `{endpoint}` write failed: {err}"))?;
 
-    let mut line = String::new();
-    BufReader::new(&mut stream)
-        .read_line(&mut line)
-        .map_err(|err| format!("bridge `{endpoint}` read failed: {err}"))?;
-    let reply = bridge::decode_reply(line.trim_end())?;
+    let line = bridge::read_frame_line(&mut BufReader::new(&mut stream))
+        .map_err(|err| format!("bridge `{endpoint}`: {err}"))?;
+    let reply = bridge::decode_reply(&line)?;
     if !reply.ok {
         return Err(reply
             .error

@@ -18,6 +18,7 @@
 mod app;
 mod os;
 mod palette;
+mod remote_link;
 mod render;
 mod session;
 mod theme;

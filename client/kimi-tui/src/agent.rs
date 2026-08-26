@@ -14,6 +14,7 @@ use kimi_agent::wire::protocol::WIRE_PROTOCOL_VERSION;
 use kimi_agent::wire::{ApprovalResponse, ApprovalResponseKind, WireMessage};
 
 use wire_client::launch::AgentLaunch;
+use wire_client::remotes::Remote;
 use wire_client::transcript::{ApprovalInfo, Block, Transcript};
 use wire_client::{Inbound, WireClient};
 
@@ -46,14 +47,22 @@ pub struct AgentSession {
 
 impl AgentSession {
     /// Start a session per the launch configuration: spawn a local agent,
-    /// or connect through a remote bridge daemon when `--remote` is set.
+    /// or connect through a bridge daemon when `--remote` named one.
+    ///
+    /// `remote` is what `launch.remote` resolved to — a configured entry in
+    /// `~/.kimi/bridge.toml` or a bare `host:port` — so the endpoint dialled
+    /// here is already the real address.
     pub fn launch(
         launch: &AgentLaunch,
+        remote: Option<&Remote>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
-        let (client, inbound) = match &launch.remote {
-            Some(endpoint) => WireClient::connect_tcp(endpoint, &launch.agent_args, wake)
-                .map_err(|err| format!("remote bridge `{endpoint}`: {err}"))?,
+        let (client, inbound) = match remote {
+            Some(remote) => WireClient::connect_tcp(&remote.endpoint, &launch.agent_args, wake)
+                .map_err(|err| {
+                    let name = &remote.name;
+                    format!("remote bridge `{name}`: {err}")
+                })?,
             None => {
                 // Plain `spawn`: a terminal frontend shares its console with
                 // the agent, and there is no window to suppress.

@@ -101,13 +101,28 @@ a stream transport in `wire-client`:
   after that line is opaque wire-protocol bytes. A dev-dependency test in
   `wire-client` pins the two framings byte-for-byte.
 - **Close propagation** is explicit: two copy tasks per connection; client
-  EOF → agent stdin shutdown, agent EOF → socket write shutdown. Grace
-  period then kill for a stuck agent.
+  EOF → agent stdin shutdown, agent EOF → exit trailer → socket write
+  shutdown. Grace period then kill for a stuck agent.
+- **The exit trailer** (added after the first round of VPS review): once the
+  agent's stdout has closed, the daemon appends one last `BRIDGE1` frame
+  with the exit status and the agent's stderr tail, then half-closes. It is
+  the only byte either daemon writes after the header, and it does not dent
+  the no-parsing rule — the agent's stream is provably finished by then.
+  Without it the local and remote transports are not equivalent: a local
+  agent that dies on startup reports why (`wire_client` keeps its stderr
+  tail), a remote one used to report only "connection closed".
+- **The work-dir default**: a frontend on another OS cannot name a path that
+  exists on the agent's machine, so the daemon decides. `--work-dir`, else
+  the daemon user's home; prepended as `-w` only when the caller named none.
+  This is why kimi-gui's `+` opens no folder picker over a remote bridge.
 - **`WireClient`** gained `connect_tcp()` (TCP + handshake + stream IO) next
   to `spawn()`/`spawn_without_console()`; the reader/writer/classify plumbing
   is shared behind `start_io`, and stream EOF surfaces as
   `Inbound::AgentExited("remote connection closed")` — no new enum variant,
-  so no frontend changes for the disconnect path.
+  so no frontend changes for the disconnect path. The handshake is bounded
+  at every step (connect timeout, read timeout, frame size cap): frontends
+  run it on the thread that draws their UI, and a daemon that accepts and
+  then says nothing must not freeze them.
 - **Frontends**: `--remote <host:port>` / `$KIMI_REMOTE` (stripped from
   agent args by `AgentLaunch`); `kimi-tui`/`kimi-gui` branch to
   `connect_tcp`, and the resume menu lists through the daemon
@@ -115,14 +130,44 @@ a stream transport in `wire-client`:
 - **Session listing** on the daemon reuses `kimi_agent::session::Session`
   as a library call — no server change, `~/.kimi` untouched.
 
+### Second round: making it a thing you can actually run
+
+- **`~/.kimi/bridge.toml`**, one file with two disjoint halves: `[serve]`
+  (read by `kimi_bridge::config`, so a systemd unit is a bare
+  `kimi-bridge remote`) and `[[remotes]]` (read by `wire_client::remotes`:
+  name, endpoint, optional tunnel command, default flag). Disjoint because
+  the daemon must not depend on the frontend kit, and a shared type would be
+  exactly that dependency. Not a section in `config.toml`: the agent rewrites
+  that file from its own struct and would drop what it does not know.
+- **`--remote` takes a name or a `host:port`.** `launch.rs` stays a pure
+  argument parser; `remotes::resolve` does the lookup and produces one good
+  error listing the configured names.
+- **A `version` op** on the bridge protocol. There is no long-lived
+  connection to observe — every session dials its own — so a UI indicator
+  needs something cheap to poll. It spawns nothing and reads no disk, and it
+  answers even when the agent binary is missing.
+- **`wire_client::tunnel`** runs the ssh process as a managed child (spawn,
+  liveness, stderr tail, kill). It is not a shell: the command is split, not
+  interpreted, and the child gets no console — so tunnel commands must be
+  non-interactive, and what ssh complains about reaches the UI through the
+  stderr tail.
+- **Sessions became per-tab** in kimi-gui (`SessionTarget`): `--remote` now
+  says where the *first* tab opens rather than switching the whole window,
+  local and remote tabs coexist, `+` follows the active tab's machine, and
+  the resume menu lists (and resumes onto) whichever machine is in view.
+  `remote_link.rs` folds tunnel state and probe results into the three-state
+  button.
+
 ## Verification gate
 
 - `cargo fmt --check`, `cargo test --workspace` from the repo root; zero
   clippy warnings in `remote/` and `wire-client`.
 - Loopback e2e (`remote/kimi-bridge/tests/`): frame handling, arg passing,
-  opaque relay, close propagation both directions, spawn failure surfaces,
-  local-daemon forwarding (10 tests); client handshake tests in
-  `wire-client` (incl. the framing drift-guard).
+  the work-dir default and its override, opaque relay, close propagation
+  both directions, the exit trailer (status + stderr tail), spawn failure
+  surfaces, local-daemon forwarding (13 tests); client handshake tests in
+  `wire-client` — refused spawn, unreachable daemon, silent daemon, a peer
+  that never frames, trailer→`AgentExited`, and the framing drift-guard.
 - Manual smoke (done, Windows): `kimi-bridge remote` + the real `kimi-agent`
   — spawn ack, `initialize` round-trip with full server capabilities,
   `list_sessions` against real `~/.kimi`, clean exit on disconnect.
@@ -134,13 +179,14 @@ a stream transport in `wire-client`:
 # on the VPS (build there, or copy target/release binaries):
 ./kimi-bridge remote --listen 127.0.0.1:9000   # agent resolved: --agent-bin /
                                                # $KIMI_AGENT_BIN / sibling / PATH
+                                               # work dir: --work-dir / $HOME
 
 # on the local machine (one terminal, kept open):
 ssh -N -L 9000:127.0.0.1:9000 user@vps
 
 # from any local terminal (the optional local daemon is not needed when
 # ssh -L lands directly on the remote daemon):
-./kimi-tui --remote 127.0.0.1:9000 -w /path/on/vps
+./kimi-tui --remote 127.0.0.1:9000             # no -w: the daemon defaults
 ./kimi-gui  --remote 127.0.0.1:9000            # paths resolve on the VPS
 ```
 

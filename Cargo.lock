@@ -3106,11 +3106,13 @@ name = "kimi-bridge"
 version = "1.8.0"
 dependencies = [
  "clap",
+ "dirs",
  "kaos",
  "kimi-agent",
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -7761,6 +7763,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]

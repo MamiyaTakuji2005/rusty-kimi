@@ -5,6 +5,8 @@
 //! - `argv`     → replies its own argv[1..] joined with `0x1f`
 //! - `say X`    → replies `X`
 //! - `die`      → exits immediately without replying
+//! - `fail X`   → writes `X` to stderr and exits 2, standing in for the
+//!   real agent's startup failures (bad work dir, missing credentials)
 //! - anything else → echoed back verbatim
 //!
 //! When its stdin closes it emits one final `MOCK-AGENT-EOF` line and
@@ -35,6 +37,10 @@ fn main() {
         }
         if trimmed == "die" {
             break;
+        }
+        if let Some(message) = trimmed.strip_prefix("fail ") {
+            eprintln!("{message}");
+            std::process::exit(2);
         }
         let reply = if trimmed == "argv" {
             std::env::args().skip(1).collect::<Vec<_>>().join("\u{1f}")

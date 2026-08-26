@@ -183,10 +183,25 @@ historical).
   (`spawn_without_console`).
 - `launch.rs` — agent-binary and remote-endpoint resolution shared by both
   mains (`--agent-bin` → `KIMI_AGENT_BIN` → sibling executable → `PATH`;
-  `--remote` → `KIMI_REMOTE`).
+  `--remote` → `KIMI_REMOTE`). Deliberately pure: what `--remote` *names* is
+  resolved by `remotes.rs`, so this module reads no files.
+- `remotes.rs` — the `[[remotes]]` half of `~/.kimi/bridge.toml` (name,
+  endpoint, optional tunnel command, default flag) and the name-or-host:port
+  resolution behind `--remote`. The daemon reads the `[serve]` half from the
+  same file through its own `kimi_bridge::config`; the sections are disjoint
+  so neither crate depends on the other.
+- `tunnel.rs` — the ssh process a remote is reached through, as a managed
+  child (spawn, liveness, stderr tail, kill). Not a shell: the command is
+  split, not interpreted, and gets no console — tunnel commands must be
+  non-interactive.
 - `bridge.rs` — client side of the `kimi-bridge` control framing (the
   daemon-side twin is `remote/kimi-bridge/src/proto.rs`; a drift-guard test
-  pins them byte-for-byte).
+  pins them byte-for-byte), plus the bounded dialling every frontend does
+  over it: connect/handshake timeouts, the 64 KiB frame cap, and
+  `exit_trailer` — the daemon's final frame, which `start_io` turns into
+  `Inbound::AgentExited` so a remote agent's death reads like a local one.
+  Both frontends call `connect_tcp` on the thread that draws their UI, so
+  nothing in the handshake may block unbounded.
 - `transcript.rs` — folds wire events into renderable blocks (moved here from
   kimi-gui so any frontend gets identical state).
 - `session_list.rs` — background listing of resumable sessions under `~/.kimi`,
@@ -214,7 +229,10 @@ answers `list_sessions` from its own `~/.kimi`) and `local` (frontend
 machine: forwards frames/bytes upstream). Dumb byte relays — the only thing
 either parses is the `BRIDGE1` header line; wire protocol stays untouched.
 `WireClient::connect_tcp` is the client-side entry; frontends reach it via
-`--remote <host:port>` / `KIMI_REMOTE`.
+`--remote <host:port>` / `KIMI_REMOTE`. The daemon supplies a default work
+directory (its user's home) for sessions that name no `-w`, which is why
+kimi-gui's `+` button opens no folder picker in remote mode: this machine's
+paths do not exist over there.
 
 ## CLI behavior (kimi-agent)
 

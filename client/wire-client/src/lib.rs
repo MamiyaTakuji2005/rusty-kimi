@@ -14,18 +14,22 @@
 //! except process management behaves identically.
 //!
 //! The crate also holds the frontend-agnostic state every client needs:
-//! [`transcript`] folds the wire event stream into renderable blocks, and
+//! [`transcript`] folds the wire event stream into renderable blocks,
 //! [`session_list`] lists the sessions stored under `~/.kimi` for resume
-//! (locally, or through a bridge daemon).
+//! (locally, or through a bridge daemon), [`remotes`] reads which remotes
+//! this machine knows about, and [`tunnel`] runs the ssh process one is
+//! reached through.
 
 pub mod bridge;
 pub mod launch;
+pub mod remotes;
 pub mod session_list;
 pub mod transcript;
+pub mod tunnel;
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::Shutdown;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -115,7 +119,9 @@ impl WireClient {
     /// The bridge handshake happens here, synchronously: a refused spawn
     /// (unreachable daemon, missing agent binary) surfaces as a connect
     /// error instead of a confusing protocol error once the session is
-    /// already running.
+    /// already running. Every step of it is bounded — frontends call this on
+    /// the thread that draws their UI, and a daemon that accepts but never
+    /// answers must not freeze them.
     pub fn connect_tcp<W>(
         endpoint: &str,
         agent_args: &[String],
@@ -124,21 +130,26 @@ impl WireClient {
     where
         W: Fn() + Send + 'static,
     {
-        let mut stream = TcpStream::connect(endpoint).map_err(|err| {
-            std::io::Error::other(format!("failed to connect to bridge `{endpoint}`: {err}"))
-        })?;
-        stream.set_nodelay(true).ok();
+        let mut stream =
+            bridge::connect(endpoint, bridge::CONNECT_TIMEOUT).map_err(std::io::Error::other)?;
 
         let header = bridge::spawn_header(agent_args);
         stream.write_all(header.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()?;
 
-        // Exactly one reply frame before the relay starts.
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let mut ack = String::new();
-        reader.read_line(&mut ack)?;
-        let reply = bridge::decode_reply(ack.trim_end())
+        // Exactly one reply frame before the relay starts. The timeout lives
+        // on the handle the reader thread will keep using, so it has to come
+        // back off again once the handshake is done — the wire stream itself
+        // is idle for as long as the user is thinking.
+        let ack_handle = stream.try_clone()?;
+        ack_handle.set_read_timeout(Some(bridge::HANDSHAKE_TIMEOUT))?;
+        let mut reader = BufReader::new(ack_handle);
+        let ack = bridge::read_frame_line(&mut reader).map_err(|err| {
+            std::io::Error::other(format!("bridge `{endpoint}` handshake failed: {err}"))
+        })?;
+        reader.get_ref().set_read_timeout(None)?;
+        let reply = bridge::decode_reply(&ack)
             .map_err(|err| std::io::Error::other(format!("bad bridge handshake: {err}")))?;
         if !reply.ok {
             let reason = reply.error.unwrap_or_else(|| "bridge refused spawn".into());
@@ -299,6 +310,15 @@ impl WireClient {
                             let trimmed = line.trim();
                             if trimmed.is_empty() {
                                 continue;
+                            }
+                            // A bridge daemon appends one trailer frame after
+                            // the remote agent's output ends, carrying the
+                            // exit status and its stderr tail. It is the last
+                            // line of the stream, and the only non-wire line
+                            // either transport ever produces.
+                            if let Some(reason) = bridge::exit_trailer(trimmed) {
+                                let _ = inbound_tx.send(Inbound::AgentExited(reason));
+                                break;
                             }
                             let inbound = classify_line(trimmed);
                             let closed = inbound_tx.send(inbound).is_err();
@@ -537,6 +557,27 @@ mod tests {
         addr
     }
 
+    /// A fake daemon that runs an arbitrary script against the connection's
+    /// reader and writer, for the cases a one-shot reply cannot express
+    /// (a trailer after the ack, a peer that never answers).
+    fn fake_daemon_script<F>(script: F) -> String
+    where
+        F: FnOnce(&mut BufReader<std::net::TcpStream>, &mut std::net::TcpStream) + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::Builder::new()
+            .name("fake-bridge".into())
+            .spawn(move || {
+                let (sock, _) = listener.accept().unwrap();
+                let mut writer = sock.try_clone().unwrap();
+                let mut reader = BufReader::new(sock);
+                script(&mut reader, &mut writer);
+            })
+            .unwrap();
+        addr
+    }
+
     #[test]
     fn connect_tcp_handshake_round_trip_and_stream_eof() {
         // A scripted peer: ack the spawn, answer the client's first request,
@@ -625,6 +666,97 @@ mod tests {
         };
         assert!(err.to_string().contains("not found"), "{err}");
         assert!(err.to_string().contains("refused spawn"), "{err}");
+    }
+
+    #[test]
+    fn connect_tcp_surfaces_the_exit_trailer() {
+        // The daemon's last word after the remote agent dies: the client
+        // must report *that* reason, not a bare "connection closed".
+        let endpoint = fake_daemon_script(|reader, writer| {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            writeln!(writer, r#"BRIDGE1 {{"ok":true}}"#).unwrap();
+            writeln!(
+                writer,
+                r#"BRIDGE1 {{"ok":false,"error":"agent exited: exit status: 2\nwork dir does not exist"}}"#
+            )
+            .unwrap();
+            writer.flush().unwrap();
+        });
+        let (_client, inbound) = WireClient::connect_tcp(&endpoint, &[], || {}).expect("connect");
+        match inbound
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("inbound message")
+        {
+            Inbound::AgentExited(reason) => {
+                assert!(reason.contains("exit status: 2"), "{reason}");
+                assert!(reason.contains("work dir does not exist"), "{reason}");
+            }
+            _ => panic!("expected AgentExited carrying the trailer's reason"),
+        }
+    }
+
+    #[test]
+    fn connect_tcp_times_out_a_silent_daemon() {
+        // A daemon that accepts and then says nothing: the frontend calls
+        // this on its UI thread, so it must come back with an error rather
+        // than hang. The wait is shortened here to keep the test quick.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let (done_tx, done_rx) = channel::<()>();
+        std::thread::Builder::new()
+            .name("silent-bridge".into())
+            .spawn(move || {
+                let (_sock, _) = listener.accept().unwrap();
+                // Hold the connection open until the client has given up.
+                let _ = done_rx.recv_timeout(std::time::Duration::from_secs(30));
+            })
+            .unwrap();
+
+        let mut stream = bridge::connect(&endpoint, bridge::CONNECT_TIMEOUT).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+            .unwrap();
+        let err = bridge::read_frame_line(&mut BufReader::new(&mut stream)).unwrap_err();
+        assert!(err.contains("did not answer"), "{err}");
+        let _ = done_tx.send(());
+    }
+
+    #[test]
+    fn connect_tcp_reports_a_daemon_that_says_nothing_at_all() {
+        // Accept, then close without a frame: the message must name that,
+        // not "missing BRIDGE1 prefix" against an empty line.
+        let endpoint = fake_daemon_script(|reader, _writer| {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+        });
+        let err = match WireClient::connect_tcp(&endpoint, &[], || {}) {
+            Ok(_) => panic!("handshake must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("without replying"), "{err}");
+    }
+
+    #[test]
+    fn read_frame_line_caps_an_endless_peer() {
+        // Pointed at something that is not a bridge daemon (an HTTP server,
+        // a log stream), the client must stop rather than buffer forever.
+        let endpoint = fake_daemon_script(|reader, writer| {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            // One endless line: no newline in sight, ever.
+            let chunk = "x".repeat(4096);
+            for _ in 0..32 {
+                if write!(writer, "{chunk}").is_err() {
+                    return;
+                }
+            }
+            let _ = writer.flush();
+        });
+        let mut stream = bridge::connect(&endpoint, bridge::CONNECT_TIMEOUT).expect("connect");
+        writeln!(stream, "BRIDGE1 {{\"op\":\"list_sessions\"}}").unwrap();
+        let err = bridge::read_frame_line(&mut BufReader::new(&mut stream)).unwrap_err();
+        assert!(err.contains("size limit"), "{err}");
     }
 
     #[test]

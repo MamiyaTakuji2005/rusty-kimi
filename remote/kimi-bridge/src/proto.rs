@@ -7,9 +7,11 @@
 //! ```text
 //! BRIDGE1 {"op":"spawn","args":["-w","/srv/proj"]}     // client → daemon
 //! BRIDGE1 {"op":"list_sessions"}                        // client → daemon
+//! BRIDGE1 {"op":"version"}                              // client → daemon
 //! BRIDGE1 {"ok":true}                                   // daemon → client
 //! BRIDGE1 {"ok":false,"error":"…"}                      // daemon → client
 //! BRIDGE1 {"ok":true,"sessions":[…]}                    // daemon → client
+//! BRIDGE1 {"ok":true,"version":"1.8.0"}                 // daemon → client
 //! ```
 //!
 //! The `BRIDGE1 ` prefix keeps daemon frames trivially distinguishable from
@@ -43,6 +45,12 @@ pub enum Request {
     Spawn { args: Vec<String> },
     /// List the sessions visible on the machine the daemon runs on.
     ListSessions,
+    /// Liveness probe: answer with the daemon's version and close. Spawns
+    /// nothing and touches no disk, so a UI can poll it on a timer to tell
+    /// "the tunnel is up but nothing is listening" from "the daemon is
+    /// there" — there is no long-lived connection to observe otherwise,
+    /// since every session dials its own.
+    Version,
 }
 
 /// One entry of a `list_sessions` reply — the same shape as
@@ -65,6 +73,9 @@ pub struct Reply {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<Vec<SessionEntry>>,
+    /// The daemon's own version, on a `version` reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl Reply {
@@ -74,6 +85,7 @@ impl Reply {
             ok: true,
             error: None,
             sessions: None,
+            version: None,
         }
     }
 
@@ -83,6 +95,17 @@ impl Reply {
             ok: true,
             error: None,
             sessions: Some(entries),
+            version: None,
+        }
+    }
+
+    /// A `version` result: this daemon is alive and speaks BRIDGE1.
+    pub fn version(version: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            sessions: None,
+            version: Some(version.into()),
         }
     }
 
@@ -92,6 +115,7 @@ impl Reply {
             ok: false,
             error: Some(message.into()),
             sessions: None,
+            version: None,
         }
     }
 }
@@ -169,6 +193,10 @@ mod tests {
 
         let list = encode(&Request::ListSessions);
         assert_eq!(decode::<Request>(&list).unwrap(), Request::ListSessions);
+
+        let version = encode(&Request::Version);
+        assert_eq!(version, r#"BRIDGE1 {"op":"version"}"#);
+        assert_eq!(decode::<Request>(&version).unwrap(), Request::Version);
     }
 
     #[test]
@@ -187,6 +215,10 @@ mod tests {
 
         let error = Reply::error("boom");
         assert_eq!(decode::<Reply>(&encode(&error)).unwrap(), error);
+
+        let version = Reply::version("1.8.0");
+        assert_eq!(encode(&version), r#"BRIDGE1 {"ok":true,"version":"1.8.0"}"#);
+        assert_eq!(decode::<Reply>(&encode(&version)).unwrap(), version);
     }
 
     #[test]

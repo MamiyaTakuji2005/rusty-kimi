@@ -88,16 +88,88 @@ network through an ssh tunnel.
 # on the local box (kept open):
 ssh -N -L 9000:127.0.0.1:9000 user@remote
 
-# from any local terminal:
-./kimi-tui --remote 127.0.0.1:9000 -w /path/on/remote
+# from any local terminal (no -w needed: the daemon supplies its own):
+./kimi-tui --remote 127.0.0.1:9000
 ```
 
-`--remote` (or `$KIMI_REMOTE`) makes every frontend connect through the
-daemon: agent arguments like `-w` resolve **on the remote machine**, and the
-resume menu lists the remote `~/.kimi` sessions. One agent per connection.
+**One config file, both roles.** `~/.kimi/bridge.toml` describes how a
+machine serves (`[serve]`) and which remotes it can reach (`[[remotes]]`).
+Each half is read only by the side that needs it, and the file is separate
+from `config.toml` on purpose — the agent rewrites that one and would drop
+sections it does not know:
+
+```toml
+# On the VPS: `kimi-bridge remote` with no arguments then does the right
+# thing, which is what the systemd unit below runs.
+[serve]
+listen = "127.0.0.1:9000"
+work_dir = "/home/kimi"       # default for sessions that pass no -w
+
+# On your machine: the remotes the frontends can reach.
+[[remotes]]
+name = "vps"
+endpoint = "127.0.0.1:9000"                            # this end of the tunnel
+tunnel = "ssh -N -L 9000:127.0.0.1:9000 user@vps"      # optional, see below
+default = true
+```
+
+`--remote` then takes a **name or a `host:port`**: `kimi-gui --remote vps`,
+or `--remote 127.0.0.1:9000` with no config at all. Flags beat the config
+file, which beats the built-in defaults.
+
+**The connect button.** With a remote configured, kimi-gui grows a third
+button in the tab strip, between the resume and theme buttons:
+
+| light  | meaning                                            | click            |
+| ------ | -------------------------------------------------- | ---------------- |
+| grey   | not connected                                      | connect          |
+| yellow | tunnel up (or starting), daemon not answering yet  | retry now        |
+| green  | the daemon answered a `version` probe              | new remote session |
+
+Right-click disconnects and stops the tunnel. If the remote has a `tunnel`
+command, the button runs it as a child process and kills it on disconnect —
+so the ssh terminal you used to keep open is no longer needed. That command
+must be **non-interactive**: it gets no console, so key auth and a known host
+are required (`-o BatchMode=yes` is a good idea), and whatever ssh complains
+about shows up in the button's tooltip.
+
+Sessions are per-tab: local and remote tabs live side by side, `+` opens
+another session on the active tab's machine, and the resume menu lists the
+sessions of whichever machine you are looking at.
+
+`--remote` (or `$KIMI_REMOTE`) says where the **first** session opens; after
+that the connect button opens more. Agent arguments like `-w` resolve on the
+remote machine, and each session gets its own agent and its own connection.
 `kimi-bridge local --upstream <addr>` is an optional extra hop for when the
 frontends shouldn't know where the upstream lives. Design record:
 [`remote/PLAN.md`](remote/PLAN.md).
+
+**Work directory.** A session that names no `-w` gets the daemon's default —
+the remote user's home directory, or whatever `[serve] work_dir` /
+`--work-dir` says. That is the point of the default: a frontend on another OS
+has no way to name a path that exists over there, so it doesn't have to. Pass
+`-w /some/remote/path` to override per session; the resume menu always carries
+each session's own directory.
+
+**Running it as a service.** `kimi-agent` reads its credentials from the
+environment (`KIMI_API_KEY`, …) and its config and sessions from `~/.kimi`, so
+a systemd unit has to supply both — with no `HOME`, `~/.kimi` resolves
+relative to the working directory and the agent will not find its config:
+
+```ini
+[Service]
+Environment=HOME=/home/kimi
+EnvironmentFile=/home/kimi/.config/kimi-bridge.env   # KIMI_API_KEY=…
+WorkingDirectory=/home/kimi
+ExecStart=/usr/local/bin/kimi-bridge remote      # reads [serve] from bridge.toml
+Restart=on-failure
+User=kimi
+```
+
+Keep the listen address on loopback. Anything that can reach that port can run
+commands as this user — the wire carries shell approvals, and the connecting
+frontend is what answers them. Use a dedicated unprivileged user, and let ssh
+be the only way in.
 
 ## Repo layout
 

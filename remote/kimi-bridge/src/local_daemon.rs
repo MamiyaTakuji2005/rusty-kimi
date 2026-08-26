@@ -22,10 +22,38 @@ use crate::proto::{self, Reply, Request};
 /// How long a connection may take to send its header line.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Consecutive `accept()` failures tolerated before giving up — same
+/// reasoning (and same numbers) as the remote daemon's loop.
+const MAX_CONSECUTIVE_ACCEPT_ERRORS: usize = 64;
+
+/// Pause after a failed `accept()` so a persistent error cannot spin hot.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
 /// Serve bridge connections forever, forwarding each one to `upstream`.
 pub async fn serve(listener: TcpListener, upstream: String) -> io::Result<()> {
+    let mut consecutive_errors = 0usize;
     loop {
-        let (socket, peer) = listener.accept().await?;
+        let (socket, peer) = match listener.accept().await {
+            Ok(accepted) => {
+                consecutive_errors = 0;
+                accepted
+            }
+            Err(err) => {
+                consecutive_errors += 1;
+                eprintln!("kimi-bridge: accept failed ({consecutive_errors}): {err}");
+                if consecutive_errors >= MAX_CONSECUTIVE_ACCEPT_ERRORS {
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!(
+                            "giving up after {consecutive_errors} consecutive accept failures: {err}"
+                        ),
+                    ));
+                }
+                tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
+        let _ = socket.set_nodelay(true);
         let upstream = upstream.clone();
         tokio::spawn(async move {
             if let Err(err) = handle(socket, &upstream).await {
@@ -58,7 +86,10 @@ async fn handle(socket: TcpStream, upstream: &str) -> io::Result<()> {
     };
 
     let mut upstream_sock = match TcpStream::connect(upstream).await {
-        Ok(sock) => sock,
+        Ok(sock) => {
+            let _ = sock.set_nodelay(true);
+            sock
+        }
         Err(err) => {
             let reply = Reply::error(format!("failed to reach upstream `{upstream}`: {err}"));
             write_frame(&mut client, proto::encode(&reply)).await?;
@@ -71,8 +102,8 @@ async fn handle(socket: TcpStream, upstream: &str) -> io::Result<()> {
 
     let mut upstream_sock = BufReader::new(upstream_sock);
     match request {
-        Request::ListSessions => {
-            // One frame up, one frame back, done.
+        // One frame up, one frame back, done.
+        Request::ListSessions | Request::Version => {
             let reply_line = proto::read_line(&mut upstream_sock).await?;
             write_frame(&mut client, reply_line).await?;
             client.get_mut().shutdown().await

@@ -41,6 +41,9 @@ pub struct Session {
     /// Stable unique id, used to scope egui widget state per session.
     pub id: usize,
     pub title: String,
+    /// The remote this session runs on (`name`, `endpoint`), or `None` for a
+    /// local agent. Sessions are per-tab, so a window can hold both.
+    pub remote: Option<(String, String)>,
     /// Explicitly chosen working directory (`-w`), if any; the `+` folder
     /// picker opens here so a parallel session of the active tab is one
     /// Enter away.
@@ -79,7 +82,7 @@ impl Session {
         let (client, inbound) =
             WireClient::spawn_without_console(agent_bin, agent_args, move || ctx.request_repaint())
                 .map_err(|err| format!("failed to spawn agent `{agent_bin}`: {err}"))?;
-        Self::from_client(id, title, client, inbound)
+        Self::from_client(id, title, None, client, inbound)
     }
 
     /// Connect this tab through a remote `kimi-bridge` daemon instead of
@@ -88,6 +91,7 @@ impl Session {
     pub fn connect(
         id: usize,
         title: String,
+        name: &str,
         endpoint: &str,
         agent_args: &[String],
         egui_ctx: egui::Context,
@@ -95,13 +99,15 @@ impl Session {
         let ctx = egui_ctx;
         let (client, inbound) =
             WireClient::connect_tcp(endpoint, agent_args, move || ctx.request_repaint())
-                .map_err(|err| format!("remote bridge `{endpoint}`: {err}"))?;
-        Self::from_client(id, title, client, inbound)
+                .map_err(|err| format!("remote bridge `{name}`: {err}"))?;
+        let remote = Some((name.to_string(), endpoint.to_string()));
+        Self::from_client(id, title, remote, client, inbound)
     }
 
     fn from_client(
         id: usize,
         title: String,
+        remote: Option<(String, String)>,
         client: WireClient,
         inbound: Receiver<Inbound>,
     ) -> Result<Self, String> {
@@ -118,6 +124,7 @@ impl Session {
         Ok(Self {
             id,
             title,
+            remote,
             work_dir: None,
             client,
             inbound,

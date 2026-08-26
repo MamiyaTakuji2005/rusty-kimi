@@ -14,11 +14,17 @@
 //! missing agent through their normal failure paths (spawn error → transcript
 //! info / exit message) instead of refusing to start.
 //!
-//! The same resolution handles **remote** connections: `--remote
-//! <host:port>` (or `KIMI_REMOTE`) routes the frontend through a
+//! The same resolution handles **remote** connections: `--remote <name |
+//! host:port>` (or `KIMI_REMOTE`) routes the frontend through a
 //! `kimi-bridge` daemon instead of spawning a local agent. Both flags are
 //! stripped from the agent args; everything else is forwarded verbatim —
 //! over remote, `-w <dir>` and friends name paths on the *remote* machine.
+//!
+//! What `--remote` names is resolved by [`crate::remotes`], not here: a name
+//! from `~/.kimi/bridge.toml` or a bare `host:port`. This module stays pure
+//! (no file reads) so it can be tested as the argument parser it is, and so
+//! an unknown name produces one good error listing what *is* configured
+//! rather than a syntax complaint.
 
 use std::path::PathBuf;
 
@@ -29,9 +35,10 @@ pub struct AgentLaunch {
     pub agent_bin: String,
     /// Remaining command-line arguments for the agent, verbatim.
     pub agent_args: Vec<String>,
-    /// Remote bridge endpoint (`--remote <host:port>` / `KIMI_REMOTE`):
-    /// when set, frontends connect through a `kimi-bridge` daemon instead
-    /// of spawning, and `agent_bin` is unused.
+    /// What `--remote` / `KIMI_REMOTE` named — a configured remote's name
+    /// or a bare `host:port`, resolved through [`crate::remotes::resolve`].
+    /// When set, frontends connect through a `kimi-bridge` daemon instead of
+    /// spawning, and `agent_bin` is unused.
     pub remote: Option<String>,
 }
 
@@ -69,16 +76,12 @@ impl AgentLaunch {
             let value = args
                 .get(pos + 1)
                 .cloned()
-                .ok_or("--remote requires a host:port argument")?;
+                .ok_or("--remote requires a name or host:port argument")?;
             args.drain(pos..pos + 2);
             remote = Some(value);
         }
-        if let Some(endpoint) = &remote
-            && !endpoint.contains(':')
-        {
-            return Err(format!(
-                "--remote expects host:port (e.g. 127.0.0.1:9000), got `{endpoint}`"
-            ));
+        if remote.as_deref() == Some("") {
+            return Err("--remote expects a name or host:port".to_string());
         }
 
         Ok(Self {
@@ -181,10 +184,16 @@ mod tests {
     }
 
     #[test]
-    fn remote_without_port_is_a_usage_error() {
-        let err = AgentLaunch::from_args(vec!["--remote".into(), "example.com".into()], None, None)
-            .unwrap_err();
-        assert!(err.contains("host:port"));
+    fn a_bare_name_is_accepted_for_remotes_to_resolve() {
+        // `--remote vps` names an entry in ~/.kimi/bridge.toml; whether it
+        // exists is `remotes::resolve`'s question, not this parser's.
+        let launch = AgentLaunch::from_args(vec!["--remote".into(), "vps".into()], None, None)
+            .expect("resolved");
+        assert_eq!(launch.remote.as_deref(), Some("vps"));
+
+        let err =
+            AgentLaunch::from_args(vec!["--remote".into(), String::new()], None, None).unwrap_err();
+        assert!(err.contains("name or host:port"), "{err}");
     }
 
     #[test]

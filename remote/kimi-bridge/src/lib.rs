@@ -20,6 +20,7 @@
 //! One agent per connection; the connection's lifetime *is* the agent's
 //! lifetime (close in either direction propagates to the other side).
 
+pub mod config;
 pub mod local_daemon;
 pub mod proto;
 pub mod remote_daemon;

@@ -37,6 +37,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use wire_client::launch::AgentLaunch;
+use wire_client::remotes::{self, Remote};
 use wire_client::session_list::{ResumeEntry, spawn_remote_session_listing, spawn_session_listing};
 
 use crate::agent::{AgentSession, Phase};
@@ -62,12 +63,22 @@ enum Overlay {
 }
 
 fn main() -> std::io::Result<()> {
-    let launch = wire_client::launch::AgentLaunch::from_env()
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let usage = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+    let launch = wire_client::launch::AgentLaunch::from_env().map_err(usage)?;
+    // Resolve `--remote` before the terminal goes into raw mode: an unknown
+    // remote should be a plain error on a normal terminal, not a flash of
+    // alternate screen.
+    let remote = match &launch.remote {
+        Some(spec) => {
+            let configured = remotes::load().map_err(usage)?;
+            Some(remotes::resolve(spec, &configured).map_err(usage)?)
+        }
+        None => None,
+    };
 
     // Terminal setup before anything that can fail visibly.
     let mut terminal = init_terminal()?;
-    let result = run_app(&mut terminal, &launch);
+    let result = run_app(&mut terminal, &launch, remote.as_ref());
     restore_terminal(&mut terminal)?;
     result
 }
@@ -97,8 +108,9 @@ fn restore_terminal(
 }
 
 struct App {
-    /// Remote bridge endpoint in use, if any (drives the resume listing).
-    remote: Option<String>,
+    /// The remote this session runs on, if it does not run here (drives the
+    /// resume listing and the printed resume command).
+    remote: Option<Remote>,
     session: AgentSession,
     editor: Editor,
     /// Cached wrapped rows for the current transcript state.
@@ -129,6 +141,7 @@ struct App {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     launch: &AgentLaunch,
+    remote: Option<&Remote>,
 ) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel::<Msg>();
     // The wake hook lands on the same channel: wire messages trigger an
@@ -162,7 +175,7 @@ fn run_app(
         })
         .expect("spawn ct-events thread");
 
-    let mut app = App::new(launch, move || {
+    let mut app = App::new(launch, remote, move || {
         let _ = wake_tx.send(Msg::Wake);
     })
     .map_err(std::io::Error::other)?;
@@ -247,10 +260,14 @@ fn run_app(
 }
 
 impl App {
-    fn new(launch: &AgentLaunch, wake: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
-        let session = AgentSession::launch(launch, wake)?;
+    fn new(
+        launch: &AgentLaunch,
+        remote: Option<&Remote>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        let session = AgentSession::launch(launch, remote, wake)?;
         Ok(Self {
-            remote: launch.remote.clone(),
+            remote: remote.cloned(),
             session,
             editor: Editor::default(),
             rendered: RenderedTranscript::new(),
@@ -455,8 +472,10 @@ impl App {
                     // We print the exact command before restoring the
                     // terminal so it survives into the normal buffer.
                     let mut command = String::new();
-                    if let Some(endpoint) = &self.remote {
-                        command.push_str(&format!("--remote {endpoint} "));
+                    if let Some(remote) = &self.remote {
+                        // By name, so the printed command keeps working even
+                        // if the endpoint behind it moves.
+                        command.push_str(&format!("--remote {} ", remote.name));
                     }
                     command.push_str(&format!("--session {}", entry.id));
                     self.resume_command = Some(command);
@@ -474,8 +493,8 @@ impl App {
         // A fresh listing each time the menu opens; it finishes quickly, and
         // draw() shows "loading" until poll_resume_listing lands the result.
         // Remote sessions live on the bridge's machine, so ask it.
-        if let Some(endpoint) = self.remote.clone() {
-            self.resume_listing = Some(spawn_remote_session_listing(&endpoint, move || {}));
+        if let Some(remote) = self.remote.clone() {
+            self.resume_listing = Some(spawn_remote_session_listing(&remote.endpoint, move || {}));
         } else {
             self.resume_listing = Some(spawn_session_listing(move || {}));
         }

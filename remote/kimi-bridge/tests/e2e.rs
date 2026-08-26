@@ -18,11 +18,15 @@ fn mock_agent() -> String {
 
 /// Start the remote daemon on an ephemeral loopback port.
 async fn remote_on(agent_bin: &str) -> u16 {
+    remote_with(remote_daemon::Config::new(agent_bin)).await
+}
+
+/// Same, with an explicit daemon config (default work dir, …).
+async fn remote_with(config: remote_daemon::Config) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let agent_bin = agent_bin.to_string();
     tokio::spawn(async move {
-        let _ = remote_daemon::serve(listener, agent_bin).await;
+        let _ = remote_daemon::serve(listener, config).await;
     });
     port
 }
@@ -78,6 +82,16 @@ async fn read_line(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> St
     let n = reader.read_line(&mut line).await.unwrap();
     assert!(n > 0, "unexpected EOF while waiting for a relayed line");
     line.trim_end().to_string()
+}
+
+/// Read the daemon's exit trailer: the final `BRIDGE1` frame that carries
+/// the agent's exit status and stderr tail, appended after the agent's own
+/// output ends.
+async fn read_trailer(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> String {
+    let line = read_line(reader).await;
+    let reply: Reply = proto::decode(&line).expect("trailer decodes as a bridge frame");
+    assert!(!reply.ok, "the exit trailer reports the agent is gone");
+    reply.error.expect("the trailer carries a reason")
 }
 
 /// Assert the reader hits EOF (the peer closed its write side).
@@ -143,9 +157,28 @@ async fn agent_exit_closes_the_socket() {
 
     // `die` makes the mock agent exit without replying; the daemon must
     // observe stdout EOF and half-close our read side (the agent's
-    // exit-marker line arrives first, then the end of the stream).
+    // exit-marker line arrives first, then the trailer, then the end of the
+    // stream).
     send_line(&mut writer, "die").await;
     assert_eq!(read_line(&mut reader).await, "MOCK-AGENT-EOF");
+    let reason = read_trailer(&mut reader).await;
+    assert!(reason.starts_with("agent exited:"), "{reason}");
+    assert_eof(&mut reader).await;
+}
+
+#[tokio::test]
+async fn exit_trailer_carries_the_agent_stderr_tail() {
+    let port = remote_on(&mock_agent()).await;
+    let ((mut writer, mut reader), _ack) =
+        connect_and_send(port, &Request::Spawn { args: vec![] }).await;
+
+    // The whole point of the trailer: a remote agent that dies on startup
+    // must reach the frontend with its reason attached, the way a locally
+    // spawned agent does through its stderr tail.
+    send_line(&mut writer, "fail could not open work dir").await;
+    let reason = read_trailer(&mut reader).await;
+    assert!(reason.contains("agent exited:"), "{reason}");
+    assert!(reason.contains("could not open work dir"), "{reason}");
     assert_eof(&mut reader).await;
 }
 
@@ -159,7 +192,51 @@ async fn client_half_close_reaches_agent_stdin() {
     // sends): the agent must see stdin EOF, emit its marker, and exit.
     writer.shutdown().await.unwrap();
     assert_eq!(read_line(&mut reader).await, "MOCK-AGENT-EOF");
+    let reason = read_trailer(&mut reader).await;
+    assert!(reason.starts_with("agent exited:"), "{reason}");
     assert_eof(&mut reader).await;
+}
+
+#[tokio::test]
+async fn default_work_dir_fills_in_for_args_that_name_none() {
+    let port = remote_with(
+        remote_daemon::Config::new(mock_agent()).with_default_work_dir(Some("/srv/home".into())),
+    )
+    .await;
+    let ((mut writer, mut reader), ack) = connect_and_send(
+        port,
+        &Request::Spawn {
+            args: vec!["--session".into(), "abc".into()],
+        },
+    )
+    .await;
+    assert!(ack.ok);
+
+    // A frontend on another OS sends no -w at all; the daemon supplies one
+    // that exists on *its* machine.
+    send_line(&mut writer, "argv").await;
+    assert_eq!(
+        read_line(&mut reader).await,
+        "-w\u{1f}/srv/home\u{1f}--session\u{1f}abc"
+    );
+}
+
+#[tokio::test]
+async fn a_callers_work_dir_beats_the_daemon_default() {
+    let port = remote_with(
+        remote_daemon::Config::new(mock_agent()).with_default_work_dir(Some("/srv/home".into())),
+    )
+    .await;
+    let ((mut writer, mut reader), _ack) = connect_and_send(
+        port,
+        &Request::Spawn {
+            args: vec!["-w".into(), "/srv/proj".into()],
+        },
+    )
+    .await;
+
+    send_line(&mut writer, "argv").await;
+    assert_eq!(read_line(&mut reader).await, "-w\u{1f}/srv/proj");
 }
 
 #[tokio::test]
@@ -184,6 +261,17 @@ async fn list_sessions_replies_ok_then_closes() {
         reply.sessions.is_some(),
         "sessions field missing: {reply:?}"
     );
+    assert_eof(&mut reader).await;
+}
+
+#[tokio::test]
+async fn version_answers_without_spawning_anything() {
+    // The liveness probe behind a UI's connection light: it must answer even
+    // when no agent binary exists, because it never spawns one.
+    let port = remote_on("/nonexistent/kimi-agent-binary").await;
+    let ((_writer, mut reader), reply) = connect_and_send(port, &Request::Version).await;
+    assert!(reply.ok, "version failed: {reply:?}");
+    assert_eq!(reply.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     assert_eof(&mut reader).await;
 }
 
@@ -224,6 +312,17 @@ async fn local_forwards_list_sessions() {
     let ((_writer, mut reader), reply) = connect_and_send(port, &Request::ListSessions).await;
     assert!(reply.ok, "forwarded listing failed: {reply:?}");
     assert!(reply.sessions.is_some());
+    assert_eof(&mut reader).await;
+}
+
+#[tokio::test]
+async fn local_forwards_version() {
+    let upstream = remote_on(&mock_agent()).await;
+    let port = local_up(upstream).await;
+
+    let ((_writer, mut reader), reply) = connect_and_send(port, &Request::Version).await;
+    assert!(reply.ok, "forwarded version failed: {reply:?}");
+    assert_eq!(reply.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     assert_eof(&mut reader).await;
 }
 
