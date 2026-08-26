@@ -22,6 +22,8 @@ pub enum Command {
     ResumeSession,
     CloseSession,
     ConnectRemote,
+    NewRemoteSession,
+    OpenRemoteSession,
     CycleTheme,
     OpenConfig,
     OpenMcpConfig,
@@ -68,6 +70,20 @@ pub const COMMANDS: &[Entry] = &[
         command: Command::ConnectRemote,
         title: "Connect to remote",
         detail: "the chain button — green opens a remote session",
+        binding: None,
+        needs_session: false,
+    },
+    Entry {
+        command: Command::NewRemoteSession,
+        title: "New remote session",
+        detail: "a fresh agent tab on the connected daemon",
+        binding: None,
+        needs_session: false,
+    },
+    Entry {
+        command: Command::OpenRemoteSession,
+        title: "Open remote session",
+        detail: "resume a past session from the daemon's machine",
         binding: None,
         needs_session: false,
     },
@@ -271,6 +287,27 @@ mod tests {
         // remote exists to connect to.
         let palette = with_query("bridge");
         assert_eq!(titles(&palette, false).first(), Some(&"Open bridge.toml"));
+    }
+
+    /// The remote commands are reachable without a session — a remote tab
+    /// may be the first one this window opens.
+    #[test]
+    fn test_remote_commands_findable_without_a_session() {
+        for (query, command) in [
+            ("connect", Command::ConnectRemote),
+            // Both titles contain "remote session"; ties keep declaration
+            // order, so the new-session row leads.
+            ("remote session", Command::NewRemoteSession),
+            ("open remote", Command::OpenRemoteSession),
+            ("resume", Command::ResumeSession),
+        ] {
+            let matches = with_query(query).matches(false);
+            assert_eq!(
+                matches.first().map(|e| e.command),
+                Some(command),
+                "\"{query}\" should lead with {command:?}"
+            );
+        }
     }
 
     #[test]

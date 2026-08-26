@@ -271,11 +271,22 @@ impl KimiGuiApp {
     }
 
     /// Open a session on the configured remote — what the connect button
-    /// does once it is green.
+    /// does once it is green. The palette's "New remote session" shares it,
+    /// so both answer for the states where there is nothing to open.
     fn open_remote_session(&mut self, ctx: &egui::Context) {
         let Some(link) = &self.link else {
+            self.unconfigured_connect();
             return;
         };
+        if link.light() != LinkLight::Connected {
+            self.error = Some(format!(
+                "the daemon at {} has not answered yet.\n\n\
+                 Connect first (chain button or \"Connect to remote\"), then \
+                 retry once the light turns green.",
+                link.remote().endpoint
+            ));
+            return;
+        }
         let remote = link.remote();
         let target = SessionTarget::Remote(remote.name.clone(), remote.endpoint.clone());
         // No args: the daemon supplies the work directory, because this
@@ -476,6 +487,8 @@ impl KimiGuiApp {
             Command::ResumeSession => self.open_resume_menu(ctx),
             Command::CloseSession => self.request_close(self.active),
             Command::ConnectRemote => self.connect_remote(ctx),
+            Command::NewRemoteSession => self.open_remote_session(ctx),
+            Command::OpenRemoteSession => self.open_remote_resume_menu(ctx),
             Command::CycleTheme => self.cycle_theme(ctx),
             Command::OpenConfig => self.open_path(kimi_agent::config::get_config_file()),
             Command::OpenMcpConfig => {
@@ -617,11 +630,6 @@ impl KimiGuiApp {
 
     /// Show the resume list and re-list what is on disk behind it.
     fn open_resume_menu(&mut self, ctx: &egui::Context) {
-        self.resume_open = true;
-        self.resume_cursor = 0;
-        self.resume_scroll = true;
-        // A different tab may be active than last time: re-list from the
-        // machine being looked at now, and drop rows from the other one.
         let target = self.active_target();
         if target != self.resume_source {
             self.resume_sessions.clear();
@@ -630,6 +638,46 @@ impl KimiGuiApp {
         if self.resume_listing.is_none() {
             self.start_resume_listing(ctx, target);
         }
+        // The list itself is shown regardless of the listing's state; the
+        // window renders "loading" while a result is in flight.
+        self.show_resume_list();
+    }
+
+    /// Show the resume list pointed at the connected daemon's machine —
+    /// the palette's "Open remote session". Unlike `Ctrl+O` this does not
+    /// follow the active tab: the machine is the point, so it is named in
+    /// the error when there is nothing to point at yet.
+    fn open_remote_resume_menu(&mut self, ctx: &egui::Context) {
+        let Some(link) = &self.link else {
+            self.unconfigured_connect();
+            return;
+        };
+        if link.light() != LinkLight::Connected {
+            self.error = Some(format!(
+                "the daemon at {} has not answered yet.\n\n\
+                 Connect first (chain button or \"Connect to remote\"), then \
+                 retry once the light turns green.",
+                link.remote().endpoint
+            ));
+            return;
+        }
+        let remote = link.remote();
+        let target = SessionTarget::Remote(remote.name.clone(), remote.endpoint.clone());
+        if target != self.resume_source {
+            self.resume_sessions.clear();
+            self.resume_listing = None;
+        }
+        if self.resume_listing.is_none() {
+            self.start_resume_listing(ctx, target);
+        }
+        self.show_resume_list();
+    }
+
+    /// Open the resume overlay. Callers arrange the listing first.
+    fn show_resume_list(&mut self) {
+        self.resume_open = true;
+        self.resume_cursor = 0;
+        self.resume_scroll = true;
     }
 
     /// Open a past session in a new tab (`kimi-agent -w <dir> --session <id>`)
