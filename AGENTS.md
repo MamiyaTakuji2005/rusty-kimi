@@ -1,8 +1,7 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in this repository. Read this before making changes.
-`CLAUDE.md` (repo root) carries a condensed version of the same rules — when they
-conflict with reality, trust the code.
+Guidance for AI coding agents working in this repository. Read this before making
+changes; where these notes and the code disagree, trust the code.
 
 ## Project overview
 
@@ -85,6 +84,11 @@ the loop**.
   flow/Ralph runner) → `tools/` dispatch; `wire/server.rs` exposes the stdio
   JSON-RPC server. The agent process owns session persistence (writes its own
   `wire.jsonl` / `context.jsonl` under `~/.kimi`).
+- **Wire surface**: the frontend sends `initialize` / `prompt` / `cancel` /
+  `replay` / `steer` plus approval replies; the agent answers with typed
+  events (`TurnBegin`, `StepBegin`, `ContentPart`, `ToolResult`,
+  `StatusUpdate`, `TurnEnd`, …). The full lists are `wire/types.rs` and the
+  method dispatch in `wire/server.rs`.
 
 ## Compatibility contract (must-follow)
 
@@ -221,6 +225,17 @@ scrollback is index arithmetic on the row list).
 tab), `render.rs` (transcript block widgets), `theme.rs` (light/dark/Kimi
 palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
 (open-in-default-app); transcript/session-list moved to `wire-client`.
+
+**Palette vs. slash commands — a deliberate boundary, held strictly.** The
+command palette is for **GUI and orchestration only**: commands that act on the
+app and its tabs (open/close/resume sessions, connect a remote, cycle the
+theme, open config files and folders). Anything that changes or affects what
+a **session** does — compaction, model switching, YOLO, forking, skills and
+flows — is a **slash command** owned by the agent (`soul/kimisoul.rs`) and
+typed into the session's input, so it behaves identically in every frontend,
+including headless wire clients. Do not move session behavior into the palette
+(or vice versa): one place per action is what keeps the two from becoming
+confusingly overlapping menus.
 
 **`remote/kimi-bridge/`** — the relay daemon pair (`remote/AGENTS.md` has the
 map; `remote/PLAN.md` the design record). One binary, two subcommands:

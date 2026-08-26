@@ -3,6 +3,16 @@
 //!
 //! Adding a feature here costs one row in [`COMMANDS`] and one arm in
 //! `KimiGuiApp::run_command` — no tab-strip real estate, no new binding.
+//!
+//! The boundary is deliberate and held strictly: palette commands are **GUI
+//! and orchestration only** — they act on the app and its tabs (open, close,
+//! resume, connect, theme, open files and folders), never on what a *session*
+//! does. Anything that changes or affects the session's conversation —
+//! compaction, model switching, YOLO, forking, skills, flows — is a **slash
+//! command** owned by the agent (`kimi-agent`'s soul) and typed into the
+//! session's input, so it works identically in every frontend. Do not add
+//! session behavior here; one place per action is what keeps the two menus
+//! from overlapping into confusion.
 
 /// One palette entry. `Session` commands are hidden while no session is open,
 /// since every one of them acts on the active tab.
