@@ -755,11 +755,12 @@ impl KimiGuiApp {
                     } else if session.is_running() {
                         text = RichText::new(format!("▶ {}", session.title));
                     }
-                    if ui.selectable_label(index == self.active, text).clicked() {
+                    let (tab, close_button) =
+                        bar.tab_with_close(ui, index == self.active, text, &colors);
+                    if tab.clicked() {
                         self.active = index;
                     }
-                    if bar
-                        .square(ui, RichText::new("×").weak())
+                    if close_button
                         .on_hover_text("close session (Ctrl+T)")
                         .clicked()
                     {

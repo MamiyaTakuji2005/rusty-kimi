@@ -24,6 +24,22 @@ const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
+/// A neutral glyph color that stays readable on `fill`: white on dark fills,
+/// black on light ones. The themes' error reds span both — light and dark
+/// themes use saturated reds, the Kimi theme a pastel one — so no fixed
+/// color works for all three.
+fn ink_on(fill: Color32) -> Color32 {
+    // Rec. 601 luminance: the classic cheap approximation of perceived
+    // brightness, plenty for choosing between two extremes.
+    let luma =
+        0.299 * f32::from(fill.r()) + 0.587 * f32::from(fill.g()) + 0.114 * f32::from(fill.b());
+    if luma > 127.0 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
 /// Moon phases, waxing. Segoe UI Symbol carries all eight, and `app.rs`
 /// installs it as a fallback font, so these render as monochrome glyphs.
 /// `app.rs` has a test asserting that coverage — without a font behind them
@@ -108,6 +124,54 @@ impl BarStyle {
             ui.spacing_mut().button_padding.x = 0.0;
             ui.add(egui::Button::new(label).min_size(side))
         })
+        .inner
+    }
+
+    /// One session tab and the × that closes it, laid out as a single thing:
+    /// no gap between the two, and the wrapping strip sees the pair as one
+    /// item, so they move to the next row together. When the tab is the one
+    /// in focus — highlighted like the tab itself — the × carries the theme's
+    /// error red with a strong, readable glyph, the close affordance of the
+    /// thing you are looking at, instead of its usual quiet weak one.
+    pub fn tab_with_close(
+        self,
+        ui: &mut egui::Ui,
+        selected: bool,
+        text: RichText,
+        colors: &Colors,
+    ) -> (egui::Response, egui::Response) {
+        // One item for the wrapping strip. `ui.horizontal` would ask for the
+        // whole remaining row as its desired width and land the pair on a
+        // row of its own; asking for nothing and growing into the content is
+        // what makes the strip see a tab-sized item.
+        ui.allocate_ui_with_layout(
+            egui::vec2(0.0, self.height),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let tab = ui.selectable_label(selected, text);
+                let side = egui::Vec2::splat(self.height);
+                let label = if selected {
+                    RichText::new("×").color(ink_on(colors.error))
+                } else {
+                    RichText::new("×").weak()
+                };
+                let mut button = egui::Button::new(label).min_size(side);
+                if selected {
+                    // An explicit fill owns the button in every state —
+                    // egui's own hover fills step aside for it, and the
+                    // brightening glyph is feedback enough.
+                    button = button.fill(colors.error);
+                }
+                let close = ui
+                    .scope(|ui| {
+                        ui.spacing_mut().button_padding.x = 0.0;
+                        ui.add(button)
+                    })
+                    .inner;
+                (tab, close)
+            },
+        )
         .inner
     }
 }
@@ -426,6 +490,81 @@ mod tests {
         };
         // Spacing is the one thing they share, so the two rows align.
         assert_eq!(SESSION_BAR.spacing, FORK_BAR.spacing);
+    }
+
+    /// A tab and its × are one thing: they touch, with no gap, while the
+    /// pair keeps the bar's spacing to its neighbours — only the bond inside
+    /// is tight. Both halves ride the bar's row, whatever the tab's title
+    /// does to its width.
+    #[test]
+    fn test_the_close_button_hugs_its_tab() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        // Fonts are built lazily; the first pass measures against a fallback.
+        let _ = ctx.run(input.clone(), |_| {});
+        let bar = SESSION_BAR;
+        let mut pairs = Vec::new();
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // The strip the app lays tabs out in: one wrapping row.
+                ui.horizontal_wrapped(|ui| {
+                    bar.apply(ui);
+                    for title in ["alpha", "beta"] {
+                        pairs.push(bar.tab_with_close(
+                            ui,
+                            title == "alpha",
+                            egui::RichText::new(title),
+                            &Theme::Dark.colors(),
+                        ));
+                    }
+                });
+            });
+        });
+        for (tab, close) in &pairs {
+            assert_eq!(tab.rect.height(), bar.height);
+            assert_eq!(close.rect.height(), bar.height);
+        }
+        let (tab, close) = &pairs[0];
+        assert_eq!(
+            close.rect.left(),
+            tab.rect.right(),
+            "a gap sneaked in between the tab and its ×"
+        );
+        // The bond is only inside the pair: the next tab still starts a full
+        // item spacing away from the × that ended the last one, and both
+        // pairs ride the same row — a pair that asked for the whole strip's
+        // width would land on a row of its own.
+        let (_, first_close) = &pairs[0];
+        let (next_tab, _) = &pairs[1];
+        assert_eq!(next_tab.rect.top(), first_close.rect.top());
+        assert!(
+            (next_tab.rect.left() - first_close.rect.right() - bar.spacing).abs() < 0.01,
+            "the pair broke the strip's rhythm"
+        );
+    }
+
+    /// The focused tab's × is inked to stay readable on its red fill, in
+    /// every theme — including the Kimi theme's pastel error, where a white
+    /// glyph would vanish.
+    #[test]
+    fn test_the_close_ink_reads_on_every_error_red() {
+        let luma = |c: egui::Color32| {
+            0.299 * f32::from(c.r()) + 0.587 * f32::from(c.g()) + 0.114 * f32::from(c.b())
+        };
+        for theme in [Theme::Light, Theme::Dark, Theme::Kimi] {
+            let fill = theme.colors().error;
+            let ink = super::ink_on(fill);
+            assert!(
+                (luma(ink) - luma(fill)).abs() >= 100.0,
+                "{theme:?}: ink on its error red does not read"
+            );
+        }
     }
 
     #[test]
