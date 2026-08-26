@@ -28,7 +28,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -37,7 +37,7 @@ use wire_client::session_list::{ResumeEntry, spawn_session_listing};
 use crate::agent::{AgentSession, Phase};
 use crate::input::Editor;
 use crate::render::{RenderedTranscript, Row, push_display_block_lines};
-use wire_client::transcript::Block;
+use wire_client::transcript::Block as TranscriptBlock;
 
 /// What wakes the loop. Wire traffic and key presses land on one channel so a
 /// single `recv_timeout` serves both.
@@ -100,8 +100,11 @@ struct App {
     rendered_width: u16,
     /// Transcript version the rows were built from (see `Transcript::version`).
     rendered_version: u64,
-    /// Which transcript (main vs subagent tab) the rows were built from.
-    rendered_source: usize,
+    /// Which transcript (None = main, Some = subagent index) the rows were
+    /// built from.
+    rendered_source: Option<usize>,
+    /// Set when the visible source switched; forces the next rebuild.
+    rendered_dirty: bool,
     /// Index just past the last visible row (`rendered.len()` = pinned to live).
     scroll_bottom: usize,
     overlay: Overlay,
@@ -250,8 +253,9 @@ impl App {
             rendered: RenderedTranscript::new(),
             rendered_width: 0,
             rendered_version: 0,
-            // usize::MAX forces the first rebuild.
-            rendered_source: usize::MAX,
+            rendered_source: None,
+            // Force the first rebuild.
+            rendered_dirty: true,
             scroll_bottom: 0, // set on first rebuild
             overlay: Overlay::None,
             resume_entries: Vec::new(),
@@ -305,22 +309,23 @@ impl App {
             Some(index) => self.session.transcript.subagents[index].transcript.version,
         };
 
-        let force = self.rendered_source == usize::MAX;
+        let force = self.rendered_dirty;
         if force
             || self.rendered_width != width
-            || self.rendered_source != source.unwrap_or(usize::MAX)
+            || self.rendered_source != source
             || self.rendered_version != version
         {
             let was_pinned = self.scroll_bottom >= self.rendered.len();
             let from_tail = self.rendered.len().saturating_sub(self.scroll_bottom);
-            let blocks: &[Block] = match source {
+            let blocks: &[TranscriptBlock] = match source {
                 None => &self.session.transcript.blocks,
                 Some(index) => &self.session.transcript.subagents[index].transcript.blocks,
             };
             self.rendered = RenderedTranscript::rebuild(blocks, width, running);
             self.rendered_width = width;
             self.rendered_version = version;
-            self.rendered_source = source.unwrap_or(usize::MAX);
+            self.rendered_source = source;
+            self.rendered_dirty = false;
             self.scroll_bottom = if was_pinned {
                 self.rendered.len()
             } else {
@@ -502,7 +507,7 @@ impl App {
             Some(subagents[next - 1].task_tool_call_id.clone())
         };
         // The visible block set changed; force a rebuild.
-        self.rendered_source = usize::MAX;
+        self.rendered_dirty = true;
     }
 
     fn scroll_by(&mut self, delta: i32) {
@@ -527,22 +532,27 @@ impl App {
     fn draw(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
         // Layout, Python-shell style — no boxes anywhere:
+        //   ✨ main · ▶ coder · researcher     (tab strip, only when forks exist)
         //   transcript rows …
         //   ── input · hint ──────────────────
         //   ✨ <editor>
         //   ─────────────────────────────────
         //   status line (dim)
+        let has_subtabs = !self.session.transcript.subagents.is_empty();
+        let tab_height = u16::from(has_subtabs);
         let separator_height = 1u16;
         let editor_height = 1u16;
         let status_height = 1u16;
 
         let [
+            tab_area,
             transcript_area,
             input_sep,
             editor_area,
             status_sep,
             status_area,
         ] = Layout::vertical([
+            Constraint::Length(tab_height),
             Constraint::Min(1),
             Constraint::Length(separator_height),
             Constraint::Length(editor_height),
@@ -550,6 +560,11 @@ impl App {
             Constraint::Length(status_height),
         ])
         .areas(area);
+
+        // --- tab strip ------------------------------------------------------
+        if has_subtabs {
+            frame.render_widget(self.tab_strip(area.width), tab_area);
+        }
 
         // --- transcript ---------------------------------------------------
         let viewport_height = transcript_area.height as usize;
@@ -559,8 +574,6 @@ impl App {
         if lines.is_empty() {
             lines.push(Line::from(Span::styled("starting…", theme::dim())));
         }
-        // The title lives in the input rule; the transcript itself is bare.
-        let _ = lines.len();
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }),
             transcript_area,
@@ -638,6 +651,50 @@ impl App {
             .map(|sub| sub.title.clone())
     }
 
+    /// The top tab strip: `✨ main · ▶ coder · researcher` — the active tab
+    /// bold in the accent color, still-running forks marked `▶` in yellow,
+    /// finished ones dim. Mirrors kimi-gui's fork row.
+    fn tab_strip(&self, width: u16) -> Paragraph<'static> {
+        let mut spans = vec![Span::styled("✨ ", theme::accent())];
+        // Main first, then subagents in spawn order — same walk as Tab.
+        let active_index = self.active_subtab.as_deref().and_then(|id| {
+            self.session
+                .transcript
+                .subagents
+                .iter()
+                .position(|s| s.task_tool_call_id == id)
+        });
+        let push_tab =
+            |spans: &mut Vec<Span<'static>>, label: String, active: bool, running: bool| {
+                if spans.len() > 1 {
+                    spans.push(Span::styled(" · ", theme::dim()));
+                }
+                let style = if active {
+                    theme::title()
+                } else if running {
+                    Style::default().fg(theme::WARNING)
+                } else {
+                    theme::dim()
+                };
+                if running && !active {
+                    spans.push(Span::styled("▶ ", style));
+                }
+                spans.push(Span::styled(label, style));
+            };
+        push_tab(
+            &mut spans,
+            "main".to_string(),
+            active_index.is_none(),
+            self.session.phase == Phase::Running,
+        );
+        for (index, sub) in self.session.transcript.subagents.iter().enumerate() {
+            let mut label = sub.title.clone();
+            truncate_chars(&mut label, width.saturating_sub(12).max(16) as usize);
+            push_tab(&mut spans, label, Some(index) == active_index, !sub.done);
+        }
+        Paragraph::new(Line::from(spans))
+    }
+
     fn status_line(&self, width: u16) -> Paragraph<'static> {
         let t = &self.session.transcript.status;
         let mut left = match &self.session.phase {
@@ -685,13 +742,10 @@ impl App {
             self.overlay = Overlay::None;
             return;
         };
-        let w = area.width.saturating_sub(8).max(40).min(area.width);
-        let h = area.height.saturating_sub(6).max(9).min(area.height);
-        let popup = centered_rect(frame.area(), w, h);
-        frame.render_widget(Clear, popup);
 
-        // Python-shell modal look: accent title, hairline rule under it,
-        // plain content, key hints on a dim rule. No box.
+        // Build the inner content once to measure it; the box then hugs the
+        // text instead of eating the screen.
+        let content_width = area.width.saturating_sub(4).max(20).min(100);
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("✨ ", theme::accent()),
@@ -701,26 +755,53 @@ impl App {
                     theme::dim(),
                 ),
             ]),
-            Line::from(Span::styled("─".repeat(popup.width as usize), theme::dim())),
+            Line::from(""),
             Line::from(info.description.clone()),
             Line::from(""),
         ];
         // Display blocks (command previews etc.), dim like tool output.
         for block in &info.display {
-            push_display_block_lines(&mut lines, block, popup.width);
+            push_display_block_lines(&mut lines, block, content_width);
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "─".repeat(popup.width as usize),
-            theme::dim(),
-        )));
         lines.push(Line::from(vec![
             Span::styled("[1] approve   ", theme::success()),
             Span::styled("[2] approve for session   ", theme::success()),
             Span::styled("[3] reject   ", theme::error()),
             Span::styled("[Esc] later", theme::dim()),
         ]));
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), popup);
+
+        // Height = wrapped line count (approximate long lines at the content
+        // width) + border + one padding row top and bottom.
+        let wrapped: usize = lines
+            .iter()
+            .map(|line| {
+                let text: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+                (text / content_width.max(1) as usize).max(1)
+            })
+            .sum();
+        let height = (wrapped as u16 + 4)
+            .min(area.height.saturating_sub(2))
+            .max(6);
+        let width = (content_width + 2).min(area.width.saturating_sub(2));
+        let popup = centered_rect(area, width, height);
+
+        let block = Block::bordered()
+            .border_style(Style::default().fg(theme::ACCENT))
+            .title(Span::styled(
+                " approval ",
+                Style::default()
+                    .fg(theme::ACCENT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .padding(Padding::horizontal(1));
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(block),
+            popup,
+        );
     }
 
     fn draw_resume(&mut self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
@@ -774,5 +855,13 @@ fn centered_rect(outer: ratatui::layout::Rect, w: u16, h: u16) -> ratatui::layou
         y: outer.y + (outer.height - h) / 2,
         width: w,
         height: h,
+    }
+}
+
+/// Clip `text` to `max` chars, appending `…` when something was cut.
+fn truncate_chars(text: &mut String, max: usize) {
+    if text.chars().count() > max.saturating_sub(1) {
+        let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+        *text = format!("{cut}…");
     }
 }
