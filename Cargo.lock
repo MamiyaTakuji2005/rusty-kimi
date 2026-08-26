@@ -1673,9 +1673,7 @@ dependencies = [
  "ahash",
  "egui",
  "enum-map",
- "image",
  "log",
- "mime_guess2",
  "profiling",
 ]
 
@@ -3430,18 +3428,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mime_guess2"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1706dc14a2e140dec0a7a07109d9a3d5890b81e85bd6c60b906b249a77adf0ca"
-dependencies = [
- "mime",
- "phf 0.11.3",
- "phf_shared 0.11.3",
- "unicase",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4329,7 +4315,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.114",
- "unicase",
 ]
 
 [[package]]
@@ -4352,7 +4337,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
 dependencies = [
  "siphasher",
- "unicase",
 ]
 
 [[package]]

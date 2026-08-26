@@ -1275,9 +1275,16 @@ fn install_fallback_fonts(ctx: &egui::Context) -> usize {
         let Some(bytes) = candidates.iter().find_map(|p| std::fs::read(p).ok()) else {
             continue;
         };
+        // Leaked on purpose. These files are large — a CJK .ttc is over 10 MB
+        // — and egui keeps them for the process lifetime either way. The
+        // difference is that `FontData::from_owned` hands egui a `Cow::Owned`,
+        // which its font cache *clones in full* per font, and clones again
+        // every time `pixels_per_point` changes (dragging the window to a
+        // monitor with different DPI). `from_static` takes the borrowed path
+        // instead and parses the bytes in place, so they are stored once.
         fonts.font_data.insert(
             name.to_owned(),
-            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            std::sync::Arc::new(egui::FontData::from_static(bytes.leak())),
         );
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
             fonts
