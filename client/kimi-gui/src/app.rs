@@ -291,15 +291,38 @@ impl KimiGuiApp {
         self.error = Some(match &self.config_error {
             Some(err) => format!("bridge config is broken:\n\n{err}"),
             None => format!(
-                "no remote is configured.\n\nAdd one to {}:\n\n\
-                 [[remotes]]\n\
-                 name = \"vps\"\n\
-                 endpoint = \"127.0.0.1:9000\"\n\
-                 tunnel = \"ssh -N -L 9000:127.0.0.1:9000 user@vps\"\n\
-                 default = true",
-                remotes::path().display()
+                "no remote is configured.\n\nAdd one to {}:\n\n{}",
+                remotes::path().display(),
+                remotes_skeleton()
             ),
         });
+    }
+
+    /// What the chain button and the palette both mean by "connect": green
+    /// opens a remote session tab, anything else starts the connection (or
+    /// retries it now), and nothing configured explains what the file wants.
+    fn connect_remote(&mut self, ctx: &egui::Context) {
+        match self.link.as_mut() {
+            Some(link) if link.light() == LinkLight::Connected => self.open_remote_session(ctx),
+            Some(link) => link.connect(),
+            None => self.unconfigured_connect(),
+        }
+    }
+
+    /// Open `bridge.toml` in the default editor. Creating it is the user's
+    /// call, so a missing file gets the skeleton and the path it belongs at
+    /// rather than an empty editor window that silently does nothing.
+    fn open_bridge_config(&mut self) {
+        let path = remotes::path();
+        if path.exists() {
+            self.open_path(path);
+        } else {
+            self.error = Some(format!(
+                "{} does not exist yet.\n\nCreate it with a remote:\n\n{}",
+                path.display(),
+                remotes_skeleton()
+            ));
+        }
     }
 
     fn close_session(&mut self, index: usize) {
@@ -452,11 +475,13 @@ impl KimiGuiApp {
             Command::NewSession => self.start_folder_pick(ctx),
             Command::ResumeSession => self.open_resume_menu(ctx),
             Command::CloseSession => self.request_close(self.active),
+            Command::ConnectRemote => self.connect_remote(ctx),
             Command::CycleTheme => self.cycle_theme(ctx),
             Command::OpenConfig => self.open_path(kimi_agent::config::get_config_file()),
             Command::OpenMcpConfig => {
                 self.open_path(kimi_agent::mcp::get_global_mcp_config_file());
             }
+            Command::OpenBridgeConfig => self.open_bridge_config(),
             Command::OpenLogFolder => self.open_path(share_dir().join("logs")),
             Command::OpenShareFolder => self.open_path(share_dir()),
             Command::OpenWorkDir => {
@@ -769,12 +794,7 @@ impl KimiGuiApp {
         match link_click {
             // Green means there is something to open; anything else means
             // the user wants the connection to start (or to retry now).
-            Some(true) => match self.link.as_mut() {
-                Some(link) if link.light() == LinkLight::Connected => self.open_remote_session(ctx),
-                Some(link) => link.connect(),
-                // Yellow with nothing behind it: explain what it wants.
-                None => self.unconfigured_connect(),
-            },
+            Some(true) => self.connect_remote(ctx),
             Some(false) => {
                 if let Some(link) = self.link.as_mut() {
                     link.disconnect();
@@ -1058,6 +1078,19 @@ impl eframe::App for KimiGuiApp {
             session.shutdown();
         }
     }
+}
+
+/// The `[[remotes]]` skeleton shown wherever the user is pointed at the file
+/// that names a remote — the connect button's dead end, and the palette's
+/// open-bridge.toml when the file does not exist yet. One remote, an
+/// endpoint, and the tunnel that reaches it.
+fn remotes_skeleton() -> String {
+    "[[remotes]]\n\
+     name = \"vps\"\n\
+     endpoint = \"127.0.0.1:9000\"\n\
+     tunnel = \"ssh -N -L 9000:127.0.0.1:9000 user@vps\"\n\
+     default = true"
+        .into()
 }
 
 /// Open the native OS folder picker on a background thread (it blocks while

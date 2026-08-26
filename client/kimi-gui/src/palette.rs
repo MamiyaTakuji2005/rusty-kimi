@@ -11,9 +11,11 @@ pub enum Command {
     NewSession,
     ResumeSession,
     CloseSession,
+    ConnectRemote,
     CycleTheme,
     OpenConfig,
     OpenMcpConfig,
+    OpenBridgeConfig,
     OpenLogFolder,
     OpenShareFolder,
     OpenWorkDir,
@@ -53,6 +55,13 @@ pub const COMMANDS: &[Entry] = &[
         needs_session: true,
     },
     Entry {
+        command: Command::ConnectRemote,
+        title: "Connect to remote",
+        detail: "the chain button — green opens a remote session",
+        binding: None,
+        needs_session: false,
+    },
+    Entry {
         command: Command::CycleTheme,
         title: "Cycle theme",
         detail: "light, dark, Kimi",
@@ -70,6 +79,13 @@ pub const COMMANDS: &[Entry] = &[
         command: Command::OpenMcpConfig,
         title: "Open mcp.json",
         detail: "MCP server configuration",
+        binding: None,
+        needs_session: false,
+    },
+    Entry {
+        command: Command::OpenBridgeConfig,
+        title: "Open bridge.toml",
+        detail: "remote endpoints and tunnels, in the default editor",
         binding: None,
         needs_session: false,
     },
@@ -227,6 +243,24 @@ mod tests {
     fn test_abbreviation_finds_the_command() {
         let palette = with_query("opcfg");
         assert_eq!(titles(&palette, true).first(), Some(&"Open config.toml"));
+    }
+
+    #[test]
+    fn test_connect_finds_the_remote_command() {
+        let palette = with_query("connect");
+        let matches = palette.matches(false);
+        assert_eq!(
+            matches.first().map(|e| e.command),
+            Some(Command::ConnectRemote)
+        );
+    }
+
+    #[test]
+    fn test_bridge_finds_the_bridge_config() {
+        // Reachable with no session open: the file can be edited before any
+        // remote exists to connect to.
+        let palette = with_query("bridge");
+        assert_eq!(titles(&palette, false).first(), Some(&"Open bridge.toml"));
     }
 
     #[test]
