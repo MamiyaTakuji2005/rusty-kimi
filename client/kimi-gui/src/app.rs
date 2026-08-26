@@ -5,8 +5,9 @@
 //! Session creation lives in the tab strip: the `+` button opens the native
 //! OS folder picker and instantly starts a session in the chosen directory,
 //! while the three buttons pinned to the right edge open the resume menu
-//! with every past session found under `~/.kimi`, connect to the configured
-//! remote, and cycle the theme.
+//! with every past session found under `~/.kimi`, manage the connection to
+//! the configured remote — the chain button stays yellow until a daemon
+//! answers, and exists even when none is configured — and cycle the theme.
 //!
 //! Sessions are **per-tab local or remote**: a tab either owns a
 //! `kimi-agent` child process here, or speaks to one through a `kimi-bridge`
@@ -65,10 +66,15 @@ enum FocusOwner {
 
 pub struct KimiGuiApp {
     agent_bin: String,
-    /// The configured remote and its connection state, when this machine
-    /// knows of one. Sessions are per-tab: this is what the tab strip's
-    /// connect button opens new remote tabs against, not a window-wide mode.
+    /// The configured remote and its connection state. `None` means no
+    /// remote is configured (or the config is broken — see `config_error`);
+    /// the connect button is still there, painting yellow. Sessions are
+    /// per-tab: this is what the tab strip's connect button opens new remote
+    /// tabs against, not a window-wide mode.
     link: Option<RemoteLink>,
+    /// Why `bridge.toml` could not be read, when it exists but is broken —
+    /// the connect button is where the user learns of it.
+    config_error: Option<String>,
     sessions: Vec<Session>,
     active: usize,
     next_session_id: usize,
@@ -140,8 +146,23 @@ impl KimiGuiApp {
         theme.apply(&cc.egui_ctx);
 
         // `--remote` names the remote the first tab opens on; without it a
-        // configured default still gets a button, just no session yet.
-        let configured = remotes::load()?;
+        // configured default still gets a button, just no session yet. A
+        // broken bridge.toml must not take the GUI down: the connect button
+        // is always there, and it is where the error surfaces.
+        let config_error;
+        let configured = match remotes::load() {
+            Ok(remotes) => {
+                config_error = None;
+                remotes
+            }
+            Err(error) if remote.is_none() => {
+                config_error = Some(error);
+                Vec::new()
+            }
+            // A remote was explicitly asked for: the broken file is the
+            // reason it cannot be had, so it is the error to fail with.
+            Err(error) => return Err(error),
+        };
         let chosen = match &remote {
             Some(spec) => Some(remotes::resolve(spec, &configured)?),
             None => remotes::default_remote(&configured).cloned(),
@@ -164,6 +185,7 @@ impl KimiGuiApp {
         let mut app = Self {
             agent_bin: agent_bin.to_string(),
             link,
+            config_error,
             sessions: Vec::new(),
             active: 0,
             next_session_id: 1,
@@ -261,6 +283,23 @@ impl KimiGuiApp {
         if let Err(error) = self.open_session(Vec::new(), ctx, None, &target) {
             self.error = Some(error);
         }
+    }
+
+    /// What a click on the connect button means with no remote behind it:
+    /// not a dead end, but a pointer to the file that names one.
+    fn unconfigured_connect(&mut self) {
+        self.error = Some(match &self.config_error {
+            Some(err) => format!("bridge config is broken:\n\n{err}"),
+            None => format!(
+                "no remote is configured.\n\nAdd one to {}:\n\n\
+                 [[remotes]]\n\
+                 name = \"vps\"\n\
+                 endpoint = \"127.0.0.1:9000\"\n\
+                 tunnel = \"ssh -N -L 9000:127.0.0.1:9000 user@vps\"\n\
+                 default = true",
+                remotes::path().display()
+            ),
+        });
     }
 
     fn close_session(&mut self, index: usize) {
@@ -633,13 +672,23 @@ impl KimiGuiApp {
             // frame is replaced with a bare horizontal margin — a nested panel
             // brings its own vertical padding, which stacks on the strip's own
             // and puts the buttons in a band half again their height.
-            // The connect button only exists when a remote is configured;
-            // the strip is that much narrower without one.
-            let link_state = self
-                .link
-                .as_ref()
-                .map(|link| (link.light(), link.hover_text()));
-            let width = if link_state.is_some() { 99.0 } else { 66.0 };
+            // The connect button is always there — yellow with no remote
+            // configured, yellow while one does not answer — so the strip
+            // never changes width and the button never moves.
+            let link_state = match self.link.as_ref() {
+                Some(link) => (link.light(), link.hover_text()),
+                None => (
+                    LinkLight::Trying,
+                    match &self.config_error {
+                        Some(err) => format!("bridge config broken:\n{err}\nclick for details"),
+                        None => format!(
+                            "no remote configured\nclick for how to add one to {}",
+                            remotes::path().display()
+                        ),
+                    },
+                ),
+            };
+            let width = 99.0;
             let (book, link, paint) = egui::SidePanel::right("tabs_right")
                 .resizable(false)
                 .exact_width(width)
@@ -649,14 +698,9 @@ impl KimiGuiApp {
                         let book = bar
                             .square(ui, "📖")
                             .on_hover_text("resume a session (Ctrl+O)");
-                        let link = link_state.map(|(light, hover)| {
-                            let glyph = RichText::new("●").color(match light {
-                                LinkLight::Connected => colors.success,
-                                LinkLight::Trying => colors.warning,
-                                LinkLight::Blank => ui.visuals().weak_text_color(),
-                            });
-                            bar.square(ui, glyph).on_hover_text(hover)
-                        });
+                        let (light, hover) = link_state;
+                        let link = crate::remote_link::link_button(bar, ui, light, &colors)
+                            .on_hover_text(hover);
                         let paint = bar.square(ui, theme.glyph()).on_hover_text(theme.hover());
                         (book, link, paint)
                     })
@@ -666,14 +710,10 @@ impl KimiGuiApp {
             if book.clicked() {
                 refresh_resume = true;
             }
-            if let Some(link) = link {
-                // Left: connect, or open a session once connected. Right:
-                // hang up, which is the only way to stop the tunnel.
-                if link.clicked() {
-                    link_click = Some(true);
-                } else if link.secondary_clicked() {
-                    link_click = Some(false);
-                }
+            if link.clicked() {
+                link_click = Some(true);
+            } else if link.secondary_clicked() {
+                link_click = Some(false);
             }
             if paint.clicked() {
                 cycle_theme = true;
@@ -732,7 +772,8 @@ impl KimiGuiApp {
             Some(true) => match self.link.as_mut() {
                 Some(link) if link.light() == LinkLight::Connected => self.open_remote_session(ctx),
                 Some(link) => link.connect(),
-                None => {}
+                // Yellow with nothing behind it: explain what it wants.
+                None => self.unconfigured_connect(),
             },
             Some(false) => {
                 if let Some(link) = self.link.as_mut() {

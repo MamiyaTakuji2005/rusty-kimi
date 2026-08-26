@@ -12,6 +12,10 @@
 //! green    the daemon answered — sessions can be opened
 //! ```
 //!
+//! The button is drawn by [`link_button`]: the state color fills the whole
+//! square and a chain link is inked over it, the two halves pulling apart
+//! as the light goes blank — the icon survives its hue.
+//!
 //! Probing happens on a background thread with a short timeout, never on the
 //! UI thread. The cadence is deliberately lazy once connected: a green light
 //! that goes stale for a few seconds costs nothing, and the probe opens a
@@ -20,6 +24,10 @@
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
+use eframe::egui::emath::Rot2;
+use eframe::egui::{self, Color32, Pos2, Rect, Response, Shape, Stroke, Ui, Vec2};
+
+use crate::theme::{BarStyle, Colors};
 use wire_client::bridge;
 use wire_client::remotes::Remote;
 use wire_client::tunnel::{Tunnel, TunnelState};
@@ -44,6 +52,24 @@ pub enum LinkLight {
     Trying,
     /// The daemon answered: a click opens a session.
     Connected,
+}
+
+impl LinkLight {
+    /// The chain's fill: the whole button carries the state color. Same pair
+    /// as the old dot, promoted from a glyph to the button itself.
+    pub fn fill(self, colors: &Colors, weak: Color32) -> Color32 {
+        match self {
+            Self::Connected => colors.success,
+            Self::Trying => colors.warning,
+            Self::Blank => weak,
+        }
+    }
+
+    /// The chain's stroke — ink against a filled button. The blank state's
+    /// fill comes from the UI, so its "stroke" color is a readable no-op.
+    pub fn ink(self, fill: Color32) -> Color32 {
+        Color32::from_rgb(255 - fill.r(), 255 - fill.g(), 255 - fill.b())
+    }
 }
 
 /// The live connection state for one configured remote.
@@ -215,6 +241,88 @@ impl RemoteLink {
     }
 }
 
+/// Blank margin between the button's square and the chain glyph.
+const LINK_MARGIN: f32 = 2.0;
+
+/// The connect button: the state color fills the whole square and a chain
+/// glyph is inked on top of it. Painted rather than a font glyph so the ink
+/// can follow the fill's luminance and the chain can pull apart with the
+/// state — a font gives neither, and a ● at this size reads as an
+/// off-center dot.
+pub fn link_button(bar: BarStyle, ui: &mut Ui, light: LinkLight, colors: &Colors) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(bar.height), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    // Hover and press keep egui's own fills, so the button still feels like
+    // the ones beside it; the state color owns the button at rest.
+    let fill = if response.hovered() {
+        visuals.weak_bg_fill
+    } else {
+        light.fill(colors, ui.visuals().weak_text_color())
+    };
+    ui.painter().rect(
+        rect,
+        visuals.corner_radius,
+        fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    paint_chain(ui.painter(), rect, light, light.ink(fill));
+    response
+}
+
+/// The chain: two links laid on the diagonal. The gap between them *is* the
+/// state — interlocked when connected, just engaging while trying, pulled
+/// apart when there is nothing to connect to.
+fn paint_chain(painter: &egui::Painter, rect: Rect, light: LinkLight, ink: Color32) {
+    let rect = rect.shrink(LINK_MARGIN);
+    let side = rect.width().min(rect.height());
+    let (half_len, half_wid, thickness) = link_geometry(side);
+    let stroke = Stroke::new(thickness, ink);
+    let diagonal = Rot2::from_angle(-std::f32::consts::FRAC_PI_4);
+    let gap = link_gap(light, side);
+    for offset in [-gap / 2.0, gap / 2.0] {
+        let center = rect.center() + diagonal * Vec2::new(offset, 0.0);
+        painter.add(Shape::convex_polygon(
+            capsule(center, diagonal, half_len, half_wid),
+            Color32::TRANSPARENT,
+            stroke,
+        ));
+    }
+}
+
+/// One link of the chain: a capsule outline with its long axis along `axis`,
+/// as the polygon egui strokes. Sampled point by point because egui's
+/// `rect_stroke` only draws axis-aligned rectangles.
+fn capsule(center: Pos2, axis: Rot2, half_len: f32, half_wid: f32) -> Vec<Pos2> {
+    const STEPS: usize = 12;
+    (0..STEPS)
+        .map(|step| {
+            let phi = step as f32 / STEPS as f32 * std::f32::consts::TAU;
+            let (sin, cos) = phi.sin_cos();
+            // The sign swings the arc between the two ends of the long
+            // axis; the two jumps it makes are the capsule's straight sides.
+            let local = Vec2::new(half_len * cos.signum() + half_wid * cos, half_wid * sin);
+            center + axis * local
+        })
+        .collect()
+}
+
+/// Link proportions as fractions of the painting side: elongated enough to
+/// read as a link, thin enough that the ring's hole survives at bar size.
+fn link_geometry(side: f32) -> (f32, f32, f32) {
+    (0.17 * side, 0.13 * side, 0.08 * side)
+}
+
+/// Center-to-center distance between the two links. Interlocked means the
+/// tips cross (`gap < one link's length`); pulled apart leaves daylight.
+fn link_gap(light: LinkLight, side: f32) -> f32 {
+    match light {
+        LinkLight::Connected => 0.30 * side,
+        LinkLight::Trying => 0.48 * side,
+        LinkLight::Blank => 0.78 * side,
+    }
+}
+
 /// Probe on a background thread; the UI thread never blocks on a socket.
 fn spawn_probe<W>(endpoint: String, wake: W) -> Receiver<Result<String, String>>
 where
@@ -300,5 +408,98 @@ mod tests {
             link.error
         );
         assert!(link.next_probe.is_some(), "a running tunnel may exist");
+    }
+
+    #[test]
+    fn fill_maps_states_to_status_colors() {
+        let colors = crate::theme::Theme::Dark.colors();
+        let weak = Color32::from_rgb(1, 2, 3);
+        assert_eq!(LinkLight::Connected.fill(&colors, weak), colors.success);
+        assert_eq!(LinkLight::Trying.fill(&colors, weak), colors.warning);
+        assert_eq!(LinkLight::Blank.fill(&colors, weak), weak);
+    }
+
+    #[test]
+    fn ink_inverts_its_fill_pairwise() {
+        for fill in [
+            Color32::from_rgb(10, 20, 30),
+            Color32::from_rgb(200, 210, 220),
+        ] {
+            let ink = LinkLight::Blank.ink(fill);
+            // Channels are pairwise complements: light ink on a dark fill
+            // and dark ink on a light one, without naming either.
+            assert_eq!(ink.r() as u16 + fill.r() as u16, 255);
+            assert_eq!(ink.g() as u16 + fill.g() as u16, 255);
+            assert_eq!(ink.b() as u16 + fill.b() as u16, 255);
+        }
+    }
+
+    /// The icon must not need its hue to be read: linked, engaging, apart.
+    #[test]
+    fn the_gap_tells_the_states_apart() {
+        let side = 20.0;
+        let (half_len, half_wid, _) = link_geometry(side);
+        let length = 2.0 * (half_len + half_wid);
+        for light in [LinkLight::Blank, LinkLight::Trying, LinkLight::Connected] {
+            let gap = link_gap(light, side);
+            let overlap = length - gap;
+            match light {
+                LinkLight::Connected => assert!(overlap > 0.2 * side),
+                LinkLight::Trying => assert!(overlap > 0.0 && overlap < 0.2 * side),
+                LinkLight::Blank => assert!(overlap < 0.0, "apart leaves daylight"),
+            }
+        }
+    }
+
+    /// A chain that overflows its square would paint over the strip: the
+    /// pulled-apart extent (gap plus one link plus the stroke) has to fit
+    /// the *button's* diagonal, the widest thing it can travel along.
+    #[test]
+    fn the_chain_fits_its_button_in_every_state() {
+        let button = 24.0; // the session bar's height
+        let side = button - 2.0 * LINK_MARGIN;
+        let (half_len, half_wid, thickness) = link_geometry(side);
+        for light in [LinkLight::Blank, LinkLight::Trying, LinkLight::Connected] {
+            let extent = link_gap(light, side) + 2.0 * (half_len + half_wid) + thickness;
+            assert!(
+                extent <= std::f32::consts::SQRT_2 * button,
+                "{light:?}: chain of {extent} leaves the {button} button"
+            );
+        }
+    }
+
+    /// Painted with `allocate_exact_size`, so this is the guarantee the old
+    /// `BarStyle::square` gave its neighbours: a square like theirs.
+    #[test]
+    fn the_connect_button_is_square_like_its_neighbours() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0))),
+            ..Default::default()
+        };
+        // Fonts are built lazily; the first pass measures against a fallback.
+        let _ = ctx.run(input.clone(), |_| {});
+        let bar = crate::theme::SESSION_BAR;
+        let mut painted: Option<Rect> = None;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                bar.apply(ui);
+                painted = Some(
+                    link_button(
+                        bar,
+                        ui,
+                        LinkLight::Connected,
+                        &crate::theme::Theme::Dark.colors(),
+                    )
+                    .rect,
+                );
+            });
+        });
+        let rect = painted.expect("the button was laid out");
+        assert_eq!(
+            (rect.width(), rect.height()),
+            (bar.height, bar.height),
+            "the connect button must sit in the bar's row"
+        );
     }
 }
