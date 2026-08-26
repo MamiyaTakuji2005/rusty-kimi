@@ -15,6 +15,9 @@ const ARGS_PREVIEW_CHARS: usize = 160;
 const OUTPUT_PREVIEW_CHARS: usize = 4000;
 const DIFF_MAX_LINES: usize = 300;
 
+/// Draws one transcript block and returns its bounding response, so the
+/// caller can scroll to it or — when `selected` — the outline below shows
+/// which one the keyboard has climbed to.
 pub fn block_ui(
     ui: &mut egui::Ui,
     index: usize,
@@ -22,30 +25,94 @@ pub fn block_ui(
     cache: &mut CommonMarkCache,
     is_tail: bool,
     turn_running: bool,
-) {
-    ui.push_id(index, |ui| match block {
-        Block::User { text, steer } => user_ui(ui, text, *steer),
-        Block::Assistant { text } => {
-            CommonMarkViewer::new().show(ui, cache, text);
+    selected: bool,
+    toggle_fold: bool,
+) -> egui::Response {
+    let response = ui
+        .push_id(index, |ui| {
+            ui.scope(|ui| match block {
+                Block::User { text, steer } => user_ui(ui, text, *steer),
+                Block::Assistant { text } => {
+                    CommonMarkViewer::new().show(ui, cache, text);
+                }
+                Block::Thinking { text } => {
+                    thinking_ui(ui, text, is_tail && turn_running, toggle_fold);
+                }
+                Block::ToolCall {
+                    call,
+                    result,
+                    subagent,
+                    abandoned,
+                } => tool_call_ui(
+                    ui,
+                    call,
+                    result.as_ref(),
+                    subagent.as_ref(),
+                    turn_running && !abandoned,
+                    toggle_fold,
+                ),
+                Block::Approval { info, response } => {
+                    approval_block_ui(ui, info, response.as_ref());
+                }
+                Block::Info(text) => {
+                    ui.label(RichText::new(text).weak().italics());
+                }
+            })
+            .response
+        })
+        .inner;
+    if selected {
+        let accent = theme::colors(ui.ctx()).accent;
+        ui.painter().rect_stroke(
+            response.rect.expand(3.0),
+            egui::CornerRadius::same(4),
+            egui::Stroke::new(2.0, accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+    response
+}
+
+/// The plain-text content Ctrl+C copies for a climbed-to block. A diff is
+/// usually too big to want verbatim — the file it touched is the useful part.
+pub fn block_copy_text(block: &Block) -> String {
+    match block {
+        Block::User { text, .. } | Block::Assistant { text } | Block::Thinking { text } => {
+            text.clone()
         }
-        Block::Thinking { text } => thinking_ui(ui, text, is_tail && turn_running),
-        Block::ToolCall {
-            call,
-            result,
-            subagent,
-            abandoned,
-        } => tool_call_ui(
-            ui,
-            call,
-            result.as_ref(),
-            subagent.as_ref(),
-            turn_running && !abandoned,
-        ),
-        Block::Approval { info, response } => approval_block_ui(ui, info, response.as_ref()),
-        Block::Info(text) => {
-            ui.label(RichText::new(text).weak().italics());
-        }
-    });
+        Block::ToolCall { call, result, .. } => tool_call_copy_text(call, result.as_ref()),
+        Block::Approval { info, .. } => info.description.clone(),
+        Block::Info(text) => text.clone(),
+    }
+}
+
+fn tool_call_copy_text(
+    call: &kimi_agent::wire::ToolCall,
+    result: Option<&ToolReturnValue>,
+) -> String {
+    let Some(result) = result else {
+        return format!(
+            "{}({})",
+            call.function.name,
+            call.function.arguments.as_deref().unwrap_or_default()
+        );
+    };
+    let diff_paths: Vec<&str> = result
+        .display
+        .iter()
+        .filter_map(|block| match block {
+            DisplayBlock::Diff(diff) => Some(diff.path.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !diff_paths.is_empty() {
+        return diff_paths.join("\n");
+    }
+    match &result.output {
+        ToolOutput::Text(text) if !text.trim().is_empty() => text.clone(),
+        _ if !result.message.is_empty() => result.message.clone(),
+        _ => result.brief(),
+    }
 }
 
 fn user_ui(ui: &mut egui::Ui, text: &str, steer: bool) {
@@ -60,10 +127,18 @@ fn user_ui(ui: &mut egui::Ui, text: &str, steer: bool) {
         });
 }
 
-fn thinking_ui(ui: &mut egui::Ui, text: &str, live: bool) {
-    egui::CollapsingHeader::new(RichText::new("Thinking").weak().italics())
-        .default_open(false)
-        .show(ui, |ui| {
+fn thinking_ui(ui: &mut egui::Ui, text: &str, live: bool, toggle: bool) {
+    let id = ui.make_persistent_id("thinking_fold");
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    if toggle {
+        state.toggle(ui);
+    }
+    state
+        .show_header(ui, |ui| {
+            ui.label(RichText::new("Thinking").weak().italics());
+        })
+        .body(|ui| {
             ui.label(RichText::new(text).weak());
         });
     if live {
@@ -81,6 +156,7 @@ fn tool_call_ui(
     result: Option<&ToolReturnValue>,
     subagent: Option<&wire_client::transcript::SubagentSummary>,
     live: bool,
+    toggle: bool,
 ) {
     egui::Frame::group(ui.style())
         .inner_margin(6.0)
@@ -127,12 +203,15 @@ fn tool_call_ui(
             }
 
             if let Some(result) = result {
-                tool_result_ui(ui, result);
+                tool_result_ui(ui, result, toggle);
             }
         });
 }
 
-fn tool_result_ui(ui: &mut egui::Ui, result: &ToolReturnValue) {
+/// `toggle` is a keyboard equivalent of clicking the "output" header below —
+/// not a separate fold of its own — so a block with no output (an edit whose
+/// only result is a diff, say) has nothing for it to act on.
+fn tool_result_ui(ui: &mut egui::Ui, result: &ToolReturnValue, toggle: bool) {
     if result.is_error && !result.message.is_empty() {
         ui.label(RichText::new(&result.message).color(theme::colors(ui.ctx()).error));
     }
@@ -145,9 +224,17 @@ fn tool_result_ui(ui: &mut egui::Ui, result: &ToolReturnValue) {
     };
     let output_text = output_text.trim();
     if !output_text.is_empty() {
-        egui::CollapsingHeader::new(RichText::new("output").weak().small())
-            .default_open(false)
-            .show(ui, |ui| {
+        let id = ui.make_persistent_id("tool_output_fold");
+        let mut state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+        if toggle {
+            state.toggle(ui);
+        }
+        state
+            .show_header(ui, |ui| {
+                ui.label(RichText::new("output").weak().small());
+            })
+            .body(|ui| {
                 ui.label(
                     RichText::new(truncate(output_text, OUTPUT_PREVIEW_CHARS))
                         .weak()

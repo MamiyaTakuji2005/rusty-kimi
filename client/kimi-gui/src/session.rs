@@ -4,7 +4,7 @@
 
 use std::sync::mpsc::Receiver;
 
-use eframe::egui::{self, Align2, Key, Modifiers, RichText};
+use eframe::egui::{self, Align, Align2, Key, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use serde_json::{Value, json};
 
@@ -67,6 +67,17 @@ pub struct Session {
     /// Visible tab within this session: None = main transcript,
     /// Some(task_tool_call_id) = that subagent's transcript.
     active_subtab: Option<String>,
+    /// Index into the active view's blocks the keyboard has climbed to;
+    /// `None` while the chat box owns the arrows as normal.
+    selected_block: Option<usize>,
+    /// Scroll the selection into view on the next draw; set only by the
+    /// keyboard so it never fights the mouse wheel.
+    nav_scroll: bool,
+    /// Whether the chat box's caret sat at the very start of the text (or
+    /// the box was empty) as of last frame. Cached so this frame can decide,
+    /// before the box redraws, whether an incoming Up arrow means "climb
+    /// into the transcript" rather than "move the cursor".
+    input_at_start: bool,
 }
 
 impl Session {
@@ -141,6 +152,9 @@ impl Session {
             replay_id: None,
             prompt_id: None,
             active_subtab: None,
+            selected_block: None,
+            nav_scroll: false,
+            input_at_start: true,
         })
     }
 
@@ -170,6 +184,25 @@ impl Session {
             .and_then(|id| subagents.iter().position(|s| s.task_tool_call_id == id));
         self.active_subtab = step_subtab(current, subagents.len(), forward)
             .map(|index| subagents[index].task_tool_call_id.clone());
+        self.selected_block = None;
+    }
+
+    /// The blocks currently on screen: the main transcript, or the active
+    /// fork/subagent tab's own. Used for the keyboard-climb bounds — kept
+    /// separate from [`Self::transcript_view`]'s copy of this match because
+    /// that one also needs a `&mut self.md_cache` alongside it, which a
+    /// `&self` helper returning a borrow would conflict with.
+    fn active_blocks(&self) -> &[wire_client::transcript::Block] {
+        match &self.active_subtab {
+            None => &self.transcript.blocks,
+            Some(task_id) => self
+                .transcript
+                .subagents
+                .iter()
+                .find(|s| &s.task_tool_call_id == task_id)
+                .map(|s| s.transcript.blocks.as_slice())
+                .unwrap_or(&self.transcript.blocks),
+        }
     }
 
     pub fn drain_inbound(&mut self) {
@@ -363,11 +396,15 @@ impl Session {
     /// Draw this session's panels. `suppress_keys` disables the session's
     /// keyboard shortcuts (e.g. while an app-level popup is open).
     pub fn ui(&mut self, ctx: &egui::Context, suppress_keys: bool) {
-        if !suppress_keys
-            && self.phase == Phase::Running
-            && ctx.input(|i| i.key_pressed(Key::Escape))
-        {
-            self.client.send_request("cancel", json!({}));
+        // While the keyboard has climbed into the transcript it owns Escape
+        // too — closing the climb takes priority over cancelling a turn.
+        let mut toggle_fold = false;
+        if !suppress_keys {
+            if self.selected_block.is_some() {
+                toggle_fold = self.transcript_nav_keys(ctx);
+            } else if self.phase == Phase::Running && ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.client.send_request("cancel", json!({}));
+            }
         }
 
         // When an approval arrives, drop the chat box's focus once so the
@@ -403,7 +440,7 @@ impl Session {
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.push_id(self.id, |ui| {
                 self.subtab_strip(ui);
-                self.transcript_view(ui);
+                self.transcript_view(ui, toggle_fold);
             });
         });
 
@@ -435,6 +472,7 @@ impl Session {
                     .clicked()
                 {
                     self.active_subtab = None;
+                    self.selected_block = None;
                 }
                 for sub in &self.transcript.subagents {
                     let selected =
@@ -446,6 +484,7 @@ impl Session {
                     };
                     if ui.selectable_label(selected, label).clicked() {
                         self.active_subtab = Some(sub.task_tool_call_id.clone());
+                        self.selected_block = None;
                     }
                 }
             });
@@ -457,7 +496,54 @@ impl Session {
         });
     }
 
-    fn transcript_view(&mut self, ui: &mut egui::Ui) {
+    /// Keys while the keyboard has climbed into the transcript: arrows move
+    /// the highlighted block, Space/Enter folds it (the block itself decides
+    /// whether that means anything), Ctrl+C copies it, Escape — or stepping
+    /// past the newest block — drops back to the chat box. Returns whether a
+    /// fold was requested, for [`Self::transcript_view`] to apply to the one
+    /// block it lands on.
+    fn transcript_nav_keys(&mut self, ctx: &egui::Context) -> bool {
+        let (up, down, toggle, copy, cancel) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::Space)
+                    || i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::COMMAND, Key::C),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        if cancel {
+            self.exit_nav(ctx);
+            return false;
+        }
+        let Some(index) = self.selected_block else {
+            return false;
+        };
+        if copy && let Some(block) = self.active_blocks().get(index) {
+            ctx.copy_text(crate::render::block_copy_text(block));
+        }
+        if up {
+            self.selected_block = Some(index.saturating_sub(1));
+            self.nav_scroll = true;
+        } else if down {
+            if index + 1 < self.active_blocks().len() {
+                self.selected_block = Some(index + 1);
+                self.nav_scroll = true;
+            } else {
+                self.exit_nav(ctx);
+            }
+        }
+        toggle
+    }
+
+    /// Drop the climb and hand the keyboard back to the chat box.
+    fn exit_nav(&mut self, ctx: &egui::Context) {
+        self.selected_block = None;
+        ctx.memory_mut(|mem| mem.request_focus(self.input_id()));
+    }
+
+    fn transcript_view(&mut self, ui: &mut egui::Ui, toggle_fold: bool) {
         // A fork/subagent tab runs on its own clock: the child streams while
         // the parent is Ready, so "running" comes from its done flag there.
         let (blocks, running) = match &self.active_subtab {
@@ -474,6 +560,17 @@ impl Session {
                 }
             }
         };
+        // Defensive: a stale index (e.g. the tab it pointed into just
+        // changed underneath it) should fall back to "not climbing" rather
+        // than panic or highlight the wrong row.
+        if self
+            .selected_block
+            .is_some_and(|index| index >= blocks.len())
+        {
+            self.selected_block = None;
+        }
+        let selected = self.selected_block;
+        let want_scroll = std::mem::take(&mut self.nav_scroll);
         let md_cache = &mut self.md_cache;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -481,7 +578,33 @@ impl Session {
             .show(ui, |ui| {
                 let last = blocks.len().saturating_sub(1);
                 for (index, block) in blocks.iter().enumerate() {
-                    block_ui(ui, index, block, md_cache, index == last, running);
+                    let is_selected = selected == Some(index);
+                    let response = block_ui(
+                        ui,
+                        index,
+                        block,
+                        md_cache,
+                        index == last,
+                        running,
+                        is_selected,
+                        is_selected && toggle_fold,
+                    );
+                    if is_selected && want_scroll {
+                        // Instant, not animated: climbing is a discrete jump,
+                        // and retargeting a smooth scroll mid-flight (which
+                        // happens whenever the next key lands before the
+                        // previous animation finishes) reuses the old
+                        // animation's timing for the new distance, so it can
+                        // "arrive" well short of the target. Top-aligned, not
+                        // centered — a block taller than the viewport has no
+                        // well-defined center, and top-aligning keeps its
+                        // header (and the selection outline's top edge) on
+                        // screen instead of stranding both mid-block.
+                        response.scroll_to_me_animation(
+                            Some(Align::TOP),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                    }
                     ui.add_space(6.0);
                 }
             });
@@ -634,6 +757,24 @@ impl Session {
             }
         }
 
+        // Up from the very start of the box — Home, or the box is empty —
+        // climbs into the transcript instead of moving a cursor that was
+        // already at the top. `input_at_start` is last frame's cursor
+        // position: it has to be, since this has to run (and consume the
+        // key) before the box redraws and could claim it as its own.
+        let climb = self.input_had_focus
+            && !suppress_keys
+            && self.selected_block.is_none()
+            && self.input_at_start
+            && !self.active_blocks().is_empty()
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp));
+        if climb {
+            self.selected_block = self.active_blocks().len().checked_sub(1);
+            self.nav_scroll = true;
+            ui.ctx()
+                .memory_mut(|mem| mem.surrender_focus(self.input_id()));
+        }
+
         // Enter submits (consumed before the widget sees it); Shift+Enter = newline.
         let mut submit = false;
         if self.input_had_focus && !suppress_keys {
@@ -645,26 +786,35 @@ impl Session {
             "Message the agent... (Enter to send, Shift+Enter for newline)"
         };
         let input_id = self.input_id();
-        let response = ui.add(
-            egui::TextEdit::multiline(&mut self.input)
-                // Stable id: the slash-command hint above toggles in and out,
-                // which would otherwise change this widget's auto-generated id
-                // and drop keyboard focus.
-                .id(input_id)
-                .desired_width(f32::INFINITY)
-                .desired_rows(3)
-                .hint_text(hint),
-        );
+        let output = egui::TextEdit::multiline(&mut self.input)
+            // Stable id: the slash-command hint above toggles in and out,
+            // which would otherwise change this widget's auto-generated id
+            // and drop keyboard focus.
+            .id(input_id)
+            .desired_width(f32::INFINITY)
+            .desired_rows(3)
+            .hint_text(hint)
+            .show(ui);
+        let response = output.response;
         self.input_had_focus = response.has_focus();
+        // Regaining focus — a click, most likely — is how climbing ends
+        // early: the box owns the arrows again the moment it is the thing
+        // being typed into.
+        if response.has_focus() {
+            self.selected_block = None;
+        }
+        self.input_at_start = output.cursor_range.is_none_or(|r| r.primary.index == 0);
         if submit {
             self.submit_input();
             response.request_focus();
         }
 
         // Keep the chat box focused so the keyboard works without a click,
-        // unless a modal/popup is open or an approval is waiting for a decision.
+        // unless a modal/popup is open, an approval is waiting for a
+        // decision, or the keyboard has climbed into the transcript.
         if !suppress_keys
             && !self.has_pending_approvals()
+            && self.selected_block.is_none()
             && !response.has_focus()
             && ui.input(|i| i.viewport().focused != Some(false))
             && !egui::Popup::is_any_open(ui.ctx())

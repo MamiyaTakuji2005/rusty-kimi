@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use eframe::egui::{self, Align, Align2, Key, Modifiers, RichText};
+use eframe::egui::{self, Align, Align2, Color32, Key, Modifiers, RichText};
 
 use kimi_agent::share::get_share_dir as share_dir;
 
@@ -472,8 +472,8 @@ impl KimiGuiApp {
         // Clamp the way the list does, so Enter always takes the row that is
         // actually highlighted rather than silently doing nothing.
         self.palette.cursor = self.palette.cursor.min(matches.len().saturating_sub(1));
-        if accept && let Some(entry) = matches.get(self.palette.cursor) {
-            let command = entry.command;
+        if accept && let Some(m) = matches.get(self.palette.cursor) {
+            let command = m.entry.command;
             self.palette.close();
             self.run_command(command, ctx);
         }
@@ -976,7 +976,9 @@ impl KimiGuiApp {
         // The cursor is an index into a list that the query just reshuffled.
         let cursor = self.palette.cursor.min(matches.len().saturating_sub(1));
         let want_scroll = std::mem::take(&mut self.palette.scroll);
+        let accent = self.theme.colors().accent;
         let mut chosen: Option<Command> = None;
+        let mut hovered: Option<usize> = None;
         let query_id = egui::Id::new("palette_query");
         egui::Window::new("Command palette")
             // The query box and the list say what this is; a title bar over
@@ -1013,19 +1015,25 @@ impl KimiGuiApp {
                     .auto_shrink([false, true])
                     .max_height(320.0)
                     .show(ui, |ui| {
-                        for (index, entry) in matches.iter().enumerate() {
+                        for (index, m) in matches.iter().enumerate() {
                             let selected = index == cursor;
-                            let row =
-                                ui.selectable_label(selected, RichText::new(entry.title).strong());
+                            let title = highlighted_title(ui, m.entry.title, &m.positions, accent);
+                            let row = ui.selectable_label(selected, title);
                             if row.clicked() {
-                                chosen = Some(entry.command);
+                                chosen = Some(m.entry.command);
+                            }
+                            // The keyboard cursor follows the mouse, the way
+                            // it does in Sublime's palette: whichever row you
+                            // are pointing at is the one Enter would take.
+                            if row.hovered() {
+                                hovered = Some(index);
                             }
                             if selected && want_scroll {
                                 row.scroll_to_me(Some(Align::Center));
                             }
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(entry.detail).weak().small());
-                                if let Some(binding) = entry.binding {
+                                ui.label(RichText::new(m.entry.detail).weak().small());
+                                if let Some(binding) = m.entry.binding {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
@@ -1040,6 +1048,9 @@ impl KimiGuiApp {
                         }
                     });
             });
+        if let Some(index) = hovered {
+            self.palette.cursor = index;
+        }
         if let Some(command) = chosen {
             self.palette.close();
             self.run_command(command, ctx);
@@ -1168,6 +1179,40 @@ fn pick_folder_async(
 }
 
 /// The working directory passed to the agent via `-w`/`--workdir`, if any.
+/// A palette row's title with the letters the query actually matched picked
+/// out in the theme's accent color — the same cue Sublime's palette gives,
+/// so the ranking is not the only evidence a row is the one you meant.
+fn highlighted_title(
+    ui: &egui::Ui,
+    title: &str,
+    positions: &[usize],
+    accent: Color32,
+) -> egui::text::LayoutJob {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let base = ui.visuals().strong_text_color();
+    let mut job = egui::text::LayoutJob::default();
+    let chars: Vec<char> = title.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let matched = positions.contains(&index);
+        let start = index;
+        while index < chars.len() && positions.contains(&index) == matched {
+            index += 1;
+        }
+        let run: String = chars[start..index].iter().collect();
+        job.append(
+            &run,
+            0.0,
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                color: if matched { accent } else { base },
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
 fn args_workdir(args: &[String]) -> Option<&str> {
     let pos = args.iter().position(|a| a == "-w" || a == "--workdir")?;
     args.get(pos + 1).map(String::as_str)

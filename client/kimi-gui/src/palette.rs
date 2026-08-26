@@ -138,6 +138,14 @@ pub const COMMANDS: &[Entry] = &[
     },
 ];
 
+/// One filtered row: the entry, plus which of its title's char positions the
+/// query actually hit — so the caller can pick those characters out visually
+/// instead of just trusting the ranking.
+pub struct Match {
+    pub entry: &'static Entry,
+    pub positions: Vec<usize>,
+}
+
 /// Open state of the palette. The matches are recomputed per frame — the list
 /// is short enough that caching would cost more than it saves.
 #[derive(Default)]
@@ -166,18 +174,19 @@ impl Palette {
     }
 
     /// Commands matching the current query, best first.
-    pub fn matches(&self, has_session: bool) -> Vec<&'static Entry> {
-        let mut scored: Vec<(u32, usize, &'static Entry)> = COMMANDS
+    pub fn matches(&self, has_session: bool) -> Vec<Match> {
+        let mut scored: Vec<(u32, usize, Match)> = COMMANDS
             .iter()
             .enumerate()
             .filter(|(_, entry)| has_session || !entry.needs_session)
             .filter_map(|(index, entry)| {
-                score(&self.query, entry.title).map(|score| (score, index, entry))
+                let (score, positions) = score(&self.query, entry.title)?;
+                Some((score, index, Match { entry, positions }))
             })
             .collect();
         // Ties keep declaration order, which is roughly frequency of use.
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored.into_iter().map(|(_, _, entry)| entry).collect()
+        scored.into_iter().map(|(_, _, m)| m).collect()
     }
 
     /// Move the highlight, clamped to the filtered list.
@@ -195,20 +204,22 @@ impl Palette {
 }
 
 /// Fuzzy subsequence score of `query` against `title`, or `None` when the
-/// query's characters do not all appear in order. Higher is better.
+/// query's characters do not all appear in order. Higher is better. Also
+/// returns the char positions in `title` that matched, for highlighting.
 ///
 /// Deliberately simple — "opcfg" and "open config" both have to find *Open
 /// config.toml*, and that is the whole job. Consecutive matches and matches
 /// at the start of a word score higher, so a full word beats letters scraped
 /// out of the middle of one.
-fn score(query: &str, title: &str) -> Option<u32> {
+fn score(query: &str, title: &str) -> Option<(u32, Vec<usize>)> {
     if query.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
     let title: Vec<char> = title.chars().flat_map(char::to_lowercase).collect();
     let mut total = 0;
     let mut at = 0;
     let mut run = 0;
+    let mut positions = Vec::new();
     for needle in query.chars().flat_map(char::to_lowercase) {
         if needle.is_whitespace() {
             continue;
@@ -219,9 +230,10 @@ fn score(query: &str, title: &str) -> Option<u32> {
         let boundary = found == 0 || title[found - 1] == ' ' || title[found - 1] == '.';
         run = if found == at && at > 0 { run + 1 } else { 0 };
         total += 1 + run * 4 + u32::from(boundary) * 8;
+        positions.push(found);
         at = found + 1;
     }
-    Some(total)
+    Some((total, positions))
 }
 
 #[cfg(test)]
@@ -240,7 +252,7 @@ mod tests {
         palette
             .matches(has_session)
             .into_iter()
-            .map(|entry| entry.title)
+            .map(|m| m.entry.title)
             .collect()
     }
 
@@ -276,7 +288,7 @@ mod tests {
         let palette = with_query("connect");
         let matches = palette.matches(false);
         assert_eq!(
-            matches.first().map(|e| e.command),
+            matches.first().map(|m| m.entry.command),
             Some(Command::ConnectRemote)
         );
     }
@@ -303,7 +315,7 @@ mod tests {
         ] {
             let matches = with_query(query).matches(false);
             assert_eq!(
-                matches.first().map(|e| e.command),
+                matches.first().map(|m| m.entry.command),
                 Some(command),
                 "\"{query}\" should lead with {command:?}"
             );
@@ -318,8 +330,11 @@ mod tests {
 
     #[test]
     fn test_word_start_beats_scraped_letters() {
-        // "log" is a whole word in one title and scattered letters in another.
-        assert!(score("log", "Open log folder") > score("log", "Open config.toml"));
+        // "log" is a whole, boundary-starting word in one title and letters
+        // scraped from the middle of unrelated words in the other.
+        let with_word = score("log", "Open log folder").unwrap().0;
+        let scraped = score("log", "xlxoxgx").unwrap().0;
+        assert!(with_word > scraped);
     }
 
     #[test]
@@ -327,12 +342,22 @@ mod tests {
         assert_eq!(score("gfc", "Open config.toml"), None);
     }
 
+    /// The positions returned are what the palette highlights; they have to
+    /// point at the letters that were actually typed, in title order.
+    #[test]
+    fn test_positions_point_at_the_matched_letters() {
+        let (_, positions) = score("opcfg", "Open config.toml").unwrap();
+        let title: Vec<char> = "Open config.toml".chars().collect();
+        let matched: String = positions.iter().map(|&i| title[i]).collect();
+        assert_eq!(matched.to_lowercase(), "opcfg");
+    }
+
     #[test]
     fn test_close_session_is_reachable_by_its_own_name() {
         let palette = with_query("close");
         let matches = palette.matches(true);
         assert_eq!(
-            matches.first().map(|e| e.command),
+            matches.first().map(|m| m.entry.command),
             Some(Command::CloseSession)
         );
     }
