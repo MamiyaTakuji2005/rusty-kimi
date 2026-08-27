@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, error};
 
 use kaos::{Kaos, KaosPath, LocalKaos, get_current_kaos};
 
@@ -161,27 +161,27 @@ pub async fn load_metadata() -> Metadata {
 pub async fn save_metadata(metadata: &Metadata) {
     let metadata_file = get_metadata_file();
     debug!("Saving metadata to file: {}", metadata_file.display());
-    if let Some(parent) = metadata_file.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .unwrap_or_else(|err| {
-                panic!("Failed to create metadata dir {}: {err}", parent.display())
-            });
-    }
-    let text = serde_json::to_string_pretty(metadata).unwrap_or_else(|err| {
-        panic!(
-            "Failed to serialize metadata file {}: {err}",
+    // A failed save must not take the process down: the running session keeps
+    // working, only its bookkeeping goes stale until the next save succeeds.
+    if let Err(err) = write_metadata(&metadata_file, metadata).await {
+        error!(
+            "Failed to save metadata to {}: {err}",
             metadata_file.display()
-        )
-    });
-    tokio::fs::write(&metadata_file, text)
-        .await
-        .unwrap_or_else(|err| {
-            panic!(
-                "Failed to write metadata file {}: {err}",
-                metadata_file.display()
-            )
-        });
+        );
+    }
+}
+
+/// Serialize to a sibling temp file and rename it over the real one, so a
+/// crash or full disk mid-write never leaves `kimi.json` half-written.
+async fn write_metadata(metadata_file: &Path, metadata: &Metadata) -> std::io::Result<()> {
+    if let Some(parent) = metadata_file.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let text = serde_json::to_string_pretty(metadata).map_err(std::io::Error::other)?;
+    let tmp = metadata_file.with_extension("json.tmp");
+    tokio::fs::write(&tmp, text).await?;
+    tokio::fs::rename(&tmp, metadata_file).await?;
+    Ok(())
 }
 
 fn default_kaos_name() -> String {

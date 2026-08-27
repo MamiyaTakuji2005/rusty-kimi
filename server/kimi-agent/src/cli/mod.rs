@@ -91,7 +91,7 @@ pub struct Cli {
 
     #[arg(
         long = "no-thinking",
-        help = "Enable thinking mode. Default: default thinking mode set in config file."
+        help = "Disable thinking mode. Default: default thinking mode set in config file."
     )]
     no_thinking: bool,
 
