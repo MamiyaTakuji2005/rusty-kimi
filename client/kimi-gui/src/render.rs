@@ -184,10 +184,18 @@ fn tool_call_ui(
                 }
                 ui.label(RichText::new(&call.function.name).strong().monospace());
                 if let Some(args) = &call.function.arguments {
-                    ui.label(
-                        RichText::new(truncate(&flatten(args), ARGS_PREVIEW_CHARS))
-                            .weak()
-                            .monospace(),
+                    // Ellipsized at the row's end: in a horizontal row a
+                    // label extends instead of wrapping, which used to shoot
+                    // long previews past the window edge, clipped raw. The
+                    // header stays one line tall; the full text is a Ctrl+C
+                    // away on the climbed block.
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(truncate(&flatten(args), ARGS_PREVIEW_CHARS))
+                                .weak()
+                                .monospace(),
+                        )
+                        .truncate(),
                     );
                 }
             });

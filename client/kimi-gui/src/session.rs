@@ -25,6 +25,9 @@ enum Phase {
     Failed(String),
 }
 
+/// Inner margin of the transcript's central panel, per side.
+const PANEL_MARGIN: i8 = 8;
+
 struct SlashCommand {
     name: String,
     description: String,
@@ -435,7 +438,7 @@ impl Session {
         // Trim it there and keep it everywhere else.
         let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin {
             top: 2,
-            ..egui::Margin::same(8)
+            ..egui::Margin::same(PANEL_MARGIN)
         });
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.push_id(self.id, |ui| {
@@ -576,6 +579,12 @@ impl Session {
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
+                // Everything in the transcript wraps at `available_width`;
+                // hold that at the wrap floor so a window narrower than a
+                // third of the screen clips text instead of folding it
+                // tighter. The scroll area's clip rect does the clipping.
+                let monitor = ui.input(|i| i.viewport().monitor_size).map(|size| size.x);
+                ui.set_max_width(wrap_width(ui.available_width(), monitor));
                 let last = blocks.len().saturating_sub(1);
                 for (index, block) in blocks.iter().enumerate() {
                     let is_selected = selected == Some(index);
@@ -750,7 +759,14 @@ impl Session {
                         for cmd in matches {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(format!("/{}", cmd.name)).monospace());
-                                ui.label(RichText::new(&cmd.description).weak().small());
+                                // Ellipsized: a label in a horizontal row
+                                // extends past the window instead of wrapping.
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&cmd.description).weak().small(),
+                                    )
+                                    .truncate(),
+                                );
                             });
                         }
                     });
@@ -824,6 +840,23 @@ impl Session {
     }
 }
 
+/// The width the transcript lays its text out at: the real width while the
+/// window is wide enough, floored at a third of the monitor below that.
+///
+/// This is what "word wrap" means here once the window gets small: text
+/// follows the window down to a third of the screen, and past that the
+/// layout freezes and the window edge clips it — a squeezed window stays a
+/// readable column instead of folding prose one word per line. Widths are in
+/// logical points and the monitor is whichever one the window is on, so the
+/// third holds at any DPI scale; some backends cannot report a monitor, so
+/// assume WQHD. The margin term makes a window of exactly a third wrap
+/// seamlessly at its real width.
+fn wrap_width(available: f32, monitor_width: Option<f32>) -> f32 {
+    let monitor = monitor_width.filter(|width| *width > 0.0).unwrap_or(2560.0);
+    let floor = monitor / 3.0 - f32::from(PANEL_MARGIN) * 2.0;
+    available.max(floor)
+}
+
 /// One step along the fork row, which is `main` followed by `subagents`
 /// entries. `None` is the main transcript, `Some(i)` the i-th fork; the walk
 /// wraps in both directions and stays on main when there are no forks.
@@ -843,7 +876,34 @@ fn step_subtab(current: Option<usize>, subagents: usize, forward: bool) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use super::step_subtab;
+    use super::{PANEL_MARGIN, step_subtab, wrap_width};
+
+    /// A wide-enough window wraps at its real width — the floor is invisible.
+    #[test]
+    fn test_wrap_width_uses_the_real_width_when_wide() {
+        assert_eq!(wrap_width(1200.0, Some(2560.0)), 1200.0);
+    }
+
+    #[test]
+    fn test_wrap_width_floors_at_a_third_of_the_monitor() {
+        let floor = 2560.0 / 3.0 - f32::from(PANEL_MARGIN) * 2.0;
+        assert_eq!(wrap_width(400.0, Some(2560.0)), floor);
+        // At exactly a third of the screen the two widths agree, so shrinking
+        // through the boundary never jumps.
+        assert_eq!(wrap_width(floor, Some(2560.0)), floor);
+    }
+
+    #[test]
+    fn test_wrap_width_follows_the_monitor_the_window_is_on() {
+        assert!(wrap_width(100.0, Some(1920.0)) < wrap_width(100.0, Some(2560.0)));
+    }
+
+    /// No monitor info (or a nonsense zero) falls back to assuming WQHD.
+    #[test]
+    fn test_wrap_width_assumes_wqhd_without_monitor_info() {
+        assert_eq!(wrap_width(400.0, None), wrap_width(400.0, Some(2560.0)));
+        assert_eq!(wrap_width(400.0, Some(0.0)), wrap_width(400.0, None));
+    }
 
     #[test]
     fn test_no_forks_stays_on_main() {
