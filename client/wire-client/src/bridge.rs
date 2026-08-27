@@ -20,7 +20,19 @@ use serde::Deserialize;
 use crate::session_list::ResumeEntry;
 
 /// Magic prefix of every bridge frame — kept in sync with the daemon side.
+/// The trailing digit is the frame protocol's major version, and it is a hard
+/// gate: a daemon that answers with any other digit is refused by name.
 pub const MAGIC: &str = "BRIDGE1";
+
+/// The magic without its version digit, for telling "a bridge frame from a
+/// build we cannot talk to" apart from "not a bridge frame at all".
+pub const MAGIC_FAMILY: &str = "BRIDGE";
+
+/// This build's frame protocol version, `major.minor`, matching
+/// `dvadva_bridge::proto::BRIDGE_PROTOCOL_VERSION`. The major must equal the
+/// digit in [`MAGIC`]; the minor rises with additive ops, and a daemon's own
+/// minor arrives in its `version` reply.
+pub const BRIDGE_PROTOCOL_VERSION: &str = "1.0";
 
 /// Upper bound on a frame line, matching `dvadva_bridge::proto::MAX_LINE_BYTES`.
 /// A frontend pointed at the wrong port (an HTTP server, a log stream) must
@@ -59,7 +71,13 @@ pub fn version_header() -> String {
 }
 
 /// Ask the daemon at `endpoint` for its version — the liveness probe behind
-/// a UI's connection indicator.
+/// a UI's connection indicator, and the one place a frame-protocol mismatch
+/// is caught before it can matter.
+///
+/// The returned string is for display: the daemon's build version, plus its
+/// frame protocol when it names one (`1.8.0 (frame 1.0)`). Compatibility is
+/// already decided by then — [`decode_reply`] refuses a foreign magic — so
+/// callers show this and nothing more.
 ///
 /// Deliberately its own short-lived connection: there is no persistent one
 /// to observe (each session dials its own), and a probe that spawns nothing
@@ -87,8 +105,13 @@ pub fn probe(endpoint: &str, timeout: Duration) -> Result<String, String> {
             .unwrap_or_else(|| "bridge refused the probe".into()));
     }
     // An older daemon that does not know the op answers `{"ok":false}` and
-    // never reaches here; one that does always names its version.
-    Ok(reply.version.unwrap_or_else(|| "unknown".to_string()))
+    // never reaches here; one that does always names its version. The frame
+    // protocol is newer than the op, so it can still be missing — that
+    // absence *is* the answer (frame 1.0), but say "unstated" rather than
+    // print a number the daemon never sent.
+    let version = reply.version.unwrap_or_else(|| "unknown".to_string());
+    let proto = reply.proto.as_deref().unwrap_or("unstated");
+    Ok(format!("{version} (frame {proto})"))
 }
 
 /// The daemon's single reply frame to any request.
@@ -99,9 +122,13 @@ pub struct BridgeReply {
     pub error: Option<String>,
     #[serde(default)]
     pub sessions: Option<Vec<ResumeEntry>>,
-    /// The daemon's version, on a `version` reply.
+    /// The daemon's build version, on a `version` reply.
     #[serde(default)]
     pub version: Option<String>,
+    /// The daemon's frame protocol version, on a `version` reply. Absent from
+    /// a daemon built before the field existed, which means frame 1.0.
+    #[serde(default)]
+    pub proto: Option<String>,
 }
 
 /// Parse a reply frame line (as produced by the daemon) into a
@@ -110,8 +137,22 @@ pub fn decode_reply(line: &str) -> Result<BridgeReply, String> {
     let json = line
         .strip_prefix(MAGIC)
         .map(str::trim_start)
-        .ok_or_else(|| "not a bridge reply (missing BRIDGE1 prefix)".to_string())?;
+        .ok_or_else(|| magic_mismatch(line))?;
     serde_json::from_str(json).map_err(|err| format!("bad bridge reply: {err}"))
+}
+
+/// Why a line did not start with our magic. A reply from a *different* bridge
+/// major is a version mismatch and has to say so: reporting it as "not a
+/// bridge reply" would send whoever hit it looking for a networking fault
+/// instead of for a stale daemon at the far end of a tunnel.
+fn magic_mismatch(line: &str) -> String {
+    match line.split_whitespace().next() {
+        Some(word) if word.starts_with(MAGIC_FAMILY) && word != MAGIC => format!(
+            "bridge frame protocol `{word}` is not compatible with this build's \
+             `{MAGIC}`: the two binaries need to match"
+        ),
+        _ => format!("not a bridge reply (missing {MAGIC} prefix)"),
+    }
 }
 
 /// The daemon's exit trailer, if this relayed line is one.
@@ -262,5 +303,39 @@ mod tests {
             ]));
         let reply = decode_reply(&daemon_listing).expect("listing reply must parse");
         assert_eq!(reply.sessions.unwrap().len(), 1);
+
+        // The version reply is the frame that carries the frame protocol
+        // itself, so the two copies of every framing constant must agree.
+        assert_eq!(MAGIC, dvadva_bridge::proto::MAGIC);
+        assert_eq!(
+            BRIDGE_PROTOCOL_VERSION,
+            dvadva_bridge::proto::BRIDGE_PROTOCOL_VERSION
+        );
+        let daemon_version =
+            dvadva_bridge::proto::encode(&dvadva_bridge::proto::Reply::version("1.8.0"));
+        let reply = decode_reply(&daemon_version).expect("version reply must parse");
+        assert_eq!(reply.version.as_deref(), Some("1.8.0"));
+        assert_eq!(reply.proto.as_deref(), Some(BRIDGE_PROTOCOL_VERSION));
+    }
+
+    #[test]
+    fn a_daemon_from_another_major_is_named_as_one() {
+        // What a frontend sees when the far end of the tunnel is a stale (or
+        // too new) daemon. It must not read as a transport fault.
+        let err = decode_reply(r#"BRIDGE2 {"ok":true}"#).unwrap_err();
+        assert!(err.contains("BRIDGE2"), "{err}");
+        assert!(err.contains("not compatible"), "{err}");
+
+        // Whereas an HTTP server on the wrong port is still just not a bridge.
+        let plain = decode_reply("HTTP/1.1 200 OK").unwrap_err();
+        assert!(plain.contains("not a bridge reply"), "{plain}");
+    }
+
+    #[test]
+    fn a_daemon_that_names_no_frame_protocol_is_still_readable() {
+        // The deployed daemon: no `proto` field. The probe says so rather
+        // than inventing a number.
+        let reply = decode_reply(r#"BRIDGE1 {"ok":true,"version":"1.8.0"}"#).unwrap();
+        assert_eq!(reply.proto, None);
     }
 }

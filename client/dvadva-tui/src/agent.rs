@@ -179,6 +179,13 @@ impl AgentSession {
             self.init_id = None;
             match (result, error) {
                 (Some(result), None) => {
+                    // Refuse a protocol we cannot speak before folding any of
+                    // the result in: everything below assumes the shapes this
+                    // build knows.
+                    if let Err(err) = wire_client::check_server_protocol(&result) {
+                        self.phase = Phase::Failed(err);
+                        return;
+                    }
                     self.server_name = result
                         .pointer("/server/name")
                         .and_then(|v| v.as_str())

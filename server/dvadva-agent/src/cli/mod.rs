@@ -13,6 +13,7 @@ use crate::constant::VERSION;
 use crate::metadata::{load_metadata, save_metadata};
 use crate::session::Session;
 use crate::utils::init_logging;
+use crate::wire::protocol::WIRE_PROTOCOL_VERSION;
 use tracing::{info, warn};
 
 pub mod info;
@@ -197,7 +198,10 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version {
-        println!("dvadva-agent, version {VERSION}");
+        // Both numbers, always: the build says which binary this is, the
+        // protocol says whether a given frontend can talk to it, and only
+        // one of them is a compatibility answer.
+        println!("dvadva-agent, version {VERSION} (wire protocol {WIRE_PROTOCOL_VERSION})");
         return Ok(());
     }
 

@@ -36,7 +36,9 @@ pub use types::{
 
 pub use types::{is_event, is_request, is_wire_message};
 
-pub use protocol::{WIRE_PROTOCOL_LEGACY_VERSION, WIRE_PROTOCOL_VERSION};
+pub use protocol::{
+    ProtocolVersion, VersionError, WIRE_PROTOCOL_LEGACY_VERSION, WIRE_PROTOCOL_VERSION, check_peer,
+};
 
 pub use kosong::message::{
     AudioURLPart, ContentPart, ImageURLPart, TextPart, ThinkPart, ToolCall, ToolCallPart,

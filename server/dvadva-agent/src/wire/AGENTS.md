@@ -5,12 +5,21 @@
 - `types.rs`: wire message structs/enums + `WireMessageEnvelope`.
 - `serde.rs`: JSON (de)serialization helpers.
 - `file.rs`: `WireFile` JSONL persistence, metadata header, `WireMessageRecord`.
-- `protocol.rs`: wire protocol version constants.
+- `protocol.rs`: the protocol version, and the compatibility rule for it
+  (`ProtocolVersion`, `check_peer`).
 - `jsonrpc.rs`: JSON-RPC models/utilities for wire server.
 - `server.rs`: stdio JSON-RPC wire server.
 - `channel.rs`: `Wire`, `WireSoulSide`, `WireUISide`, merge + recording logic.
 
 ## Compatibility Rules
+
+- `major.minor`: a major bump is breaking, a minor bump is additive only. Both
+  ends call `check_peer` during `initialize` and refuse a foreign major; the
+  agent answers `error_codes::PROTOCOL_VERSION_MISMATCH`, the frontends fail
+  the session (`wire_client::check_server_protocol`). Gate any message
+  introduced in a later minor on `ProtocolVersion::has`.
+- `ProtocolVersion::CURRENT` and `WIRE_PROTOCOL_VERSION` are two spellings of
+  one fact; a test pins them together. Bump both.
 
 - Envelope `type` strings must match the original Python class names (stability invariant; wire clients depend on them).
 - `ContentPart` wire messages always use `type="ContentPart"` at the envelope layer.

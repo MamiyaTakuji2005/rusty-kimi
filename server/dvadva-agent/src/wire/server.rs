@@ -23,7 +23,7 @@ use crate::wire::jsonrpc::{
     JsonRpcMessage, JsonRpcSuccessResponse, PromptParams, build_event_message,
     build_request_message, error_codes, statuses,
 };
-use crate::wire::protocol::WIRE_PROTOCOL_VERSION;
+use crate::wire::protocol::{WIRE_PROTOCOL_VERSION, check_peer};
 
 const STDIO_BUFFER_LIMIT: usize = 100 * 1024 * 1024;
 
@@ -242,6 +242,24 @@ impl WireServer {
                 return;
             }
         };
+
+        // The version gate, before anything is mutated: a client we cannot
+        // talk to must not get its external tools registered on the way to
+        // being refused, and this error is the only part of the exchange it
+        // is guaranteed to understand.
+        let peer = match check_peer(&params.protocol_version) {
+            Ok(peer) => peer,
+            Err(err) => {
+                warn!("Refusing client: {err}");
+                self.send_error(id, error_codes::PROTOCOL_VERSION_MISMATCH, err.to_string())
+                    .await;
+                return;
+            }
+        };
+        info!(
+            "Client speaks wire protocol {peer}; this build speaks {}",
+            WIRE_PROTOCOL_VERSION
+        );
 
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();

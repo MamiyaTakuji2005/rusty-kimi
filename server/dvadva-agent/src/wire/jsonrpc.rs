@@ -124,6 +124,11 @@ pub mod error_codes {
     pub const LLM_NOT_SET: i64 = -32001;
     pub const LLM_NOT_SUPPORTED: i64 = -32002;
     pub const CHAT_PROVIDER_ERROR: i64 = -32003;
+    /// The client's `initialize` named a protocol this build cannot speak.
+    /// Its own code, because it is the one failure a frontend can explain to
+    /// a user in full ("your agent is older than your GUI") instead of
+    /// reporting as an unexplained refusal.
+    pub const PROTOCOL_VERSION_MISMATCH: i64 = -32004;
 }
 
 pub mod statuses {

@@ -78,6 +78,7 @@ client/                  frontends + shared frontend kit
 remote/                  relay daemons for remote access
   dvadva-bridge/           byte-relay daemon pair (bin: dvadva-bridge; design in remote/PLAN.md)
 _history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
+PLAN-detached-agent.md   design record: headless agent + attach/detach (phase 0 done)
 ```
 
 Per-module notes live in sub-tree `AGENTS.md` files — read them before touching
@@ -122,8 +123,33 @@ readable and any wire-protocol client — including the archived TUI — working
 against the agent:
 
 - **Wire protocol**: envelopes, `type` strings, error codes stay stable.
-  Version negotiation via `initialize`; current protocol version constant lives
-  in `wire/` (see `server/dvadva-agent/src/wire/AGENTS.md`).
+  `WIRE_PROTOCOL_VERSION` in `wire/protocol.rs` is `major.minor`: **a major
+  bump is breaking, a minor bump is additive only** — new message types, new
+  optional fields, never a changed meaning. Both ends check it through
+  `initialize` and refuse a foreign major (`check_peer`; the agent answers
+  `PROTOCOL_VERSION_MISMATCH`, the frontends fail the session with the same
+  text). A peer's *higher* minor is safe to talk to — ignore what you do not
+  recognize — and a peer's *lower* minor means do not use what it predates,
+  which is what `ProtocolVersion::has` is for.
+- **Bridge frame protocol**: `remote/dvadva-bridge/src/proto.rs`, versioned on
+  its own clock and duplicated byte-for-byte in `wire-client/src/bridge.rs`
+  (a dev-dependency test pins the two). The digit in the `BRIDGE1` magic is
+  its major and is a hard gate; `BRIDGE_PROTOCOL_VERSION` adds the minor, and
+  a `version` reply carries it so an additive op needs no BRIDGE2. The daemons
+  never parse the wire, so this version and the wire's move independently.
+- **The agent's CLI surface is a contract too.** The frontends *generate*
+  agent argv (`inkvizitor/src/app.rs` builds `-w` and `--session`) and ship it
+  through the bridge to be executed on the far machine. Renaming a flag in
+  `cli/mod.rs` breaks remote resume with the wire protocol untouched, so
+  frontend-generated flags are **append-only**.
+
+**Version numbers say two different things and must not be merged.** A
+component version (every crate is `version.workspace = true`) says *which
+build* you are talking to; a protocol version says *whether you can talk to it
+at all*. Only the second decides compatibility, and each protocol owns its
+own. Report both wherever a running binary identifies itself —
+`dvadva-agent --version`, `dvadva-agent info`, the bridge's startup banner,
+the bridge `version` probe behind the GUI's connection light.
 - **`~/.kimi` data layout** stays identical: `config.toml`, `kimi.json`,
   `mcp.json`, session dirs with `context.jsonl` + `wire.jsonl`.
 - **`kosong.message` serde** (e.g. single-`TextPart` `Message.content` → JSON

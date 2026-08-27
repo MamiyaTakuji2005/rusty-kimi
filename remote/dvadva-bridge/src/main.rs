@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 
-use dvadva_bridge::{config, local_daemon, remote_daemon};
+use dvadva_bridge::{config, local_daemon, proto, remote_daemon};
 
 #[derive(Parser)]
 #[command(
@@ -119,6 +119,11 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            eprintln!(
+                "dvadva-bridge: version {} (frame protocol {})",
+                env!("CARGO_PKG_VERSION"),
+                proto::BRIDGE_PROTOCOL_VERSION
+            );
             eprintln!("dvadva-bridge: config: {}", config::path().display());
             eprintln!("dvadva-bridge: remote daemon listening on {listen} ({listen_from})");
             eprintln!("dvadva-bridge: spawning agent: {agent_bin} ({agent_from})");
@@ -138,6 +143,11 @@ async fn main() {
             .await
         }
         Command::Local { listen, upstream } => {
+            eprintln!(
+                "dvadva-bridge: version {} (frame protocol {})",
+                env!("CARGO_PKG_VERSION"),
+                proto::BRIDGE_PROTOCOL_VERSION
+            );
             eprintln!("dvadva-bridge: local daemon listening on {listen}");
             eprintln!("dvadva-bridge: forwarding to upstream {upstream}");
             run(&listen, |listener| {

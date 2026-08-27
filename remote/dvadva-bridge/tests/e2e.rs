@@ -272,6 +272,12 @@ async fn version_answers_without_spawning_anything() {
     let ((_writer, mut reader), reply) = connect_and_send(port, &Request::Version).await;
     assert!(reply.ok, "version failed: {reply:?}");
     assert_eq!(reply.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    // The build and the frame protocol are separate answers, and the probe
+    // that drives a UI's connection light reads both.
+    assert_eq!(
+        reply.proto.as_deref(),
+        Some(dvadva_bridge::proto::BRIDGE_PROTOCOL_VERSION)
+    );
     assert_eof(&mut reader).await;
 }
 

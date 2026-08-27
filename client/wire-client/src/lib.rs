@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
+use dvadva_agent::wire::protocol::{ProtocolVersion, check_peer};
 use dvadva_agent::wire::{WireMessage, deserialize_wire_message};
 
 /// How much of the agent's stderr to keep for the "it exited" message.
@@ -58,6 +59,27 @@ pub enum Inbound {
     AgentExited(String),
     /// A line we could not make sense of.
     ProtocolError(String),
+}
+
+/// Check the protocol version an agent declared in its `initialize` result.
+///
+/// The agent runs the same check on our declared version from its side. Both
+/// ends do it because the two failures read very differently to whoever has
+/// to fix them: "the agent refused us" and "the agent answers in a protocol
+/// we do not know" point at the same mismatched pair of binaries, but only if
+/// each end says which version it saw.
+///
+/// The returned version is the peer's, for gating individual features on its
+/// minor; a compatible peer may still be older than some message you wanted
+/// to send.
+pub fn check_server_protocol(result: &Value) -> Result<ProtocolVersion, String> {
+    let Some(declared) = result.get("protocol_version").and_then(|v| v.as_str()) else {
+        return Err(
+            "the agent's initialize result names no protocol version: it predates              version negotiation, or it is not a dvadva-agent"
+                .to_string(),
+        );
+    };
+    check_peer(declared).map_err(|err| format!("{err} (the two binaries need to match)"))
 }
 
 pub struct WireClient {
@@ -492,6 +514,28 @@ mod tests {
             panic!("expected a request");
         };
         assert_eq!(id, "agent-1");
+    }
+
+    #[test]
+    fn the_server_protocol_gate_reads_the_initialize_result() {
+        // What both frontends call before trusting anything else in the
+        // result. The three outcomes have to stay distinguishable.
+        let ok = json!({"protocol_version": "1.2", "server": {"name": "Kimi"}});
+        assert!(check_server_protocol(&ok).is_ok());
+
+        let newer = json!({"protocol_version": "1.7"});
+        assert_eq!(check_server_protocol(&newer).unwrap().minor, 7);
+
+        let foreign = json!({"protocol_version": "2.0"});
+        let err = check_server_protocol(&foreign).unwrap_err();
+        assert!(err.contains("2.0"), "{err}");
+        assert!(err.contains("binaries"), "{err}");
+
+        // An agent too old to declare one at all, or something that is not an
+        // agent: must not be reported as an incompatible protocol.
+        let silent = json!({"server": {"name": "Kimi"}});
+        let err = check_server_protocol(&silent).unwrap_err();
+        assert!(err.contains("names no protocol version"), "{err}");
     }
 
     #[test]

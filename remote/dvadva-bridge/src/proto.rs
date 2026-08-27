@@ -16,9 +16,17 @@
 //!
 //! The `BRIDGE1 ` prefix keeps daemon frames trivially distinguishable from
 //! any pipelined wire-protocol JSON: the daemons only parse a line that
-//! starts with the magic, and an agent's first message never does. The
-//! digit is the protocol version — bump it (and update both halves) if the
-//! frame set ever changes.
+//! starts with the magic, and an agent's first message never does.
+//!
+//! **Versioning.** The digit in the magic is this protocol's *major*, and it
+//! is a hard gate: a frame carrying any other digit is refused outright, by
+//! both halves, with a message that says so. [`BRIDGE_PROTOCOL_VERSION`]
+//! carries that same major plus a *minor*, which a `version` reply hands to
+//! the client, so an additive op (a new `op`, a new reply field) can be
+//! introduced without cutting BRIDGE2 and breaking every deployed daemon at
+//! once. Same rule as the wire protocol next door
+//! (`server/dvadva-agent/src/wire/protocol.rs`), different clock: the two
+//! version independently, and the daemons never parse the wire at all.
 //!
 //! The client-side twin of this framing lives in
 //! `client/wire-client/src/bridge.rs`; a dev-dependency test there asserts
@@ -29,8 +37,17 @@ use std::io;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::AsyncBufReadExt;
 
-/// Magic prefix of every bridge frame.
+/// Magic prefix of every bridge frame. The trailing digit is the frame
+/// protocol's major version.
 pub const MAGIC: &str = "BRIDGE1";
+
+/// The magic without its version digit, for telling "a bridge frame from a
+/// build we cannot talk to" apart from "not a bridge frame at all".
+pub const MAGIC_FAMILY: &str = "BRIDGE";
+
+/// This build's frame protocol version, `major.minor`. The major must equal
+/// the digit in [`MAGIC`]; the minor rises with additive ops.
+pub const BRIDGE_PROTOCOL_VERSION: &str = "1.0";
 
 /// Upper bound on a frame line. Real frames are a few hundred bytes; the
 /// cap keeps a hostile or confused client from buffering unbounded memory.
@@ -73,9 +90,15 @@ pub struct Reply {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<Vec<SessionEntry>>,
-    /// The daemon's own version, on a `version` reply.
+    /// The daemon's own build version, on a `version` reply. Says which
+    /// binary is running, never whether it is compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The daemon's frame protocol version, on a `version` reply. Absent
+    /// from a daemon built before this field existed, which is itself the
+    /// answer: frame protocol 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proto: Option<String>,
 }
 
 impl Reply {
@@ -86,6 +109,7 @@ impl Reply {
             error: None,
             sessions: None,
             version: None,
+            proto: None,
         }
     }
 
@@ -96,16 +120,19 @@ impl Reply {
             error: None,
             sessions: Some(entries),
             version: None,
+            proto: None,
         }
     }
 
-    /// A `version` result: this daemon is alive and speaks BRIDGE1.
+    /// A `version` result: this daemon is alive, this is the build, and
+    /// this is the frame protocol it speaks.
     pub fn version(version: impl Into<String>) -> Self {
         Self {
             ok: true,
             error: None,
             sessions: None,
             version: Some(version.into()),
+            proto: Some(BRIDGE_PROTOCOL_VERSION.to_string()),
         }
     }
 
@@ -116,6 +143,7 @@ impl Reply {
             error: Some(message.into()),
             sessions: None,
             version: None,
+            proto: None,
         }
     }
 }
@@ -131,8 +159,22 @@ pub fn decode<T: DeserializeOwned>(line: &str) -> Result<T, String> {
     let json = line
         .strip_prefix(MAGIC)
         .map(str::trim_start)
-        .ok_or_else(|| "not a bridge frame (missing BRIDGE1 prefix)".to_string())?;
+        .ok_or_else(|| magic_mismatch(line))?;
     serde_json::from_str(json).map_err(|err| format!("bad bridge frame: {err}"))
+}
+
+/// Why a line did not start with our magic. A frame from a *different* bridge
+/// major is a version mismatch and has to say so: reporting it as "not a
+/// bridge frame" would send whoever hit it looking for a networking fault
+/// instead of for a stale binary.
+fn magic_mismatch(line: &str) -> String {
+    match line.split_whitespace().next() {
+        Some(word) if word.starts_with(MAGIC_FAMILY) && word != MAGIC => format!(
+            "bridge frame protocol `{word}` is not compatible with this build's \
+             `{MAGIC}`: the two binaries need to match"
+        ),
+        _ => format!("not a bridge frame (missing {MAGIC} prefix)"),
+    }
 }
 
 /// Read one `\n`-terminated frame line, bounded by [`MAX_LINE_BYTES`].
@@ -217,8 +259,49 @@ mod tests {
         assert_eq!(decode::<Reply>(&encode(&error)).unwrap(), error);
 
         let version = Reply::version("1.8.0");
-        assert_eq!(encode(&version), r#"BRIDGE1 {"ok":true,"version":"1.8.0"}"#);
+        assert_eq!(
+            encode(&version),
+            r#"BRIDGE1 {"ok":true,"version":"1.8.0","proto":"1.0"}"#
+        );
         assert_eq!(decode::<Reply>(&encode(&version)).unwrap(), version);
+    }
+
+    #[test]
+    fn a_version_reply_separates_the_build_from_the_protocol() {
+        // Two numbers, two jobs: `version` says which binary is running,
+        // `proto` says whether it can be talked to. Conflating them is the
+        // whole thing this field exists to prevent.
+        let reply = Reply::version("9.9.9");
+        assert_eq!(reply.version.as_deref(), Some("9.9.9"));
+        assert_eq!(reply.proto.as_deref(), Some(BRIDGE_PROTOCOL_VERSION));
+        assert!(
+            MAGIC.ends_with(BRIDGE_PROTOCOL_VERSION.split('.').next().unwrap()),
+            "the magic's digit is the frame protocol's major"
+        );
+    }
+
+    #[test]
+    fn a_reply_from_before_the_proto_field_still_decodes() {
+        // The deployed daemon this build has to keep talking to. Its silence
+        // means frame 1.0, and must not read as a broken frame.
+        let old = r#"BRIDGE1 {"ok":true,"version":"1.8.0"}"#;
+        let reply = decode::<Reply>(old).unwrap();
+        assert_eq!(reply.version.as_deref(), Some("1.8.0"));
+        assert_eq!(reply.proto, None);
+    }
+
+    #[test]
+    fn a_foreign_magic_is_reported_as_a_version_mismatch() {
+        // Not "not a bridge frame": the far end *is* a bridge, from a major
+        // this build cannot speak, and saying so is the whole diagnosis.
+        let err = decode::<Reply>(r#"BRIDGE2 {"ok":true}"#).unwrap_err();
+        assert!(err.contains("BRIDGE2"), "{err}");
+        assert!(err.contains(MAGIC), "{err}");
+        assert!(err.contains("not compatible"), "{err}");
+
+        // Something that is not a bridge at all still reads as before.
+        let plain = decode::<Reply>(r#"{"ok":true}"#).unwrap_err();
+        assert!(plain.contains("not a bridge frame"), "{plain}");
     }
 
     #[test]
