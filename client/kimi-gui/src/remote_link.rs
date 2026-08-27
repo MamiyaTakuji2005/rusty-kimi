@@ -205,10 +205,26 @@ impl RemoteLink {
         }
     }
 
-    /// Whether the UI should keep repainting: a pending probe or a scheduled
-    /// one means the light can change with no input from the user.
-    pub fn wants_repaint(&self) -> bool {
-        self.wanted || self.probe.is_some()
+    /// How long the UI may sleep before this link needs another frame, or
+    /// `None` when it needs none at all.
+    ///
+    /// A probe already in flight needs no timer — its thread calls `wake`
+    /// the moment it lands. What does need one is the *next* probe coming
+    /// due, and that is seconds away, not milliseconds. Saying so is what
+    /// lets an idle window actually idle: a fixed short interval here means
+    /// redrawing the whole transcript, markdown and diffs and all, twice a
+    /// second forever, for a light that changes once every fifteen.
+    pub fn repaint_delay(&self) -> Option<Duration> {
+        if !self.wanted {
+            return None;
+        }
+        // The only thing a frame would learn while a probe is out is that the
+        // tunnel died, and a dead tunnel fails the probe that is already
+        // running. Come back on the same cadence as a scheduled probe.
+        let Some(at) = self.next_probe else {
+            return Some(PROBE_INTERVAL_UP);
+        };
+        Some(at.saturating_duration_since(Instant::now()))
     }
 
     /// Hover text: what this button will do, and why it is not green.
@@ -357,7 +373,7 @@ mod tests {
     fn starts_blank_and_only_lights_up_when_asked() {
         let mut link = RemoteLink::new(remote_without_tunnel());
         assert_eq!(link.light(), LinkLight::Blank);
-        assert!(!link.wants_repaint());
+        assert!(link.repaint_delay().is_none());
         // Polling an idle link must not start probing on its own.
         link.poll(|| {});
         assert_eq!(link.light(), LinkLight::Blank);
@@ -369,7 +385,7 @@ mod tests {
         let mut link = RemoteLink::new(remote_without_tunnel());
         link.connect();
         assert_eq!(link.light(), LinkLight::Trying);
-        assert!(link.wants_repaint());
+        assert!(link.repaint_delay().is_some());
 
         // Drive it until the probe against a dead port comes back.
         for _ in 0..200 {
@@ -384,13 +400,39 @@ mod tests {
         assert!(link.hover_text().contains("connecting to test"));
     }
 
+    /// The bug this guards against: a connected link used to report "wants a
+    /// repaint" unconditionally, so the window asked for a frame every 500 ms
+    /// forever. Idle, that redrew the entire transcript — re-parsing every
+    /// markdown block and recomputing every diff — twice a second, for a
+    /// light that only changes once every fifteen. Between probes the honest
+    /// answer is "sleep".
+    #[test]
+    fn a_connected_link_sleeps_between_probes() {
+        let mut link = RemoteLink::new(remote_without_tunnel());
+        link.connect();
+        // Drive it until the first probe against a dead port has come back
+        // and the next one has been scheduled.
+        for _ in 0..200 {
+            link.poll(|| {});
+            if link.probe.is_none() && link.next_probe.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let delay = link.repaint_delay().expect("a connected link still wakes");
+        assert!(
+            delay > Duration::from_millis(500),
+            "an idle connected link should sleep between probes, not spin: {delay:?}"
+        );
+    }
+
     #[test]
     fn disconnect_goes_dark() {
         let mut link = RemoteLink::new(remote_without_tunnel());
         link.connect();
         link.disconnect();
         assert_eq!(link.light(), LinkLight::Blank);
-        assert!(!link.wants_repaint());
+        assert!(link.repaint_delay().is_none());
         assert!(link.hover_text().starts_with("click: connect"));
     }
 

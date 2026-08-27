@@ -1098,10 +1098,11 @@ impl eframe::App for KimiGuiApp {
         if let Some(link) = &mut self.link {
             let repaint_ctx = ctx.clone();
             link.poll(move || repaint_ctx.request_repaint());
-            if link.wants_repaint() {
-                // A probe is in flight or due: come back for its result even
-                // if the user never touches anything.
-                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            if let Some(delay) = link.repaint_delay() {
+                // Come back when the next probe is actually due, so the light
+                // still updates on its own without the window busy-redrawing
+                // between probes. A probe already out wakes us itself.
+                ctx.request_repaint_after(delay);
             }
         }
         // Before any widget: the shortcuts take the keys they need out of the
