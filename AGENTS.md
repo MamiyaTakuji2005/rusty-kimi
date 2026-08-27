@@ -74,11 +74,12 @@ server/                  agent server + its abstractions
 client/                  frontends + shared frontend kit
   inkvizitor/              egui frontend (bin: inkvizitor)
   dvadva-tui/              ratatui terminal frontend (bin: dvadva-tui)
+  dvadva-android/          Kotlin/Compose phone frontend (attaches over WireGuard; not Cargo)
   wire-client/           shared frontend kit: client + transcript + session list
 remote/                  relay daemons for remote access
   dvadva-bridge/           byte-relay daemon pair (bin: dvadva-bridge; design in remote/PLAN.md)
 _history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
-PLAN-detached-agent.md   design record: headless agent + attach/detach (phases 0-1 done)
+PLAN-detached-agent.md   design record: headless agent + attach/detach (phases 0-1 done, 2 begun)
 ```
 
 Per-module notes live in sub-tree `AGENTS.md` files — read them before touching
@@ -115,9 +116,17 @@ the loop**.
   the session owns (one turn at a time, the open approvals, the toolset) lives
   on `SessionCore`; what a client owns (initialized, catching up, its external
   tools) lives on `Connection`. Events broadcast, responses are unicast; see
-  `wire/AGENTS.md` for the rules. Lifetime is still tied to the stdio client
-  — detaching without killing the agent is Phase 2 of
-  `PLAN-detached-agent.md`.
+  `wire/AGENTS.md` for the rules.
+- **Detach without dying**: with `--listen [ADDR]` the agent also serves a
+  loopback socket (`wire/listener.rs`), and there a client leaving is a
+  detach rather than a kill — the turn keeps running, and the next client to
+  attach replays into it. Over plain stdio the pipe is still the lifetime,
+  deliberately: that is the one-shot path. The socket binds loopback only and
+  takes a token from the session's `attach.token`, checked before any wire
+  byte is read. The bound address is announced on stderr as
+  `dvadva-agent: listening {json}`, which is how a supervisor learns an
+  ephemeral port. The rest of Phase 2 (bridge supervisor, live-session
+  registry) is in `PLAN-detached-agent.md`.
 - **Wire surface**: the frontend sends `initialize` / `prompt` / `cancel` /
   `replay` / `steer` plus approval replies; the agent answers with typed
   events (`TurnBegin`, `StepBegin`, `ContentPart`, `ToolResult`,
@@ -295,6 +304,18 @@ answering), `input.rs` (single-line editor, char-boundary safe; the cursor
 column is display width, so CJK counts two cells),
 `render.rs` (blocks → pre-wrapped styled rows with width-aware wrapping;
 scrollback is index arithmetic on the row list).
+
+**`client/dvadva-android/`** — the Android phone frontend (Kotlin + Compose;
+one conversation per run, like the TUI). A deliberate **port, not a fork**:
+`app/.../proto/` mirrors `wire-client`'s `bridge.rs`/`lib.rs` and the agent's
+wire types in pure Kotlin (no Android imports, JVM-unit-testable), pinned to
+the Rust side by golden-vector tests asserting the same frames the Rust
+suites assert; `session/Transcript.kt` is a simplified fold of
+`transcript.rs`. It is a dumb TCP client over the phone's *existing*
+WireGuard tunnel to a `dvadva-bridge` daemon — no embedded tunnel, no
+VpnService, `INTERNET` as its only permission. Not part of the Cargo
+workspace; its own `AGENTS.md` has the rules and build notes (the Gradle
+wrapper jar is generated, not committed).
 
 **`client/inkvizitor/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
 `focus_owner()`, the split panes; holds one `RemoteLink` per configured

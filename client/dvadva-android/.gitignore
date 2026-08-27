@@ -1,0 +1,17 @@
+# Android Studio / Gradle
+.gradle/
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# IntelliJ
+.idea/
+*.iml
+
+# Kotlin
+.kotlin/
+
+# NOTE: gradle/wrapper/gradle-wrapper.jar and the gradlew scripts are normally
+# committed; they are generated on first `gradle wrapper` run instead.

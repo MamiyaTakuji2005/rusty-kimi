@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Four squares, 2x2, centered in the 66dp adaptive-icon safe zone. The two
+     on the anti-diagonal use the project cyan; the two on the main diagonal
+     stay white — "2 squared", tilted reading order be damned. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M29,29h22v22h-22z" />
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M57,29h22v22h-22z" />
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M29,57h22v22h-22z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M57,57h22v22h-22z" />
+</vector>
