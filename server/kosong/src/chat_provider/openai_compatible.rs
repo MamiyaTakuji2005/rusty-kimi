@@ -85,6 +85,13 @@ impl OpenAiCompatible {
 
         let client = Client::builder()
             .default_headers(headers)
+            // Bound every request: without these a parked upstream (a free-tier
+            // model that never answers, a half-open connection) wedges the step
+            // forever — the retry loop only sees requests that *fail*.
+            // `read_timeout` caps the gap between stream chunks, not the whole
+            // response, so long generations still stream freely.
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|err| ChatProviderError::new(ChatProviderErrorKind::Other, err.to_string()))?;
 
