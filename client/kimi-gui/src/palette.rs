@@ -4,6 +4,13 @@
 //! Adding a feature here costs one row in [`COMMANDS`] and one arm in
 //! `KimiGuiApp::run_command` — no tab-strip real estate, no new binding.
 //!
+//! The remote commands take a **trailing remote name**: `open remote session
+//! vps` acts on the remote named `vps`, the bare command on the default one
+//! (the entry marked `default` in `bridge.toml`, else the first) — the same
+//! contract as the TUI's optional `--remote`. One set of rows regardless of
+//! how many remotes are configured; the name only has to be typed when it is
+//! not the default. See [`Entry::takes_remote`] and [`Match::arg`].
+//!
 //! The boundary is deliberate and held strictly: palette commands are **GUI
 //! and orchestration only** — they act on the app and its tabs (open, close,
 //! resume, connect, theme, open files and folders), never on what a *session*
@@ -42,6 +49,9 @@ pub struct Entry {
     pub binding: Option<&'static str>,
     /// Needs an active session to mean anything.
     pub needs_session: bool,
+    /// Accepts a trailing remote name: when the query's last word keeps the
+    /// title from matching, it is peeled off and carried as [`Match::arg`].
+    pub takes_remote: bool,
 }
 
 pub const COMMANDS: &[Entry] = &[
@@ -51,6 +61,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "pick a working directory",
         binding: Some("Ctrl+N"),
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::ResumeSession,
@@ -58,6 +69,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "reopen a past session",
         binding: Some("Ctrl+O"),
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::CloseSession,
@@ -65,27 +77,31 @@ pub const COMMANDS: &[Entry] = &[
         detail: "close the active tab",
         binding: Some("Ctrl+T"),
         needs_session: true,
+        takes_remote: false,
     },
     Entry {
         command: Command::ConnectRemote,
         title: "Connect to remote",
-        detail: "the chain button — green opens a remote session",
+        detail: "the chain button — add a name for a non-default remote",
         binding: None,
         needs_session: false,
+        takes_remote: true,
     },
     Entry {
         command: Command::NewRemoteSession,
         title: "New remote session",
-        detail: "a fresh agent tab on the connected daemon",
+        detail: "a fresh agent tab on the default remote, or on a named one",
         binding: None,
         needs_session: false,
+        takes_remote: true,
     },
     Entry {
         command: Command::OpenRemoteSession,
         title: "Open remote session",
-        detail: "resume a past session from the daemon's machine",
+        detail: "resume a session from the default remote, or a named one",
         binding: None,
         needs_session: false,
+        takes_remote: true,
     },
     Entry {
         command: Command::CycleTheme,
@@ -93,6 +109,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "light, dark, Kimi",
         binding: Some("Ctrl+D"),
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::OpenConfig,
@@ -100,6 +117,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "agent configuration, in the default editor",
         binding: None,
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::OpenMcpConfig,
@@ -107,6 +125,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "MCP server configuration",
         binding: None,
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::OpenBridgeConfig,
@@ -114,6 +133,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "remote endpoints and tunnels, in the default editor",
         binding: None,
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::OpenLogFolder,
@@ -121,6 +141,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "the agent's rolling daily logs",
         binding: None,
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::OpenShareFolder,
@@ -128,6 +149,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "~/.kimi — config, sessions, credentials",
         binding: None,
         needs_session: false,
+        takes_remote: false,
     },
     Entry {
         command: Command::OpenWorkDir,
@@ -135,6 +157,7 @@ pub const COMMANDS: &[Entry] = &[
         detail: "this session's folder, in the file manager",
         binding: None,
         needs_session: true,
+        takes_remote: false,
     },
 ];
 
@@ -144,6 +167,11 @@ pub const COMMANDS: &[Entry] = &[
 pub struct Match {
     pub entry: &'static Entry,
     pub positions: Vec<usize>,
+    /// The trailing remote name, when the entry takes one and the query
+    /// carried one. Verbatim — resolving it against the configured remotes
+    /// (and complaining about a typo) is the command's job, so mid-typing
+    /// never blanks the list.
+    pub arg: Option<String>,
 }
 
 /// Open state of the palette. The matches are recomputed per frame — the list
@@ -180,8 +208,28 @@ impl Palette {
             .enumerate()
             .filter(|(_, entry)| has_session || !entry.needs_session)
             .filter_map(|(index, entry)| {
-                let (score, positions) = score(&self.query, entry.title)?;
-                Some((score, index, Match { entry, positions }))
+                // The whole query as the command name first: an arg is only
+                // what keeps the title from matching, so a bare command
+                // always means the default remote.
+                if let Some((score, positions)) = score(&self.query, entry.title) {
+                    let m = Match {
+                        entry,
+                        positions,
+                        arg: None,
+                    };
+                    return Some((score, index, m));
+                }
+                if !entry.takes_remote {
+                    return None;
+                }
+                let (head, tail) = split_arg(&self.query)?;
+                let (score, positions) = score(head, entry.title)?;
+                let m = Match {
+                    entry,
+                    positions,
+                    arg: Some(tail.to_string()),
+                };
+                Some((score, index, m))
             })
             .collect();
         // Ties keep declaration order, which is roughly frequency of use.
@@ -234,6 +282,16 @@ fn score(query: &str, title: &str) -> Option<(u32, Vec<usize>)> {
         at = found + 1;
     }
     Some((total, positions))
+}
+
+/// Split the query's last whitespace-separated word off as a would-be remote
+/// name: `("open remote session", "vps")`. `None` when there is no split to
+/// make — a single word is a command, never just an argument.
+fn split_arg(query: &str) -> Option<(&str, &str)> {
+    let query = query.trim_end();
+    let at = query.rfind(char::is_whitespace)?;
+    let tail = query[at..].trim_start();
+    (!tail.is_empty()).then_some((&query[..at], tail))
 }
 
 #[cfg(test)]
@@ -359,6 +417,56 @@ mod tests {
         assert_eq!(
             matches.first().map(|m| m.entry.command),
             Some(Command::CloseSession)
+        );
+    }
+
+    /// The rule the remote commands live by: a trailing word the title
+    /// cannot absorb becomes the remote's name; without one the command is
+    /// bare and means the default remote.
+    #[test]
+    fn test_trailing_word_becomes_the_remote_arg() {
+        let matches = with_query("open remote session vps").matches(false);
+        let first = matches.first().expect("matches");
+        assert_eq!(first.entry.command, Command::OpenRemoteSession);
+        assert_eq!(first.arg.as_deref(), Some("vps"));
+
+        let matches = with_query("new remote session buildbox").matches(false);
+        let first = matches.first().expect("matches");
+        assert_eq!(first.entry.command, Command::NewRemoteSession);
+        assert_eq!(first.arg.as_deref(), Some("buildbox"));
+    }
+
+    #[test]
+    fn test_bare_remote_command_carries_no_arg() {
+        let matches = with_query("new remote session").matches(false);
+        let first = matches.first().expect("matches");
+        assert_eq!(first.entry.command, Command::NewRemoteSession);
+        assert_eq!(first.arg, None);
+    }
+
+    #[test]
+    fn test_abbreviation_still_takes_an_arg() {
+        let matches = with_query("nrs vps").matches(false);
+        let first = matches.first().expect("matches");
+        assert_eq!(first.entry.command, Command::NewRemoteSession);
+        assert_eq!(first.arg.as_deref(), Some("vps"));
+    }
+
+    /// Only the remote commands take an argument — a stray word after any
+    /// other command is a non-match, not a silently dropped token.
+    #[test]
+    fn test_other_commands_reject_a_trailing_word() {
+        assert!(with_query("cycle theme vps").matches(true).is_empty());
+    }
+
+    /// A lone word is a command being typed, never just an argument.
+    #[test]
+    fn test_a_single_word_is_not_an_arg() {
+        assert!(
+            with_query("vps")
+                .matches(false)
+                .iter()
+                .all(|m| m.arg.is_none())
         );
     }
 

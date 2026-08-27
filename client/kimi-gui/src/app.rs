@@ -4,16 +4,17 @@
 //!
 //! Session creation lives in the tab strip: the `+` button opens the native
 //! OS folder picker and instantly starts a session in the chosen directory,
-//! while the three buttons pinned to the right edge open the resume menu
-//! with every past session found under `~/.kimi`, manage the connection to
-//! the configured remote — the chain button stays yellow until a daemon
-//! answers, and exists even when none is configured — and cycle the theme.
+//! while the buttons pinned to the right edge open the resume menu with
+//! every past session found under `~/.kimi`, manage the connections to the
+//! configured remotes — one chain button per `[[remotes]]` entry, yellow
+//! until its daemon answers, and a single placeholder chain when none is
+//! configured — and cycle the theme.
 //!
 //! Sessions are **per-tab local or remote**: a tab either owns a
 //! `kimi-agent` child process here, or speaks to one through a `kimi-bridge`
 //! daemon on another machine ([`SessionTarget`]). `+` follows the active
-//! tab's machine — a parallel session of what you are looking at — and the
-//! connect button always opens one on the configured remote.
+//! tab's machine — a parallel session of what you are looking at — and each
+//! connect button opens one on its own remote.
 //!
 //! Everything here is also reachable from the keyboard alone — see
 //! [`KimiGuiApp::handle_shortcuts`].
@@ -66,12 +67,13 @@ enum FocusOwner {
 
 pub struct KimiGuiApp {
     agent_bin: String,
-    /// The configured remote and its connection state. `None` means no
-    /// remote is configured (or the config is broken — see `config_error`);
-    /// the connect button is still there, painting yellow. Sessions are
-    /// per-tab: this is what the tab strip's connect button opens new remote
-    /// tabs against, not a window-wide mode.
-    link: Option<RemoteLink>,
+    /// One connection state per configured remote — a chain button each —
+    /// plus an ad-hoc entry when `--remote host:port` named one outside the
+    /// file. Empty means no remote is configured (or the config is broken —
+    /// see `config_error`); the strip still paints one yellow chain to say
+    /// so. Sessions are per-tab: these are what the remote commands open
+    /// new tabs against, not a window-wide mode.
+    links: Vec<RemoteLink>,
     /// Why `bridge.toml` could not be read, when it exists but is broken —
     /// the connect button is where the user learns of it.
     config_error: Option<String>,
@@ -145,10 +147,10 @@ impl KimiGuiApp {
         let theme = Theme::load();
         theme.apply(&cc.egui_ctx);
 
-        // `--remote` names the remote the first tab opens on; without it a
-        // configured default still gets a button, just no session yet. A
-        // broken bridge.toml must not take the GUI down: the connect button
-        // is always there, and it is where the error surfaces.
+        // `--remote` names the remote the first tab opens on; without it
+        // every configured remote still gets a button, just no session yet.
+        // A broken bridge.toml must not take the GUI down: the connect
+        // button is always there, and it is where the error surfaces.
         let config_error;
         let configured = match remotes::load() {
             Ok(remotes) => {
@@ -163,28 +165,30 @@ impl KimiGuiApp {
             // reason it cannot be had, so it is the error to fail with.
             Err(error) => return Err(error),
         };
-        let chosen = match &remote {
-            Some(spec) => Some(remotes::resolve(spec, &configured)?),
-            None => remotes::default_remote(&configured).cloned(),
-        };
-        let first_target = match (&remote, &chosen) {
-            (Some(_), Some(remote)) => {
-                SessionTarget::Remote(remote.name.clone(), remote.endpoint.clone())
+        // Every configured remote gets a link (and its chain button); the
+        // one `--remote` named — possibly an ad-hoc `host:port` outside the
+        // file — is where the first tab opens, so that connection is wanted:
+        // its light starts yellow and goes green on its own.
+        let mut links: Vec<RemoteLink> = configured.iter().cloned().map(RemoteLink::new).collect();
+        let first_target = match &remote {
+            Some(spec) => {
+                let chosen = remotes::resolve(spec, &configured)?;
+                let index = links
+                    .iter()
+                    .position(|link| link.remote().name == chosen.name)
+                    .unwrap_or_else(|| {
+                        links.push(RemoteLink::new(chosen.clone()));
+                        links.len() - 1
+                    });
+                links[index].connect();
+                SessionTarget::Remote(chosen.name.clone(), chosen.endpoint.clone())
             }
-            _ => SessionTarget::Local,
+            None => SessionTarget::Local,
         };
-        let mut link = chosen.map(RemoteLink::new);
-        // A tab was asked for on the remote, so the connection is wanted:
-        // the light starts yellow and goes green on its own.
-        if let Some(link) = &mut link
-            && first_target != SessionTarget::Local
-        {
-            link.connect();
-        }
 
         let mut app = Self {
             agent_bin: agent_bin.to_string(),
-            link,
+            links,
             config_error,
             sessions: Vec::new(),
             active: 0,
@@ -270,25 +274,61 @@ impl KimiGuiApp {
         Ok(())
     }
 
-    /// Open a session on the configured remote — what the connect button
-    /// does once it is green. The palette's "New remote session" shares it,
-    /// so both answer for the states where there is nothing to open.
-    fn open_remote_session(&mut self, ctx: &egui::Context) {
-        let Some(link) = &self.link else {
-            self.unconfigured_connect();
-            return;
-        };
+    /// The link a remote command should act on: the named one, else the
+    /// default. `Err` is the user-facing explanation — an unknown name
+    /// lists what *is* configured, the way the TUI's `--remote` does.
+    fn target_link(&self, name: Option<&str>) -> Result<usize, String> {
+        pick_link(&self.links, name).map_err(|unknown| match unknown {
+            Some(name) => {
+                let known: Vec<&str> = self
+                    .links
+                    .iter()
+                    .map(|link| link.remote().name.as_str())
+                    .collect();
+                format!(
+                    "`{name}` is not one of the configured remotes ({})",
+                    known.join(", ")
+                )
+            }
+            None => self.unconfigured_message(),
+        })
+    }
+
+    /// The target for a link whose daemon has answered, or `None` with the
+    /// not-yet explanation posted — shared by everything that needs a
+    /// green light to mean anything.
+    fn connected_target(&mut self, index: usize) -> Option<SessionTarget> {
+        let link = &self.links[index];
+        let remote = link.remote();
         if link.light() != LinkLight::Connected {
             self.error = Some(format!(
-                "the daemon at {} has not answered yet.\n\n\
+                "{} ({}) has not answered yet.\n\n\
                  Connect first (chain button or \"Connect to remote\"), then \
                  retry once the light turns green.",
-                link.remote().endpoint
+                remote.name, remote.endpoint
             ));
-            return;
+            return None;
         }
-        let remote = link.remote();
-        let target = SessionTarget::Remote(remote.name.clone(), remote.endpoint.clone());
+        Some(SessionTarget::Remote(
+            remote.name.clone(),
+            remote.endpoint.clone(),
+        ))
+    }
+
+    /// Open a session on a remote — what its connect button does once it
+    /// is green. The palette's "New remote session" shares it, so both
+    /// answer for the states where there is nothing to open.
+    fn open_remote_session(&mut self, ctx: &egui::Context, name: Option<&str>) {
+        match self.target_link(name) {
+            Ok(index) => self.open_remote_session_at(index, ctx),
+            Err(message) => self.error = Some(message),
+        }
+    }
+
+    fn open_remote_session_at(&mut self, index: usize, ctx: &egui::Context) {
+        let Some(target) = self.connected_target(index) else {
+            return;
+        };
         // No args: the daemon supplies the work directory, because this
         // machine cannot name a path that exists on that one.
         if let Err(error) = self.open_session(Vec::new(), ctx, None, &target) {
@@ -298,25 +338,32 @@ impl KimiGuiApp {
 
     /// What a click on the connect button means with no remote behind it:
     /// not a dead end, but a pointer to the file that names one.
-    fn unconfigured_connect(&mut self) {
-        self.error = Some(match &self.config_error {
+    fn unconfigured_message(&self) -> String {
+        match &self.config_error {
             Some(err) => format!("bridge config is broken:\n\n{err}"),
             None => format!(
                 "no remote is configured.\n\nAdd one to {}:\n\n{}",
                 remotes::path().display(),
                 remotes_skeleton()
             ),
-        });
+        }
     }
 
-    /// What the chain button and the palette both mean by "connect": green
+    /// What the chain buttons and the palette both mean by "connect": green
     /// opens a remote session tab, anything else starts the connection (or
     /// retries it now), and nothing configured explains what the file wants.
-    fn connect_remote(&mut self, ctx: &egui::Context) {
-        match self.link.as_mut() {
-            Some(link) if link.light() == LinkLight::Connected => self.open_remote_session(ctx),
-            Some(link) => link.connect(),
-            None => self.unconfigured_connect(),
+    fn connect_remote(&mut self, ctx: &egui::Context, name: Option<&str>) {
+        match self.target_link(name) {
+            Ok(index) => self.connect_remote_at(index, ctx),
+            Err(message) => self.error = Some(message),
+        }
+    }
+
+    fn connect_remote_at(&mut self, index: usize, ctx: &egui::Context) {
+        if self.links[index].light() == LinkLight::Connected {
+            self.open_remote_session_at(index, ctx);
+        } else {
+            self.links[index].connect();
         }
     }
 
@@ -474,21 +521,24 @@ impl KimiGuiApp {
         self.palette.cursor = self.palette.cursor.min(matches.len().saturating_sub(1));
         if accept && let Some(m) = matches.get(self.palette.cursor) {
             let command = m.entry.command;
+            let arg = m.arg.clone();
             self.palette.close();
-            self.run_command(command, ctx);
+            self.run_command(command, arg.as_deref(), ctx);
         }
     }
 
     /// Carry out one palette command. Adding a feature to the palette is a row
-    /// in `palette::COMMANDS` plus an arm here.
-    fn run_command(&mut self, command: Command, ctx: &egui::Context) {
+    /// in `palette::COMMANDS` plus an arm here. `arg` is the trailing remote
+    /// name the palette peeled off, for the commands that take one; a bare
+    /// command means the default remote.
+    fn run_command(&mut self, command: Command, arg: Option<&str>, ctx: &egui::Context) {
         match command {
             Command::NewSession => self.start_folder_pick(ctx),
             Command::ResumeSession => self.open_resume_menu(ctx),
             Command::CloseSession => self.request_close(self.active),
-            Command::ConnectRemote => self.connect_remote(ctx),
-            Command::NewRemoteSession => self.open_remote_session(ctx),
-            Command::OpenRemoteSession => self.open_remote_resume_menu(ctx),
+            Command::ConnectRemote => self.connect_remote(ctx, arg),
+            Command::NewRemoteSession => self.open_remote_session(ctx, arg),
+            Command::OpenRemoteSession => self.open_remote_resume_menu(ctx, arg),
             Command::CycleTheme => self.cycle_theme(ctx),
             Command::OpenConfig => self.open_path(kimi_agent::config::get_config_file()),
             Command::OpenMcpConfig => {
@@ -643,26 +693,21 @@ impl KimiGuiApp {
         self.show_resume_list();
     }
 
-    /// Show the resume list pointed at the connected daemon's machine —
-    /// the palette's "Open remote session". Unlike `Ctrl+O` this does not
-    /// follow the active tab: the machine is the point, so it is named in
-    /// the error when there is nothing to point at yet.
-    fn open_remote_resume_menu(&mut self, ctx: &egui::Context) {
-        let Some(link) = &self.link else {
-            self.unconfigured_connect();
+    /// Show the resume list pointed at a remote's machine — the palette's
+    /// "Open remote session". Unlike `Ctrl+O` this does not follow the
+    /// active tab: the machine is the point, so it is named in the error
+    /// when there is nothing to point at yet.
+    fn open_remote_resume_menu(&mut self, ctx: &egui::Context, name: Option<&str>) {
+        let index = match self.target_link(name) {
+            Ok(index) => index,
+            Err(message) => {
+                self.error = Some(message);
+                return;
+            }
+        };
+        let Some(target) = self.connected_target(index) else {
             return;
         };
-        if link.light() != LinkLight::Connected {
-            self.error = Some(format!(
-                "the daemon at {} has not answered yet.\n\n\
-                 Connect first (chain button or \"Connect to remote\"), then \
-                 retry once the light turns green.",
-                link.remote().endpoint
-            ));
-            return;
-        }
-        let remote = link.remote();
-        let target = SessionTarget::Remote(remote.name.clone(), remote.endpoint.clone());
         if target != self.resume_source {
             self.resume_sessions.clear();
             self.resume_listing = None;
@@ -745,24 +790,30 @@ impl KimiGuiApp {
             // frame is replaced with a bare horizontal margin — a nested panel
             // brings its own vertical padding, which stacks on the strip's own
             // and puts the buttons in a band half again their height.
-            // The connect button is always there — yellow with no remote
-            // configured, yellow while one does not answer — so the strip
-            // never changes width and the button never moves.
-            let link_state = match self.link.as_ref() {
-                Some(link) => (link.light(), link.hover_text()),
-                None => (
-                    LinkLight::Trying,
-                    match &self.config_error {
-                        Some(err) => format!("bridge config broken:\n{err}\nclick for details"),
-                        None => format!(
-                            "no remote configured\nclick for how to add one to {}",
-                            remotes::path().display()
-                        ),
-                    },
-                ),
+            // One chain button per configured remote — and a single
+            // placeholder chain when none is configured (or the config is
+            // broken), so the strip always says how this machine reaches
+            // elsewhere and where to fix it when it cannot.
+            let lights: Vec<(LinkLight, String)> = if self.links.is_empty() {
+                let hover = match &self.config_error {
+                    Some(err) => format!("bridge config broken:\n{err}\nclick for details"),
+                    None => format!(
+                        "no remote configured\nclick for how to add one to {}",
+                        remotes::path().display()
+                    ),
+                };
+                vec![(LinkLight::Trying, hover)]
+            } else {
+                self.links
+                    .iter()
+                    .map(|link| (link.light(), link.hover_text()))
+                    .collect()
             };
-            let width = 99.0;
-            let (book, link, paint) = egui::SidePanel::right("tabs_right")
+            // Sized to its buttons — book + chains + theme — their gaps and
+            // margins, plus the slack the old fixed 99 carried for three.
+            let buttons = 2 + lights.len();
+            let width = 15.0 + buttons as f32 * bar.height + (buttons - 1) as f32 * bar.spacing;
+            let (book, link_hits, paint) = egui::SidePanel::right("tabs_right")
                 .resizable(false)
                 .exact_width(width)
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0)))
@@ -771,11 +822,18 @@ impl KimiGuiApp {
                         let book = bar
                             .square(ui, "📖")
                             .on_hover_text("resume a session (Ctrl+O)");
-                        let (light, hover) = link_state;
-                        let link = crate::remote_link::link_button(bar, ui, light, &colors)
-                            .on_hover_text(hover);
+                        let mut hits = None;
+                        for (index, (light, hover)) in lights.iter().enumerate() {
+                            let link = crate::remote_link::link_button(bar, ui, *light, &colors)
+                                .on_hover_text(hover);
+                            if link.clicked() {
+                                hits = Some((index, true));
+                            } else if link.secondary_clicked() {
+                                hits = Some((index, false));
+                            }
+                        }
                         let paint = bar.square(ui, theme.glyph()).on_hover_text(theme.hover());
-                        (book, link, paint)
+                        (book, hits, paint)
                     })
                     .inner
                 })
@@ -783,11 +841,7 @@ impl KimiGuiApp {
             if book.clicked() {
                 refresh_resume = true;
             }
-            if link.clicked() {
-                link_click = Some(true);
-            } else if link.secondary_clicked() {
-                link_click = Some(false);
-            }
+            link_click = link_hits;
             if paint.clicked() {
                 cycle_theme = true;
             }
@@ -842,10 +896,15 @@ impl KimiGuiApp {
         }
         match link_click {
             // Green means there is something to open; anything else means
-            // the user wants the connection to start (or to retry now).
-            Some(true) => self.connect_remote(ctx),
-            Some(false) => {
-                if let Some(link) = self.link.as_mut() {
+            // the user wants the connection to start (or to retry now). The
+            // placeholder chain has no link behind it — its click explains
+            // how to configure one.
+            Some((_, true)) if self.links.is_empty() => {
+                self.error = Some(self.unconfigured_message());
+            }
+            Some((index, true)) => self.connect_remote_at(index, ctx),
+            Some((index, false)) => {
+                if let Some(link) = self.links.get_mut(index) {
                     link.disconnect();
                 }
             }
@@ -977,7 +1036,7 @@ impl KimiGuiApp {
         let cursor = self.palette.cursor.min(matches.len().saturating_sub(1));
         let want_scroll = std::mem::take(&mut self.palette.scroll);
         let accent = self.theme.colors().accent;
-        let mut chosen: Option<Command> = None;
+        let mut chosen: Option<(Command, Option<String>)> = None;
         let mut hovered: Option<usize> = None;
         let query_id = egui::Id::new("palette_query");
         egui::Window::new("Command palette")
@@ -1017,10 +1076,25 @@ impl KimiGuiApp {
                     .show(ui, |ui| {
                         for (index, m) in matches.iter().enumerate() {
                             let selected = index == cursor;
-                            let title = highlighted_title(ui, m.entry.title, &m.positions, accent);
+                            let mut title =
+                                highlighted_title(ui, m.entry.title, &m.positions, accent);
+                            // The peeled-off remote name rides along in the
+                            // row, so what Enter would act on is visible
+                            // before it is pressed.
+                            if let Some(arg) = &m.arg {
+                                title.append(
+                                    &format!(" {arg}"),
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: egui::TextStyle::Button.resolve(ui.style()),
+                                        color: accent,
+                                        ..Default::default()
+                                    },
+                                );
+                            }
                             let row = ui.selectable_label(selected, title);
                             if row.clicked() {
-                                chosen = Some(m.entry.command);
+                                chosen = Some((m.entry.command, m.arg.clone()));
                             }
                             // The keyboard cursor follows the mouse, the way
                             // it does in Sublime's palette: whichever row you
@@ -1051,9 +1125,9 @@ impl KimiGuiApp {
         if let Some(index) = hovered {
             self.palette.cursor = index;
         }
-        if let Some(command) = chosen {
+        if let Some((command, arg)) = chosen {
             self.palette.close();
-            self.run_command(command, ctx);
+            self.run_command(command, arg.as_deref(), ctx);
         }
     }
 
@@ -1095,7 +1169,7 @@ impl eframe::App for KimiGuiApp {
 
         self.poll_folder_pick(ctx);
         self.poll_resume_listing();
-        if let Some(link) = &mut self.link {
+        for link in &mut self.links {
             let repaint_ctx = ctx.clone();
             link.poll(move || repaint_ctx.request_repaint());
             if let Some(delay) = link.repaint_delay() {
@@ -1138,6 +1212,26 @@ impl eframe::App for KimiGuiApp {
         for session in &mut self.sessions {
             session.shutdown();
         }
+    }
+}
+
+/// Which of `links` a remote command means: the named one, else the default
+/// — the entry marked `default` in `bridge.toml`, else the first, the same
+/// rule as `remotes::default_remote`. `Err(Some(name))` is an unknown name,
+/// `Err(None)` no remotes at all; the caller owns the wording of both.
+fn pick_link(links: &[RemoteLink], name: Option<&str>) -> Result<usize, Option<String>> {
+    if links.is_empty() {
+        return Err(None);
+    }
+    match name {
+        Some(name) => links
+            .iter()
+            .position(|link| link.remote().name == name)
+            .ok_or_else(|| Some(name.to_string())),
+        None => Ok(links
+            .iter()
+            .position(|link| link.remote().default)
+            .unwrap_or(0)),
     }
 }
 
@@ -1303,8 +1397,45 @@ fn install_fallback_fonts(ctx: &egui::Context) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::install_fallback_fonts;
+    use super::{install_fallback_fonts, pick_link};
+    use crate::remote_link::RemoteLink;
     use crate::theme::{MOON_PHASES, Theme};
+    use wire_client::remotes::Remote;
+
+    fn link(name: &str, default: bool) -> RemoteLink {
+        RemoteLink::new(Remote {
+            name: name.into(),
+            endpoint: "127.0.0.1:1".into(),
+            tunnel: None,
+            default,
+        })
+    }
+
+    /// The palette's contract: a bare remote command means the default —
+    /// the entry marked in bridge.toml, else the first — and a name picks
+    /// its remote wherever it sits in the file.
+    #[test]
+    fn test_pick_link_bare_means_the_default() {
+        let links = [link("vps", false), link("buildbox", true)];
+        assert_eq!(pick_link(&links, None), Ok(1));
+
+        let unmarked = [link("vps", false), link("buildbox", false)];
+        assert_eq!(pick_link(&unmarked, None), Ok(0));
+    }
+
+    #[test]
+    fn test_pick_link_takes_a_name() {
+        let links = [link("vps", false), link("buildbox", true)];
+        assert_eq!(pick_link(&links, Some("vps")), Ok(0));
+        // An unknown name is handed back for the caller's error message.
+        assert_eq!(pick_link(&links, Some("vpz")), Err(Some("vpz".to_string())));
+    }
+
+    #[test]
+    fn test_pick_link_with_nothing_configured() {
+        assert_eq!(pick_link(&[], None), Err(None));
+        assert_eq!(pick_link(&[], Some("vps")), Err(None));
+    }
 
     /// The glyphs the toolbar and the Kimi spinner are made of. Without a font
     /// behind them they do not fail loudly — they render as tofu boxes, which
