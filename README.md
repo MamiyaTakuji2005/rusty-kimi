@@ -10,6 +10,9 @@ dvadva-tui (Rust, ratatui) ──Wire JSON-RPC / stdio──▶  dvadva-agent (R
                   └─(optional)─ dvadva-bridge ──TCP (ssh -L)──▶ dvadva-agent on a remote box
 ```
 
+An agent can run detached: frontends attach, leave, and rejoin — see
+[Detached agents](#detached-agents).
+
 ## The pieces
 
 **`dvadva-agent`** (`server/dvadva-agent/`) is the agent server — wire-only, no UI
@@ -17,24 +20,27 @@ of its own. It owns the agent loop, LLM provider calls (Kimi,
 OpenAI-compatible, Echo variants for tests), context management and
 auto-compaction, the built-in tools (Shell, file Read/Write/Replace/Glob/Grep,
 web search/fetch, todo, subagents/fork, undo, dmail, think), skills and flows,
-MCP, and session persistence under `~/.kimi`.
+MCP, and session persistence under `~/.kimi`. With `--listen` it serves
+several clients over loopback TCP and outlives them, registered under
+`~/.kimi/live/`.
 
 **`inkvizitor`** (`client/inkvizitor/`) is the native egui frontend and canonical
-client: sessions in tabs (one `dvadva-agent` subprocess each, forks as sub-tabs),
-splittable into panes that each view the same set of tabs, full keyboard
-control, a `Ctrl+P` command palette, light/dark/Kimi themes, approval prompts,
-a live status bar, and the streamed transcript.
+client: sessions in tabs (a local `dvadva-agent` subprocess each, or an
+attached remote one; forks as sub-tabs), splittable into panes that each view
+the same set of tabs, full keyboard control, a `Ctrl+P` command palette,
+light/dark/Kimi themes, approval prompts, a live status bar, and the streamed
+transcript.
 
 **`dvadva-tui`** (`client/dvadva-tui/`) is the ratatui terminal frontend — one
-session per invocation. (The original Python TUI is archived in a separate
-private repo.)
+session per invocation; a remote session is attached, not owned. (The original
+Python TUI is archived in a separate private repo.)
 
 **The Wire protocol is the contract.** Frontends send `initialize`, `prompt`,
-`cancel`, `replay`, and `steer` plus approval replies; the agent streams back
-typed events (`TurnBegin`, `ContentPart`, `ToolResult`, `TurnEnd`, …). The
-protocol, the `~/.kimi` data layout, and the `kimi_cli.tools.*` tool identity
-are compatibility invariants: any client speaking the protocol can drive the
-agent.
+`cancel`, `replay`, `steer`, and `shutdown` plus approval replies; the agent
+streams back typed events (`TurnBegin`, `ContentPart`, `ToolResult`,
+`TurnEnd`, …). The protocol, the `~/.kimi` data layout, and the
+`kimi_cli.tools.*` tool identity are compatibility invariants: any client
+speaking the protocol can drive the agent.
 
 ## Quick start
 
@@ -46,7 +52,8 @@ cargo build -p dvadva-agent -p inkvizitor
 - `--agent-bin <path>` (or `KIMI_AGENT_BIN`) points a frontend at the agent
   binary; remaining arguments are forwarded to the agent verbatim (`-w <dir>`,
   `--session <id>`, `--continue`, `--model <name>`, …).
-- Run `dvadva-agent` on its own for a headless server.
+- Run `dvadva-agent` on its own for a headless server; `--listen [addr]`
+  serves it over loopback TCP, detached.
 
 > **Windows note:** "Access is denied" replacing `dvadva-agent.exe` during a
 > build means a running `inkvizitor`/`dvadva-agent` holds the binary — close it
@@ -80,6 +87,7 @@ the agent rewrites that file and would drop unknown sections.
 [serve]
 listen = "127.0.0.1:9000"
 work_dir = "/home/kimi"       # default for sessions that pass no -w
+agent_idle_timeout = 3600     # stop agents nobody rejoins (0 disables)
 
 # On your machine: the remotes the frontends can reach.
 [[remotes]]
@@ -113,7 +121,9 @@ the first); append a name — `open remote session vps` — to pick another.
 
 Sessions are per-tab: local and remote tabs live side by side, `+` opens
 another session on the active tab's machine, and the resume menu lists the
-sessions of whichever machine you are looking at. A session that names no `-w`
+sessions of whichever machine you are looking at, marking the ones an agent
+is hosting — picking one joins that agent (see
+[Detached agents](#detached-agents)). A session that names no `-w`
 gets the daemon's default work directory (`[serve] work_dir`, else the remote
 user's home) — a frontend on another OS cannot name a path that exists over
 there, so it doesn't have to. Design record: [`remote/PLAN.md`](remote/PLAN.md).
@@ -135,6 +145,35 @@ User=kimi
 Keep the listen address on loopback: anything that reaches that port can run
 commands as this user. Use a dedicated unprivileged user and let ssh be the
 only way in.
+
+## Detached agents
+
+An agent can outlive its clients. `--listen [addr]` (loopback only) serves the
+wire over TCP next to stdio: clients attach and leave, the agent keeps its
+turn and its context, and it registers itself under `~/.kimi/live/` so another
+process can find it. `--idle-timeout <secs>` ends an agent with nobody
+attached and nothing to do for that long — a turn parked on an approval with
+no client counts as idle, a working turn never does. Off by default: whoever
+typed `--listen` owns the process.
+
+Remote sessions are attached, not owned. Closing the tab or quitting the TUI
+leaves the agent running on the far machine; reopening the session rejoins it,
+because `--remote` attaches by session id. The resume menus mark live
+sessions, and picking one joins the running agent instead of starting another.
+A connection that drops is a *detach*, not a failure: inkvizitor retries with
+a capped backoff and then offers a button, dvadva-tui binds `Ctrl+R` (and
+prints the rejoin command on exit). Rejoining finds the live agent or starts a
+fresh one on the same session files — the frontend never knows which happened.
+
+A detached agent ends three ways, all through one stop token: a signal, the
+wire's `shutdown` method (inkvizitor's "Stop agent", dvadva-tui's `Ctrl+K` —
+quit *and* stop), and the idle timeout. `dvadva-bridge remote` supervises the
+agents it starts: they get `--listen` and `--idle-timeout` prepended
+(`[serve] agent_idle_timeout`), because the daemon is where agents accumulate.
+Local sessions stay stdio children that end when closed — a local `--listen`
+agent can be joined from either frontend, but the frontends do not spawn local
+sessions that way. Design record:
+[PLAN-detached-agent.md](PLAN-detached-agent.md).
 
 ## Repo layout
 
@@ -163,7 +202,8 @@ exit:
 ```sh
 ./target/debug/dvadva-tui -w /some/dir
 # Enter sends · Esc cancels the turn · 1/2/3 answer approvals · Tab cycles fork views
-# PgUp/PgDn or mouse wheel scrolls · Ctrl+O resume menu · Ctrl+C quits
+# PgUp/PgDn or mouse wheel scrolls · Ctrl+O resume menu · Ctrl+R rejoins a detach
+# Ctrl+C quits · Ctrl+K quits and stops a remote agent
 ```
 
 ## License & attribution
