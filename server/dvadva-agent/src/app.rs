@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -18,6 +19,7 @@ use crate::soul::context::Context;
 use crate::soul::kimisoul::KimiSoul;
 use crate::soul::run_soul;
 use crate::wire::WireMessage;
+use crate::wire::listener;
 use crate::wire::server::WireServer;
 
 pub struct KimiCLI {
@@ -216,5 +218,28 @@ impl KimiCLI {
     pub async fn run_wire_stdio(&self) -> anyhow::Result<()> {
         let mut server = WireServer::new(Arc::clone(&self.soul));
         server.serve().await
+    }
+
+    /// Serve on a loopback socket, outliving the clients that attach to it.
+    ///
+    /// The token file defaults into the session directory, so a session's
+    /// secret lives beside its transcript and a second session gets its own.
+    pub async fn run_wire_listening(
+        &self,
+        addr: SocketAddr,
+        token_file: Option<PathBuf>,
+    ) -> anyhow::Result<()> {
+        let token_file = token_file
+            .unwrap_or_else(|| self.runtime.session.dir().join(listener::TOKEN_FILE_NAME));
+        let server = Arc::new(WireServer::new(Arc::clone(&self.soul)));
+        listener::serve_detachable(
+            server,
+            listener::ListenOptions {
+                addr,
+                token_file,
+                inherit_stdio: true,
+            },
+        )
+        .await
     }
 }

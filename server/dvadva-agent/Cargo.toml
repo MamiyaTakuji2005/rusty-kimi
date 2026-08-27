@@ -21,7 +21,9 @@ uuid.workspace = true
 clap.workspace = true
 futures.workspace = true
 async-stream.workspace = true
-tokio.workspace = true
+# The workspace tokio feature set covers neither listening sockets nor
+# signals; the detachable transport (wire/listener.rs) needs both.
+tokio = { workspace = true, features = ["net", "signal"] }
 tokio-stream.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true

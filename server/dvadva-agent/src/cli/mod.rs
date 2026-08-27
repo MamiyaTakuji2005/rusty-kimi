@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use crate::constant::VERSION;
 use crate::metadata::{load_metadata, save_metadata};
 use crate::session::Session;
 use crate::utils::init_logging;
+use crate::wire::listener::DEFAULT_LISTEN_ADDR;
 use crate::wire::protocol::WIRE_PROTOCOL_VERSION;
 use tracing::{info, warn};
 
@@ -106,6 +108,22 @@ pub struct Cli {
 
     #[arg(long = "wire", hide = true, help = "Deprecated no-op flag.")]
     wire: bool,
+
+    #[arg(
+        long = "listen",
+        value_name = "ADDR",
+        num_args = 0..=1,
+        default_missing_value = DEFAULT_LISTEN_ADDR,
+        help = "Also serve clients on a loopback TCP address, and keep running when they detach. Accepts a port or an address. Default: stdio only; with no value, 127.0.0.1:0."
+    )]
+    listen: Option<String>,
+
+    #[arg(
+        long = "listen-token-file",
+        value_name = "PATH",
+        help = "File holding the secret an attaching client must present. Created on first use. Default: attach.token in the session directory."
+    )]
+    listen_token_file: Option<PathBuf>,
 
     #[arg(
         long = "agent",
@@ -219,6 +237,11 @@ pub async fn run() -> Result<()> {
 
     validate_cli_args(&cli).await?;
 
+    let listen_addr = match cli.listen.as_deref() {
+        Some(value) => Some(parse_listen_addr(value)?),
+        None => None,
+    };
+
     let config_input = if let Some(config_string) = cli.config_string.as_ref() {
         let config = load_config_from_string(config_string)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -270,9 +293,32 @@ pub async fn run() -> Result<()> {
     .await?;
 
     let session = instance.session().clone();
-    instance.run_wire_stdio().await?;
+    match listen_addr {
+        // The pipe is the lifetime: this client spawned us and closing stdin
+        // is how it says it is done.
+        None => instance.run_wire_stdio().await?,
+        // Clients come and go; the process outlives them.
+        Some(addr) => {
+            instance
+                .run_wire_listening(addr, cli.listen_token_file.clone())
+                .await?
+        }
+    }
     post_run(&session).await?;
     Ok(())
+}
+
+/// `--listen` takes a port or a full address, because "which port" is the
+/// only part anyone actually wants to choose. The loopback rule is enforced
+/// where the bind happens, not here, so there is one of it.
+fn parse_listen_addr(value: &str) -> Result<SocketAddr> {
+    if let Ok(addr) = value.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    if let Ok(port) = value.parse::<u16>() {
+        return Ok(SocketAddr::from(([127, 0, 0, 1], port)));
+    }
+    anyhow::bail!("--listen wants a port or an address like 127.0.0.1:9100, not `{value}`.")
 }
 
 async fn validate_cli_args(cli: &Cli) -> Result<()> {
@@ -303,6 +349,12 @@ async fn validate_cli_args(cli: &Cli) -> Result<()> {
 
     if cli.thinking && cli.no_thinking {
         anyhow::bail!("Cannot combine --thinking and --no-thinking.");
+    }
+
+    // A token only guards the listener. Accepting the flag without it would
+    // read as "this stdio session is protected", which it is not.
+    if cli.listen_token_file.is_some() && cli.listen.is_none() {
+        anyhow::bail!("Cannot use --listen-token-file without --listen.");
     }
 
     if let Some(session_id) = cli.session_id.as_ref() {

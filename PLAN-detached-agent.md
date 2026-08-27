@@ -268,7 +268,7 @@ turn, as before.
 
 ---
 
-## Phase 2 — detach
+## Phase 2 — detach — **soft detach done**, supervisor and registry not started
 
 Small once Phase 1 lands.
 
@@ -277,12 +277,12 @@ Today detach means kill: `serve()` is hardwired to `tokio::io::stdin()`
 TCP connection with `kill_on_drop(true)` (`remote_daemon.rs:180`) and
 documents connection lifetime *as* agent lifetime.
 
-- **Generalize the transport.** `serve()` over a listener rather than stdio;
-  loopback TCP, since the bridge already assumes TCP and it behaves the same
-  on both platforms. Keep stdio mode — it is the one-shot path and every test
-  uses it.
-- **stdin EOF stops being fatal**; the last client detaching leaves the
-  process running.
+- ~~**Generalize the transport.**~~ **Done.** `serve()` over a listener rather
+  than stdio; loopback TCP, since the bridge already assumes TCP and it
+  behaves the same on both platforms. Keep stdio mode — it is the one-shot
+  path and every test uses it.
+- ~~**stdin EOF stops being fatal**~~ **Done**, on the listening transport;
+  the last client detaching leaves the process running.
 - **Make `dvadva-bridge remote` a supervisor.** `Request::Spawn { args }`
   becomes `Request::Attach { session_id }`: find-or-start an agent for that
   session, relay, and do not kill it when the socket drops. The daemon already
@@ -311,6 +311,48 @@ A listening agent is a remote shell with no auth — the same hazard
 `remote/PLAN.md` handles by insisting on loopback plus `ssh -L`. Same rule
 applies, written down again at the new listener, plus a token file so a second
 local user cannot attach to your session.
+
+### What shipped in the soft-detach slice
+
+`wire/listener.rs`, `--listen [ADDR]`, `--listen-token-file PATH`, and the
+tests in `tests/wire_detach.rs` (over real sockets, because half the point is
+what a *socket* does when it drops).
+
+**Lifetime turned out not to be a transport property that needed
+generalizing — it was a policy that had never been named.** `serve()` over
+stdio still ends the session at EOF, deliberately: that is the one-shot path,
+where the frontend spawned the process and closing stdin is how it says it is
+done. The listener simply does not call `shutdown` when a connection ends.
+Nothing below `serve_connection` changed, which is the Phase 1 seam paying
+off.
+
+**`--listen` is additive, not a mode.** The agent keeps serving whoever handed
+it its pipes *and* the socket, so a bridge-spawned agent can outlive its
+spawner without the bridge changing first. It skips stdio when stdin is a
+terminal, or a human running the command would get wire JSON sprayed at them.
+
+**The token is transport, not protocol, and that mattered.** Putting it in
+`initialize` params would have been the additive-protocol answer and would
+have been wrong: `initialize` is not a gate, so nothing stops an unauthorised
+client from sending `prompt` first. It is a one-line handshake read before any
+wire byte, which also means the protocol stays at 1.3 — this slice spends no
+version number. The handshake reader takes exactly one line and leaves the
+rest buffered, so a client may pipeline its `initialize` behind it.
+
+**The bound address is announced on stderr** as `dvadva-agent: listening
+{json}` (addr, session, pid, protocol, token file). A supervisor spawning with
+port 0 has no other way to learn the port: logs go to a file, and stdout may be
+a client's wire.
+
+**Also found and fixed**: the reader's buffer was `100 * 1024 * 1024`, one
+allocation per connection. Harmless when the only connection was stdio, not
+once every attached client makes one. Line length never depended on it —
+`read_until` grows its own output — so it is now 64 KB.
+
+**Not done here, and next**: the bridge supervisor, the live-session registry,
+dropping `kill_on_drop`, and an explicit stop over the wire. Stopping a
+detached agent today is `SIGTERM`/interrupt (handled) or a kill. Windows note:
+there is no graceful terminate signal, so `taskkill` is a hard kill there.
 
 ---
 

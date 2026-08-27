@@ -2,6 +2,7 @@ pub mod channel;
 pub mod fanout;
 pub mod file;
 pub mod jsonrpc;
+pub mod listener;
 pub mod protocol;
 pub mod serde;
 pub mod server;
@@ -29,6 +30,7 @@ pub use channel::{
 };
 pub use fanout::{ConnId, Fanout};
 pub use file::{WireFile, WireFileMetadata, WireMessageRecord};
+pub use listener::{ListenOptions, serve_detachable};
 pub use serde::{deserialize_wire_message, serialize_wire_message};
 pub use types::{
     ApprovalRequest, ApprovalResponse, ApprovalResponseKind, CompactionBegin, CompactionEnd,

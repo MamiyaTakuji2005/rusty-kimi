@@ -26,7 +26,13 @@ use crate::wire::jsonrpc::{
 };
 use crate::wire::protocol::{WIRE_PROTOCOL_VERSION, check_peer};
 
-const STDIO_BUFFER_LIMIT: usize = 100 * 1024 * 1024;
+/// Staging room for the reader, not a limit on anything.
+///
+/// `read_until` grows its own output, so a line longer than this still
+/// arrives whole — the capacity only decides how many reads that takes. It
+/// used to be 100 MB, which was harmless when the one connection was stdio
+/// and is not once every attached client allocates one.
+const READ_BUFFER_CAPACITY: usize = 64 * 1024;
 
 #[derive(Clone)]
 enum PendingRequest {
@@ -91,18 +97,46 @@ impl WireServer {
         }
     }
 
+    /// Serve one client over stdio, and end the session when it goes.
+    ///
+    /// The pipe *is* the lifetime here, deliberately: this is the one-shot
+    /// path, where the frontend spawned the process and closing stdin is how
+    /// it says it is done. [`crate::wire::listener::serve_detachable`] is the
+    /// other binding, where a client leaving is a detach instead.
     pub async fn serve(&mut self) -> anyhow::Result<()> {
         info!("Starting Wire server on stdio");
-        let out_of_turn_task = self.core.clone().spawn_out_of_turn_drain();
+        let out_of_turn_task = self.spawn_background();
 
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
         let result = self.serve_connection(stdin, stdout).await;
 
         info!("stdin closed, Wire server exiting");
-        self.core.shutdown().await;
+        self.shutdown().await;
         out_of_turn_task.abort();
         result
+    }
+
+    /// Start the work the session does with no client asking: draining
+    /// subagents that outlive the turn that spawned them. Once per process,
+    /// by whichever transport is running.
+    pub fn spawn_background(&self) -> tokio::task::JoinHandle<()> {
+        Arc::clone(&self.core).spawn_out_of_turn_drain()
+    }
+
+    /// End the session: every open request loses, the turn stops, every
+    /// client is cut loose. Called when the *process* is done, which on the
+    /// listening transport is no longer the same event as a client leaving.
+    pub async fn shutdown(&self) {
+        self.core.shutdown().await;
+    }
+
+    /// Which session this agent is, for a banner or a handshake reply. A
+    /// process hosts exactly one, and that is a constraint rather than an
+    /// accident: `app.rs` chdirs the whole process into the session's work
+    /// directory.
+    pub fn session_id(&self) -> String {
+        self.core.soul.runtime().session.id.clone()
     }
 
     /// Serve one attached client until its stream ends.
@@ -207,8 +241,9 @@ impl SessionCore {
     }
 
     /// Tear the session down: every open request loses, the turn stops, every
-    /// client is cut loose. Phase 1 still ties this to the stdio connection
-    /// ending, which is what a detached agent will stop doing.
+    /// client is cut loose. Tied to the end of the *process*, not to the end
+    /// of a connection — over stdio those coincide, and on the listening
+    /// transport they deliberately do not.
     async fn shutdown(&self) {
         let pending = {
             let mut pending = self.pending.lock().await;
@@ -270,7 +305,7 @@ impl Connection {
     where
         R: AsyncRead + Unpin,
     {
-        let mut reader = BufReader::with_capacity(STDIO_BUFFER_LIMIT, reader);
+        let mut reader = BufReader::with_capacity(READ_BUFFER_CAPACITY, reader);
         let mut buf = Vec::new();
         loop {
             buf.clear();

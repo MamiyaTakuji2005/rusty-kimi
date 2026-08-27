@@ -13,6 +13,9 @@
   serves one client over any reader/writer pair, and stdio is just its first
   caller.
 - `fanout.rs`: routing to the attached clients (`Fanout`, `ConnId`).
+- `listener.rs`: the detachable transport. A loopback socket, its token
+  handshake, and the lifetime rule that a client leaving is not the end of
+  the session.
 - `channel.rs`: `Wire`, `WireSoulSide`, `WireUISide`, merge + recording logic.
 
 ## Compatibility Rules
@@ -62,6 +65,33 @@
   replay nor, from the start, the live traffic. Inherent to the two
   representations, not a sequencing bug; the next turn's replay shows it
   whole.
+
+## Detach: Two Transports, Two Lifetimes
+
+- **The protocol does not know which transport it is on.** `serve_connection`
+  is the same on both; what differs is only what the end of a connection
+  means. Over stdio it ends the process (`serve` calls `shutdown`), because
+  the frontend spawned us and closing stdin is how it says it is done. Over
+  the listener it ends nothing.
+- **The token is transport, not protocol.** It is checked before the first
+  wire byte, because `initialize` is not a gate — nothing stops a client from
+  sending `prompt` first. Stdio does not carry it: inheriting the pipes is a
+  stronger claim than knowing a secret, and requiring it there would have
+  broken every existing caller.
+- **Loopback only, refused at the bind.** An agent that takes a `prompt` runs
+  shell commands for whoever reaches it. Crossing machines is `ssh -L`'s job,
+  as in `remote/PLAN.md`.
+- **The handshake must not eat what follows it.** A client may pipeline its
+  `initialize` in the same write, so the reader takes exactly one line and
+  leaves the buffer to the wire server.
+- **The announce line on stderr is an interface.** `dvadva-agent: listening
+  {json}` carries addr, session, pid and token file; a supervisor spawning
+  with port 0 has no other way to learn the port. Logs go to a file and
+  stdout may be a client's wire, so stderr is the only channel left.
+- **Read buffers are per connection.** The reader's capacity used to be
+  100 MB, which was one allocation when the only client was stdio. Line
+  length never depended on it (`read_until` grows its own output), so it is
+  now 64 KB.
 
 ## Merge Behavior
 
