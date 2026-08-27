@@ -23,9 +23,11 @@ impl Editor {
         &self.buf
     }
 
-    /// Character count before the cursor — the column to draw it at.
-    pub fn cursor_chars(&self) -> usize {
-        self.buf[..self.cursor].chars().count()
+    /// Display width of the text before the cursor — the column to draw it
+    /// at. CJK and other wide characters occupy two cells, so this is a cell
+    /// count, not a char count.
+    pub fn cursor_col(&self) -> usize {
+        unicode_width::UnicodeWidthStr::width(&self.buf[..self.cursor])
     }
 
     pub fn insert(&mut self, text: &str) {
@@ -92,7 +94,7 @@ mod tests {
         ed.insert("ab");
         ed.insert("c\nd\r");
         assert_eq!(ed.text(), "abc d ");
-        assert_eq!(ed.cursor_chars(), 6);
+        assert_eq!(ed.cursor_col(), 6);
     }
 
     #[test]
@@ -106,7 +108,7 @@ mod tests {
         ed.left();
         ed.delete(); // removes a
         assert_eq!(ed.text(), "b");
-        assert_eq!(ed.cursor_chars(), 0);
+        assert_eq!(ed.cursor_col(), 0);
     }
 
     #[test]
@@ -121,6 +123,16 @@ mod tests {
     }
 
     #[test]
+    fn cursor_col_counts_display_width() {
+        let mut ed = Editor::default();
+        ed.insert("a日本b"); // CJK chars are two cells wide
+        assert_eq!(ed.cursor_col(), 6);
+        ed.left(); // before b
+        ed.left(); // before 本
+        assert_eq!(ed.cursor_col(), 3);
+    }
+
+    #[test]
     fn home_end_jump() {
         let mut ed = Editor::default();
         ed.insert("hello");
@@ -129,6 +141,6 @@ mod tests {
         ed.end();
         ed.insert("<");
         assert_eq!(ed.text(), ">hello<");
-        assert_eq!(ed.cursor_chars(), 7);
+        assert_eq!(ed.cursor_col(), 7);
     }
 }

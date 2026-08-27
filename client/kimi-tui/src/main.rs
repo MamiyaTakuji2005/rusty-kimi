@@ -36,6 +36,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragra
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use unicode_width::UnicodeWidthStr;
 use wire_client::launch::AgentLaunch;
 use wire_client::remotes::{self, Remote};
 use wire_client::session_list::{ResumeEntry, spawn_remote_session_listing, spawn_session_listing};
@@ -75,6 +76,20 @@ fn main() -> std::io::Result<()> {
         }
         None => None,
     };
+
+    // Restore the terminal before a panic message prints — without this the
+    // alternate screen swallows the message and the shell is left in raw
+    // mode: frozen, no cursor, blind typing.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        );
+        let _ = crossterm::terminal::disable_raw_mode();
+        default_hook(info);
+    }));
 
     // Terminal setup before anything that can fail visibly.
     let mut terminal = init_terminal()?;
@@ -642,7 +657,7 @@ impl App {
 
         // --- editor row ----------------------------------------------------
         let text = format!("✨ {}", self.editor.text());
-        let cursor_col = self.editor.cursor_chars() as u16 + 3; // after "✨ "
+        let cursor_col = self.editor.cursor_col() as u16 + 3; // after "✨ "
         frame.render_widget(Paragraph::new(text), editor_area);
         if self.overlay == Overlay::None && cursor_col < area.width {
             frame.set_cursor_position(Position::new(cursor_col, editor_area.y));
@@ -808,7 +823,11 @@ impl App {
         let wrapped: usize = lines
             .iter()
             .map(|line| {
-                let text: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+                let text: usize = line
+                    .spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
                 (text / content_width.max(1) as usize).max(1)
             })
             .sum();

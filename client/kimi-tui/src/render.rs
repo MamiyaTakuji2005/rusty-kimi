@@ -311,10 +311,10 @@ fn push_block(rows: &mut Vec<Row>, block: &Block, width: u16, turn_running: bool
 fn push_markdownish(rows: &mut Vec<Row>, text: &str, width: u16) {
     for line in text.lines() {
         let trimmed_start = line.trim_start();
-        let is_heading = trimmed_start.starts_with('#')
-            && trimmed_start
-                .chars()
-                .all(|c| c == '#' || c.is_alphanumeric() || c.is_whitespace());
+        // Markdown ATX headings require a space after the hashes — without
+        // this rule `#hashtag` and `#include` lines get styled as headings.
+        let hashes = trimmed_start.chars().take_while(|c| *c == '#').count();
+        let is_heading = (1..=6).contains(&hashes) && trimmed_start[hashes..].starts_with(' ');
         let style = if is_heading {
             Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
@@ -470,6 +470,19 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn heading_needs_a_space_after_the_hashes() {
+        let heading = |line: &str| {
+            let mut rows = Vec::new();
+            push_markdownish(&mut rows, line, 60);
+            rows[0].runs[0].style.add_modifier.contains(Modifier::BOLD)
+        };
+        assert!(heading("## Heading text"));
+        assert!(!heading("#hashtag"));
+        assert!(!heading("#include <stdio.h>"));
+        assert!(!heading("####### seven is not a heading"));
     }
 
     #[test]
