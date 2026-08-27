@@ -1,6 +1,6 @@
 # remote/ — relay daemons for remote access
 
-`kimi-bridge` carries a `kimi-agent` wire connection across the network as
+`dvadva-bridge` carries a `dvadva-agent` wire connection across the network as
 an **opaque byte stream**. The design record and rationale live in
 [`PLAN.md`](PLAN.md) — read it first; this file is the module map.
 
@@ -39,7 +39,7 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
   buffered). Client-side twin: `client/wire-client/src/bridge.rs` — a
   dev-dependency test in `wire-client` fails if the two drift.
 - `src/remote_daemon.rs` — runs on the agent machine. `spawn` op: spawn
-  `kimi-agent` with the caller's args (header `args` — verbatim agent CLI
+  `dvadva-agent` with the caller's args (header `args` — verbatim agent CLI
   args), ack, relay, wait-with-grace-then-kill, exit trailer.
   `list_sessions` op: the remote twin of
   `wire_client::session_list::list_all_sessions` (same `load_metadata` +
@@ -59,14 +59,14 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
 - `src/local_daemon.rs` — runs on the frontend machine, forwards frames
   verbatim and relays bytes; optional in the `ssh -L` deployment.
 - `src/config.rs` — the `[serve]` half of `~/.kimi/bridge.toml`, so a
-  service unit can run a bare `kimi-bridge remote`. The frontends' half
+  service unit can run a bare `dvadva-bridge remote`. The frontends' half
   (`[[remotes]]`) is read by `wire_client::remotes` and the two never share
   a type: **disjoint sections**, no dependency in either direction, unknown
   ones ignored. Not a section in `config.toml` — the agent rewrites that
   file from its own struct and would drop what it does not know.
-- `tests/bin/mock_agent.rs` — scripted stand-in for `kimi-agent` (echo /
+- `tests/bin/mock_agent.rs` — scripted stand-in for `dvadva-agent` (echo /
   `say X` / `argv` / `die` / `fail X`, `MOCK-AGENT-EOF` on stdin EOF); it is
-  a `[[bin]]` so `CARGO_BIN_EXE_kimi-bridge-mock-agent` works from
+  a `[[bin]]` so `CARGO_BIN_EXE_dvadva-bridge-mock-agent` works from
   `tests/e2e.rs`.
 - `tests/e2e.rs` — loopback e2e over real TCP sockets; covers relay
   opacity, arg passing, the work-dir default and its override, close
@@ -92,6 +92,6 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
 
 ## Testing
 
-`cargo test -p kimi-bridge` from the repo root. The e2e suite binds
+`cargo test -p dvadva-bridge` from the repo root. The e2e suite binds
 ephemeral loopback ports only; the `list_sessions` test asserts reply
 *shape* (contents are the machine's own `~/.kimi`, possibly empty on CI).

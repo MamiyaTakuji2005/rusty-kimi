@@ -54,5 +54,5 @@ jobs:
       - name: Cargo test
         run: cargo test
 
-      - name: Build kimi-agent
-        run: cargo build -p kimi-agent
+      - name: Build dvadva-agent
+        run: cargo build -p dvadva-agent

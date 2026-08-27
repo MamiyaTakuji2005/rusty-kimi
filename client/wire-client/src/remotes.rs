@@ -4,7 +4,7 @@
 //! **disjoint sections**: the frontends read `[[remotes]]` (the remotes this
 //! machine can connect to, and how to tunnel there), the daemon reads
 //! `[serve]` (how this machine acts as a remote — see
-//! `remote/kimi-bridge/src/config.rs`). Nothing is shared but the path and
+//! `remote/dvadva-bridge/src/config.rs`). Nothing is shared but the path and
 //! the format, so neither crate has to depend on the other.
 //!
 //! ```toml
@@ -67,7 +67,7 @@ struct BridgeFile {
 
 /// Path of the config file: `~/.kimi/bridge.toml`.
 pub fn path() -> PathBuf {
-    kimi_agent::share::get_share_dir().join(FILE_NAME)
+    dvadva_agent::share::get_share_dir().join(FILE_NAME)
 }
 
 /// Every configured remote, in file order. A missing file means none.

@@ -1,10 +1,10 @@
-//! The client side of the kimi-bridge control framing.
+//! The client side of the dvadva-bridge control framing.
 //!
 //! A remote connection begins with one `BRIDGE1` frame (see
-//! `remote/kimi-bridge/src/proto.rs` for the daemon-side definition and the
+//! `remote/dvadva-bridge/src/proto.rs` for the daemon-side definition and the
 //! rationale): the client states what it wants — spawn an agent with these
 //! args, or list the sessions on the far side — the daemon answers with one
-//! reply frame, and everything after that is the opaque kimi-agent wire
+//! reply frame, and everything after that is the opaque dvadva-agent wire
 //! stream.
 //!
 //! The two definitions are deliberately separate crates (the daemon must
@@ -22,7 +22,7 @@ use crate::session_list::ResumeEntry;
 /// Magic prefix of every bridge frame — kept in sync with the daemon side.
 pub const MAGIC: &str = "BRIDGE1";
 
-/// Upper bound on a frame line, matching `kimi_bridge::proto::MAX_LINE_BYTES`.
+/// Upper bound on a frame line, matching `dvadva_bridge::proto::MAX_LINE_BYTES`.
 /// A frontend pointed at the wrong port (an HTTP server, a log stream) must
 /// fail rather than buffer whatever the peer feels like sending.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
@@ -159,7 +159,7 @@ pub fn connect(endpoint: &str, timeout: Duration) -> Result<TcpStream, String> {
 
 /// Read one `\n`-terminated frame line, bounded by [`MAX_LINE_BYTES`].
 ///
-/// The daemon-side twin is `kimi_bridge::proto::read_line`: same cap, and
+/// The daemon-side twin is `dvadva_bridge::proto::read_line`: same cap, and
 /// bytes the peer pipelined after the newline stay in the reader's buffer
 /// for whoever owns the stream next (for `connect_tcp`, the agent's first
 /// wire lines).
@@ -172,7 +172,7 @@ pub fn read_frame_line<R: BufRead>(reader: &mut R) -> Result<String, String> {
         Ok(0) => Err("the daemon closed the connection without replying".to_string()),
         Ok(_) if !buf.ends_with(b"\n") => {
             if buf.len() > MAX_LINE_BYTES {
-                Err("bridge frame exceeds size limit (is this a kimi-bridge daemon?)".to_string())
+                Err("bridge frame exceeds size limit (is this a dvadva-bridge daemon?)".to_string())
             } else {
                 Err("the daemon closed the connection mid-frame".to_string())
             }
@@ -231,29 +231,29 @@ mod tests {
     }
 
     /// The client- and daemon-side framings must stay byte-compatible:
-    /// what this module emits is exactly what `kimi_bridge::proto` parses,
+    /// what this module emits is exactly what `dvadva_bridge::proto` parses,
     /// and its replies are exactly what [`decode_reply`] accepts.
     #[test]
     fn framing_matches_the_daemon_side() {
         let args = vec!["-w".to_string(), "/srv/proj".to_string()];
         let emitted = spawn_header(&args);
-        let parsed: kimi_bridge::proto::Request =
-            kimi_bridge::proto::decode(&emitted).expect("daemon must parse our header");
+        let parsed: dvadva_bridge::proto::Request =
+            dvadva_bridge::proto::decode(&emitted).expect("daemon must parse our header");
         assert_eq!(
             parsed,
-            kimi_bridge::proto::Request::Spawn { args },
+            dvadva_bridge::proto::Request::Spawn { args },
             "spawn header drifted from the daemon-side framing"
         );
 
-        let daemon_reply = kimi_bridge::proto::encode(&kimi_bridge::proto::Reply::error("x"));
+        let daemon_reply = dvadva_bridge::proto::encode(&dvadva_bridge::proto::Reply::error("x"));
         assert!(
             decode_reply(&daemon_reply).is_ok(),
             "daemon reply not parseable by the client"
         );
 
         let daemon_listing =
-            kimi_bridge::proto::encode(&kimi_bridge::proto::Reply::sessions(vec![
-                kimi_bridge::proto::SessionEntry {
+            dvadva_bridge::proto::encode(&dvadva_bridge::proto::Reply::sessions(vec![
+                dvadva_bridge::proto::SessionEntry {
                     id: "a".into(),
                     title: "t".into(),
                     work_dir: "/w".into(),

@@ -11,10 +11,10 @@ serde_json.workspace = true
 toml.workspace = true
 tokio.workspace = true
 kaos = { path = "../../server/kaos" }
-kimi-agent = { path = "../../server/kimi-agent" }
+dvadva-agent = { path = "../../server/dvadva-agent" }
 kosong = { path = "../../server/kosong" }
 
 [dev-dependencies]
 # Only for the drift-guard test: the client- and daemon-side bridge framings
 # live in separate crates by design; the test pins them byte-for-byte.
-kimi-bridge = { path = "../../remote/kimi-bridge" }
+dvadva-bridge = { path = "../../remote/dvadva-bridge" }

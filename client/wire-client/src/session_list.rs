@@ -12,9 +12,9 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local};
+use dvadva_agent::metadata::load_metadata;
+use dvadva_agent::session::Session as AgentSession;
 use kaos::KaosPath;
-use kimi_agent::metadata::load_metadata;
-use kimi_agent::session::Session as AgentSession;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge;
@@ -99,7 +99,7 @@ where
 
 /// Remote twin of [`spawn_session_listing`]: ask the bridge daemon at
 /// `endpoint` for the sessions living on *its* machine (the daemon answers
-/// from its own `~/.kimi` — see `remote/kimi-bridge`). Same receiver and
+/// from its own `~/.kimi` — see `remote/dvadva-bridge`). Same receiver and
 /// wake contract as the local variant.
 pub fn spawn_remote_session_listing<W>(
     endpoint: &str,

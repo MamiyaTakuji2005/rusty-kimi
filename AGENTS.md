@@ -5,10 +5,10 @@ changes; where these notes and the code disagree, trust the code.
 
 ## Project overview
 
-**rusty-kimi** is a Rust-only coding agent system: a wire-only **agent core**
-(`kimi-agent`) driven by frontends over the **Wire protocol** (JSON-RPC over
-stdio): a native **egui GUI** (`kimi-gui`) and a **terminal UI**
-(`kimi-tui`, ratatui).
+**DvaDva** is a Rust-only coding agent system: a wire-only **agent core**
+(`dvadva-agent`) driven by frontends over the **Wire protocol** (JSON-RPC over
+stdio): a native **egui GUI** (`inkvizitor`) and a **terminal UI**
+(`dvadva-tui`, ratatui).
 
 | Path | What it is | Origin |
 |------|------------|--------|
@@ -17,9 +17,9 @@ stdio): a native **egui GUI** (`kimi-gui`) and a **terminal UI**
 | `_history/` | Historical rewrite PROMPT.md / PLAN.md and dead dev artifacts | context only |
 
 ```
-kimi-gui (client/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (server/, Rust)
-kimi-tui (client/, Rust) ──Wire JSON-RPC / stdio──▶ kimi-agent (server/, Rust)
-                       └─(optional)─ kimi-bridge ──TCP (ssh -L)──▶ kimi-agent on a remote box
+inkvizitor (client/, Rust) ──Wire JSON-RPC / stdio──▶ dvadva-agent (server/, Rust)
+dvadva-tui (client/, Rust) ──Wire JSON-RPC / stdio──▶ dvadva-agent (server/, Rust)
+                       └─(optional)─ dvadva-bridge ──TCP (ssh -L)──▶ dvadva-agent on a remote box
 ```
 
 ### History, for context only
@@ -33,30 +33,55 @@ and the old `core/` layout — treat them as read-only history; do not resurrect
 re-vendor Python code, and do not reintroduce a top-level `core/` directory.
 
 The workspace was later reorganized from a single `core/` directory into
-`server/` + `client/` + `remote/` (the relay daemons live in `remote/kimi-bridge`).
+`server/` + `client/` + `remote/` (the relay daemons live in `remote/dvadva-bridge`).
 The dependency graph deliberately keeps the client depending on the server crate
-(`kimi_agent::wire` types, `Session::list`); extracting those into a shared
+(`dvadva_agent::wire` types, `Session::list`); extracting those into a shared
 `wire-protocol` crate is a deferred refactor.
+
+### The rename (2026-08, in progress)
+
+The project was called **rusty-kimi** until so little of upstream remained that
+shipping under Moonshot's marks became misattribution rather than credit —
+Apache-2.0 grants the code, never the name. Crates, libraries, and binaries are
+now `dvadva-agent`, `dvadva-tui`, `dvadva-bridge`, and `inkvizitor` (the GUI;
+its process name is the joke — it is the part that interrogates you before
+anything happens).
+
+**What still says "kimi" does so on purpose. Do not sweep it away:**
+
+| Still named kimi | Why |
+|---|---|
+| `kosong/src/chat_provider/kimi.rs`, `KIMI_API_KEY`, `KIMI_BASE_URL`, `KimiStreamedMessage` | these name **Moonshot's actual API**, exactly like `openai_compatible.rs` does OpenAI's. Renaming them would be wrong, not brave. |
+| `kimi_cli.tools.*` tool ids, `"Kimi Code CLI"`, `KimiCLI/<VERSION>` | the wire contract (see the compatibility section). Changing them needs a protocol bump plus an alias table for stored sessions and agent specs. |
+| `~/.kimi`, `kimi.json` | user data. Needs a one-time migration that renames the directory only when the new one does not exist yet. |
+| other `KIMI_*` environment variables | need a release that reads the old name as a fallback, or every existing service unit breaks silently. |
+| `kimi-agent-rs`, `rusty-kimi-tui` | real repository names — upstream, and this project's archived Python TUI. |
+| the `Kimi` theme | an homage to the original's palette; cosmetic, rename it or don't. |
+
+Internal type names (`KimiSoul`, `KimiToolset`, `KimiCliError`, the `KimiCLI`
+app struct, `soul/kimisoul.rs`) are *not* under any contract — they simply have
+not been renamed yet. That is a free, compiler-verified change whenever someone
+picks the target names.
 
 ## Repository layout
 
 ```
 Cargo.toml               workspace root (run cargo here)
 server/                  agent server + its abstractions
-  kimi-agent/            main crate — wire-only agent server (bin: kimi-agent)
+  dvadva-agent/            main crate — wire-only agent server (bin: dvadva-agent)
   kosong/                LLM abstraction (messages, tooling, chat providers)
   kaos/                  OS abstraction (LocalKaos, path semantics)
 client/                  frontends + shared frontend kit
-  kimi-gui/              egui frontend (bin: kimi-gui)
-  kimi-tui/              ratatui terminal frontend (bin: kimi-tui)
+  inkvizitor/              egui frontend (bin: inkvizitor)
+  dvadva-tui/              ratatui terminal frontend (bin: dvadva-tui)
   wire-client/           shared frontend kit: client + transcript + session list
 remote/                  relay daemons for remote access
-  kimi-bridge/           byte-relay daemon pair (bin: kimi-bridge; design in remote/PLAN.md)
+  dvadva-bridge/           byte-relay daemon pair (bin: dvadva-bridge; design in remote/PLAN.md)
 _history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
 ```
 
 Per-module notes live in sub-tree `AGENTS.md` files — read them before touching
-those areas, and under `server/kimi-agent/src/`: `cli/`, `soul/`, `wire/`,
+those areas, and under `server/dvadva-agent/src/`: `cli/`, `soul/`, `wire/`,
 `tools/`, `skill/`; plus `server/kosong/src/AGENTS.md`, `server/kaos/src/AGENTS.md`.
 
 ## Architecture
@@ -64,7 +89,7 @@ those areas, and under `server/kimi-agent/src/`: `cli/`, `soul/`, `wire/`,
 Two Rust processes. The **frontend never executes LLM steps**; the **agent owns
 the loop**.
 
-| Concern | kimi-gui (`client/kimi-gui/`) | kimi-agent (`server/kimi-agent/`) |
+| Concern | inkvizitor (`client/inkvizitor/`) | dvadva-agent (`server/dvadva-agent/`) |
 |---|---|---|
 | GUI, tabs, themes, palette, shortcuts | ✓ | |
 | Approval prompts (render + reply) | ✓ | |
@@ -76,7 +101,7 @@ the loop**.
 | Wire protocol framing | both | both |
 | MCP tool calls | | ✓ (rmcp client) |
 
-- **GUI runtime path**: `kimi-gui` spawns one `kimi-agent` per session tab
+- **GUI runtime path**: `inkvizitor` spawns one `dvadva-agent` per session tab
   (`session.rs`), speaking JSON-RPC over the child's stdio; the transcript is a
   block stream rendered by `render.rs`; forks appear as sub-tabs.
 - **Agent runtime path**: `cli/` (arg parsing; subcommands `info`, `mcp`) →
@@ -98,7 +123,7 @@ against the agent:
 
 - **Wire protocol**: envelopes, `type` strings, error codes stay stable.
   Version negotiation via `initialize`; current protocol version constant lives
-  in `wire/` (see `server/kimi-agent/src/wire/AGENTS.md`).
+  in `wire/` (see `server/dvadva-agent/src/wire/AGENTS.md`).
 - **`~/.kimi` data layout** stays identical: `config.toml`, `kimi.json`,
   `mcp.json`, session dirs with `context.jsonl` + `wire.jsonl`.
 - **`kosong.message` serde** (e.g. single-`TextPart` `Message.content` → JSON
@@ -106,7 +131,10 @@ against the agent:
 - **Tool identifiers** remain `kimi_cli.tools.*`; **wire identity** stays
   "Kimi Code CLI" / `KimiCLI/<VERSION>` even in the Rust binary. These are
   historical IDs, not Python parity — they must simply never change casually.
-- Tool schemas, descriptions (`server/kimi-agent/src/tools/desc/`), approvals,
+  The 2026-08 rename to DvaDva deliberately stopped short of both: they are a
+  contract, and re-cutting them is a deliberate versioned change (with an alias
+  table for ids already written into sessions and agent specs), not a sweep.
+- Tool schemas, descriptions (`server/dvadva-agent/src/tools/desc/`), approvals,
   prompts, and compaction behavior are this repo's own canonical definition now.
 
 Breaking any of these requires a deliberate wire-protocol version bump, not a
@@ -119,11 +147,11 @@ Single toolchain — **run cargo from the repo root** (the workspace root is the
 top-level `Cargo.toml`). Dev machine is Windows; commands assume Git Bash.
 
 ```sh
-cargo build -p kimi-agent          # agent binary → target/{debug,release}/kimi-agent
-cargo build -p kimi-gui            # native GUI frontend
-cargo build -p kimi-tui            # terminal UI frontend
+cargo build -p dvadva-agent          # agent binary → target/{debug,release}/dvadva-agent
+cargo build -p inkvizitor            # native GUI frontend
+cargo build -p dvadva-tui            # terminal UI frontend
 cargo test                         # whole workspace
-cargo test -p kimi-agent <name>    # single test
+cargo test -p dvadva-agent <name>    # single test
 cargo fmt                          # formatting is enforced (see git history)
 cargo clippy --workspace --all-targets
 ```
@@ -135,28 +163,28 @@ Prefer async I/O (tokio); avoid blocking locks in async contexts.
 
 ```sh
 # native GUI:
-cargo build -p kimi-gui && ./target/debug/kimi-gui --agent-bin ./target/debug/kimi-agent
+cargo build -p inkvizitor && ./target/debug/inkvizitor --agent-bin ./target/debug/dvadva-agent
 # (or set KIMI_AGENT_BIN; remaining args are forwarded to the agent verbatim)
 
 # terminal UI — run inside a real terminal, one session per invocation:
-cargo build -p kimi-tui && ./target/debug/kimi-tui -w /some/dir
+cargo build -p dvadva-tui && ./target/debug/dvadva-tui -w /some/dir
 # (agent binary resolved the same way: --agent-bin flag, KIMI_AGENT_BIN,
 #  sibling executable, PATH)
 
 # headless agent with no UI:
-./target/debug/kimi-agent
+./target/debug/dvadva-agent
 
 # remote: agent on another box (loopback + ssh tunnel, never raw internet):
-#   (VPS)      ./kimi-bridge remote --listen 127.0.0.1:9000
+#   (VPS)      ./dvadva-bridge remote --listen 127.0.0.1:9000
 #   (local)    ssh -N -L 9000:127.0.0.1:9000 user@vps
-#   (local)    ./kimi-tui --remote 127.0.0.1:9000 -w /path/on/vps
+#   (local)    ./dvadva-tui --remote 127.0.0.1:9000 -w /path/on/vps
 # (agent args resolve on the remote machine; the resume menu lists the
-#  remote ~/.kimi; kimi-bridge local --upstream … is an optional extra hop)
+#  remote ~/.kimi; dvadva-bridge local --upstream … is an optional extra hop)
 ```
 
 ## Module map
 
-**`server/kimi-agent/src/`** — `cli/` (arg parsing; `info`, `mcp` subcommands),
+**`server/dvadva-agent/src/`** — `cli/` (arg parsing; `info`, `mcp` subcommands),
 `app.rs` (`KimiCLI::create` wiring), `soul/` (`kimisoul.rs` loop; `context.rs`
 JSONL history with checkpoints/rotations; `approval.rs` queue + YOLO;
 `compaction.rs`; `toolset.rs` dispatch + MCP bridge), `wire/` (`types.rs`,
@@ -182,7 +210,7 @@ do not remove those timeouts.
 historical).
 
 **`client/wire-client/src/`** — the shared frontend kit every frontend builds on:
-- `lib.rs` — the wire-protocol client used to spawn and drive a `kimi-agent`
+- `lib.rs` — the wire-protocol client used to spawn and drive a `dvadva-agent`
   subprocess: JSON-RPC framing, the `Inbound` classification (event /
   reverse-request / response / exit / protocol error), stderr tail capture,
   request-id generation, graceful shutdown. UI-toolkit-free: callers pass a
@@ -196,14 +224,14 @@ historical).
 - `remotes.rs` — the `[[remotes]]` half of `~/.kimi/bridge.toml` (name,
   endpoint, optional tunnel command, default flag) and the name-or-host:port
   resolution behind `--remote`. The daemon reads the `[serve]` half from the
-  same file through its own `kimi_bridge::config`; the sections are disjoint
+  same file through its own `dvadva_bridge::config`; the sections are disjoint
   so neither crate depends on the other.
 - `tunnel.rs` — the ssh process a remote is reached through, as a managed
   child (spawn, liveness, stderr tail, kill). Not a shell: the command is
   split, not interpreted, and gets no console — tunnel commands must be
   non-interactive.
-- `bridge.rs` — client side of the `kimi-bridge` control framing (the
-  daemon-side twin is `remote/kimi-bridge/src/proto.rs`; a drift-guard test
+- `bridge.rs` — client side of the `dvadva-bridge` control framing (the
+  daemon-side twin is `remote/dvadva-bridge/src/proto.rs`; a drift-guard test
   pins them byte-for-byte), plus the bounded dialling every frontend does
   over it: connect/handshake timeouts, the 64 KiB frame cap, and
   `exit_trailer` — the daemon's final frame, which `start_io` turns into
@@ -211,11 +239,11 @@ historical).
   Both frontends call `connect_tcp` on the thread that draws their UI, so
   nothing in the handshake may block unbounded.
 - `transcript.rs` — folds wire events into renderable blocks (moved here from
-  kimi-gui so any frontend gets identical state).
+  inkvizitor so any frontend gets identical state).
 - `session_list.rs` — background listing of resumable sessions under `~/.kimi`,
   locally or through a bridge daemon (`spawn_remote_session_listing`).
 
-**`client/kimi-tui/src/`** — the ratatui terminal frontend. One conversation per
+**`client/dvadva-tui/src/`** — the ratatui terminal frontend. One conversation per
 invocation (a TUI owns the whole terminal). `main.rs` (event loop over one mpsc
 channel fed by crossterm input and the client's wake hook; overlays for
 approvals and resume; status bar; a panic hook restores the terminal before
@@ -226,7 +254,7 @@ column is display width, so CJK counts two cells),
 `render.rs` (blocks → pre-wrapped styled rows with width-aware wrapping;
 scrollback is index arithmetic on the row list).
 
-**`client/kimi-gui/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
+**`client/inkvizitor/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
 `focus_owner()`; holds one `RemoteLink` per configured `[[remotes]]` entry —
 the tab strip paints a chain button each, and `pick_link` resolves which one a
 remote command means), `session.rs` (one agent child + transcript + approval
@@ -255,19 +283,19 @@ contract as the CLI's `--remote`. The query split lives in `palette.rs`
 typo error happen at run time in `app.rs` (`pick_link`/`target_link`), so
 mid-typing never blanks the palette list.
 
-**`remote/kimi-bridge/`** — the relay daemon pair (`remote/AGENTS.md` has the
+**`remote/dvadva-bridge/`** — the relay daemon pair (`remote/AGENTS.md` has the
 map; `remote/PLAN.md` the design record). One binary, two subcommands:
-`remote` (agent machine: spawns `kimi-agent` per connection, relays bytes,
+`remote` (agent machine: spawns `dvadva-agent` per connection, relays bytes,
 answers `list_sessions` from its own `~/.kimi`) and `local` (frontend
 machine: forwards frames/bytes upstream). Dumb byte relays — the only thing
 either parses is the `BRIDGE1` header line; wire protocol stays untouched.
 `WireClient::connect_tcp` is the client-side entry; frontends reach it via
 `--remote <host:port>` / `KIMI_REMOTE`. The daemon supplies a default work
 directory (its user's home) for sessions that name no `-w`, which is why
-kimi-gui's `+` button opens no folder picker in remote mode: this machine's
+inkvizitor's `+` button opens no folder picker in remote mode: this machine's
 paths do not exist over there.
 
-## CLI behavior (kimi-agent)
+## CLI behavior (dvadva-agent)
 
 - Wire-only server; no UI selection flags.
 - `--wire` exists but is hidden and ignored (legacy compatibility).
@@ -290,8 +318,8 @@ paths do not exist over there.
 
 ## Testing strategy
 
-- Rust tests live in `server/{kimi-agent,kosong,kaos}` and
-  `client/{kimi-gui,kimi-tui,wire-client}/` (integration dirs and inline
+- Rust tests live in `server/{dvadva-agent,kosong,kaos}` and
+  `client/{inkvizitor,dvadva-tui,wire-client}/` (integration dirs and inline
   `#[cfg(test)]` units); E2E wire tests use ScriptedEcho and mock HTTP
   (`wiremock`, `axum`).
 - Wire/data compatibility is verified read-only against real `~/.kimi` data in
@@ -299,9 +327,9 @@ paths do not exist over there.
 
 ## Build & release
 
-`cargo build -p kimi-agent` / `-p kimi-gui` / `-p kimi-tui` produce
+`cargo build -p dvadva-agent` / `-p inkvizitor` / `-p dvadva-tui` produce
 self-contained binaries (macOS/Linux/Windows). CI lives in `.github/workflows/`
-(workspace-wide checks; release job packages the `kimi-agent` binary).
+(workspace-wide checks; release job packages the `dvadva-agent` binary).
 
 ## Security considerations
 
@@ -323,6 +351,6 @@ self-contained binaries (macOS/Linux/Windows). CI lives in `.github/workflows/`
 - When changing wire-visible behavior, update the tests and the relevant
   sub-tree `AGENTS.md` in the same change. If the change breaks wire/data
   compatibility, bump the protocol version deliberately.
-- The client intentionally depends on the server crate (`kimi_agent::wire`
+- The client intentionally depends on the server crate (`dvadva_agent::wire`
   types, `Session::list`). Extracting those into a shared crate is a deferred
   refactor; do not start it as a side quest.

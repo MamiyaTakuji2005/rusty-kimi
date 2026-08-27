@@ -1,4 +1,4 @@
-name: Release (kimi-agent)
+name: Release (dvadva-agent)
 
 on:
   push:
@@ -33,10 +33,10 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build kimi-agent release binary
-        run: cargo build -p kimi-agent --release
+      - name: Build dvadva-agent release binary
+        run: cargo build -p dvadva-agent --release
 
-      - name: Package kimi-agent artifact
+      - name: Package dvadva-agent artifact
         shell: python
         env:
           TAG: ${{ github.ref_name }}
@@ -55,23 +55,23 @@ jobs:
           artifacts_dir.mkdir(parents=True, exist_ok=True)
 
           is_windows = "windows" in target
-          binary_name = "kimi-agent.exe" if is_windows else "kimi-agent"
+          binary_name = "dvadva-agent.exe" if is_windows else "dvadva-agent"
           binary_path = dist_dir / binary_name
           if not binary_path.exists():
-              raise SystemExit(f"kimi-agent binary not found at {binary_path}")
+              raise SystemExit(f"dvadva-agent binary not found at {binary_path}")
 
           if is_windows:
-              archive_name = f"kimi-agent-{tag}-{target}.zip"
+              archive_name = f"dvadva-agent-{tag}-{target}.zip"
               archive_path = artifacts_dir / archive_name
               with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
                   archive_file.write(binary_path, arcname=binary_name)
           else:
-              archive_name = f"kimi-agent-{tag}-{target}.tar.gz"
+              archive_name = f"dvadva-agent-{tag}-{target}.tar.gz"
               archive_path = artifacts_dir / archive_name
               with tarfile.open(archive_path, "w:gz") as archive_file:
-                  archive_file.add(binary_path, arcname="kimi-agent")
+                  archive_file.add(binary_path, arcname="dvadva-agent")
 
-          print(f"Built kimi-agent artifact: {archive_path}")
+          print(f"Built dvadva-agent artifact: {archive_path}")
 
       - name: Set artifact name
         id: artifact
@@ -81,7 +81,7 @@ jobs:
           ref = os.environ["GITHUB_REF_NAME"].replace("/", "-")
           target = "${{ matrix.target }}"
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"name=kimi-agent-{ref}-{target}\n")
+              f.write(f"name=dvadva-agent-{ref}-{target}\n")
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

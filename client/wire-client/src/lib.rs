@@ -1,15 +1,15 @@
-//! Wire protocol client: spawns `kimi-agent`, speaks newline-delimited
+//! Wire protocol client: spawns `dvadva-agent`, speaks newline-delimited
 //! JSON-RPC 2.0 over its stdio, and hands everything to the caller through a
 //! channel.
 //!
-//! This is the shared client for every frontend of the agent — `kimi-gui`
+//! This is the shared client for every frontend of the agent — `inkvizitor`
 //! today, a terminal frontend later. It knows nothing about any UI toolkit:
 //! instead it takes a `wake` hook, invoked whenever a message arrives, and
 //! each frontend uses it to nudge its own event loop (egui:
 //! `Context::request_repaint`; a terminal UI: whatever unblocks its poll).
 //!
 //! The transport is not fixed to a child process: [`WireClient::connect_tcp`]
-//! reaches the same wire protocol through a `kimi-bridge` daemon
+//! reaches the same wire protocol through a `dvadva-bridge` daemon
 //! ([`bridge`]) — the agent then runs on a remote machine and everything
 //! except process management behaves identically.
 //!
@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use kimi_agent::wire::{WireMessage, deserialize_wire_message};
+use dvadva_agent::wire::{WireMessage, deserialize_wire_message};
 
 /// How much of the agent's stderr to keep for the "it exited" message.
 const STDERR_TAIL_LINES: usize = 20;
@@ -112,7 +112,7 @@ impl WireClient {
         Self::spawn_inner(agent_bin, agent_args, true, wake)
     }
 
-    /// Connect to a `kimi-bridge` daemon at `endpoint` (`host:port`) and
+    /// Connect to a `dvadva-bridge` daemon at `endpoint` (`host:port`) and
     /// have it spawn an agent with `agent_args`, then speak the wire
     /// protocol over the resulting byte stream.
     ///
@@ -476,7 +476,7 @@ fn classify_line(line: &str) -> Inbound {
 mod tests {
     use super::*;
 
-    /// One known-good envelope payload; the shape is owned by `kimi-agent`'s
+    /// One known-good envelope payload; the shape is owned by `dvadva-agent`'s
     /// own wire tests, this only needs *a* valid message.
     const TURN_BEGIN: &str = r#"{"type":"TurnBegin","payload":{"user_input":"hi"}}"#;
 

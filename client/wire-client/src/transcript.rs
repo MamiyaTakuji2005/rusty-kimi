@@ -2,7 +2,7 @@
 //! Frontend-agnostic — the egui GUI renders it today, a terminal frontend
 //! renders the same blocks its own way.
 
-use kimi_agent::wire::{
+use dvadva_agent::wire::{
     ApprovalResponseKind, ContentPart, StatusUpdate, ToolCall, UserInput, WireMessage,
 };
 use kosong::tooling::ToolReturnValue;

@@ -1526,6 +1526,86 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "dvadva-agent"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "dirs",
+ "filetime",
+ "flate2",
+ "futures",
+ "globset",
+ "html2md",
+ "ignore",
+ "image",
+ "jsonschema",
+ "kaos",
+ "kosong",
+ "md5",
+ "rand 0.9.2",
+ "regex",
+ "reqwest 0.12.28",
+ "rmcp",
+ "rustc_version_runtime",
+ "schemars",
+ "scraper",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "similar",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "webbrowser",
+ "wiremock",
+ "zip",
+]
+
+[[package]]
+name = "dvadva-bridge"
+version = "1.8.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "dvadva-agent",
+ "kaos",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "dvadva-tui"
+version = "1.8.0"
+dependencies = [
+ "crossterm",
+ "dvadva-agent",
+ "kosong",
+ "ratatui",
+ "serde_json",
+ "similar",
+ "unicode-width",
+ "wire-client",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2810,6 +2890,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "inkvizitor"
+version = "1.8.0"
+dependencies = [
+ "dvadva-agent",
+ "eframe",
+ "egui_commonmark",
+ "kaos",
+ "kosong",
+ "rfd",
+ "serde",
+ "serde_json",
+ "similar",
+ "wire-client",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3046,102 +3142,6 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
-
-[[package]]
-name = "kimi-agent"
-version = "1.8.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "clap",
- "dirs",
- "filetime",
- "flate2",
- "futures",
- "globset",
- "html2md",
- "ignore",
- "image",
- "jsonschema",
- "kaos",
- "kosong",
- "md5",
- "rand 0.9.2",
- "regex",
- "reqwest 0.12.28",
- "rmcp",
- "rustc_version_runtime",
- "schemars",
- "scraper",
- "serde",
- "serde_json",
- "serde_yaml",
- "similar",
- "sysinfo",
- "tar",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "url",
- "uuid",
- "webbrowser",
- "wiremock",
- "zip",
-]
-
-[[package]]
-name = "kimi-bridge"
-version = "1.8.0"
-dependencies = [
- "clap",
- "dirs",
- "kaos",
- "kimi-agent",
- "serde",
- "serde_json",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "kimi-gui"
-version = "1.8.0"
-dependencies = [
- "eframe",
- "egui_commonmark",
- "kaos",
- "kimi-agent",
- "kosong",
- "rfd",
- "serde",
- "serde_json",
- "similar",
- "wire-client",
-]
-
-[[package]]
-name = "kimi-tui"
-version = "1.8.0"
-dependencies = [
- "crossterm",
- "kimi-agent",
- "kosong",
- "ratatui",
- "serde_json",
- "similar",
- "unicode-width",
- "wire-client",
-]
 
 [[package]]
 name = "kosong"
@@ -7740,9 +7740,9 @@ name = "wire-client"
 version = "1.8.0"
 dependencies = [
  "chrono",
+ "dvadva-agent",
+ "dvadva-bridge",
  "kaos",
- "kimi-agent",
- "kimi-bridge",
  "kosong",
  "serde",
  "serde_json",

@@ -6,9 +6,9 @@
 //! 1. `--agent-bin <path>` on the command line (removed from `args` when
 //!    found),
 //! 2. the `KIMI_AGENT_BIN` environment variable,
-//! 3. a `kimi-agent` sitting next to the frontend executable — what makes a
+//! 3. a `dvadva-agent` sitting next to the frontend executable — what makes a
 //!    double-clicked or copied-around install work with no environment at all,
-//! 4. the bare name `kimi-agent`, letting `PATH` have the last word.
+//! 4. the bare name `dvadva-agent`, letting `PATH` have the last word.
 //!
 //! The last fallback is deliberate rather than an error: frontends surface a
 //! missing agent through their normal failure paths (spawn error → transcript
@@ -16,7 +16,7 @@
 //!
 //! The same resolution handles **remote** connections: `--remote <name |
 //! host:port>` (or `KIMI_REMOTE`) routes the frontend through a
-//! `kimi-bridge` daemon instead of spawning a local agent. Both flags are
+//! `dvadva-bridge` daemon instead of spawning a local agent. Both flags are
 //! stripped from the agent args; everything else is forwarded verbatim —
 //! over remote, `-w <dir>` and friends name paths on the *remote* machine.
 //!
@@ -37,7 +37,7 @@ pub struct AgentLaunch {
     pub agent_args: Vec<String>,
     /// What `--remote` / `KIMI_REMOTE` named — a configured remote's name
     /// or a bare `host:port`, resolved through [`crate::remotes::resolve`].
-    /// When set, frontends connect through a `kimi-bridge` daemon instead of
+    /// When set, frontends connect through a `dvadva-bridge` daemon instead of
     /// spawning, and `agent_bin` is unused.
     pub remote: Option<String>,
 }
@@ -87,20 +87,20 @@ impl AgentLaunch {
         Ok(Self {
             agent_bin: agent_bin
                 .or_else(sibling_agent_bin)
-                .unwrap_or_else(|| "kimi-agent".to_string()),
+                .unwrap_or_else(|| "dvadva-agent".to_string()),
             agent_args: args,
             remote,
         })
     }
 }
 
-/// A `kimi-agent` next to this executable, if one exists.
+/// A `dvadva-agent` next to this executable, if one exists.
 fn sibling_agent_bin() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let name = if cfg!(windows) {
-        "kimi-agent.exe"
+        "dvadva-agent.exe"
     } else {
-        "kimi-agent"
+        "dvadva-agent"
     };
     let candidate: PathBuf = exe.parent()?.join(name);
     candidate
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(bin(&r), "/y/b");
 
         let r = AgentLaunch::from_args(vec![], None, None);
-        assert_eq!(bin(&r), "kimi-agent");
+        assert_eq!(bin(&r), "dvadva-agent");
     }
 
     #[test]
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn empty_env_var_is_ignored() {
         let r = AgentLaunch::from_args(vec![], Some(String::new()), Some(String::new()));
-        assert_eq!(bin(&r), "kimi-agent");
+        assert_eq!(bin(&r), "dvadva-agent");
         assert!(r.unwrap().remote.is_none());
     }
 

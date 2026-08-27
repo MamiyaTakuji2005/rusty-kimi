@@ -2,11 +2,11 @@
 members = [
     "server/kaos",
     "server/kosong",
-    "server/kimi-agent",
-    "client/kimi-gui",
-    "client/kimi-tui",
+    "server/dvadva-agent",
+    "client/inkvizitor",
+    "client/dvadva-tui",
     "client/wire-client",
-    "remote/kimi-bridge",
+    "remote/dvadva-bridge",
 ]
 resolver = "2"
 

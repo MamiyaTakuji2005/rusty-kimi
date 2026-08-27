@@ -1,6 +1,6 @@
 # OpenAI-Compatible Provider
 
-The `openai_compatible` provider allows kimi-agent to work with any LLM API that follows the OpenAI chat completions format.
+The `openai_compatible` provider allows dvadva-agent to work with any LLM API that follows the OpenAI chat completions format.
 
 ## Supported Providers
 
@@ -61,13 +61,13 @@ api_key = "not-needed"
 
 ```bash
 # Use DeepSeek
-kimi-agent --model deepseek-chat
+dvadva-agent --model deepseek-chat
 
 # Use OpenAI
-kimi-agent --model gpt4
+dvadva-agent --model gpt4
 
 # Use local model
-kimi-agent --model local-llama
+dvadva-agent --model local-llama
 ```
 
 ## Features
