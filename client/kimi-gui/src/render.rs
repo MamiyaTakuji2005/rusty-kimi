@@ -1,6 +1,8 @@
 //! Widget rendering for transcript blocks — the egui counterpart of the
 //! Python shell's `visualize/_blocks.py`.
 
+use std::sync::Arc;
+
 use eframe::egui::{self, RichText};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use similar::{ChangeTag, TextDiff};
@@ -277,32 +279,77 @@ pub fn display_block_ui(ui: &mut egui::Ui, block: &DisplayBlock) {
     }
 }
 
+/// A diff worked out once and kept while the block stays on screen.
+///
+/// `similar`'s line diff is the most expensive thing in a transcript frame,
+/// and a tool result never changes after it lands — so recomputing every
+/// diff in the whole transcript on every repaint was pure waste. Each line
+/// arrives with its `+`/`-`/space prefix already attached; only the colour
+/// is left to the frame, because the theme can change under a diff that
+/// cannot.
+struct PreparedDiff {
+    lines: Vec<(ChangeTag, String)>,
+    /// Hit [`DIFF_MAX_LINES`] and stopped early.
+    truncated: bool,
+}
+
+impl PreparedDiff {
+    fn compute(old_text: &str, new_text: &str) -> Self {
+        let diff = TextDiff::from_lines(old_text, new_text);
+        let mut lines = Vec::new();
+        let mut truncated = false;
+        'groups: for group in diff.grouped_ops(2) {
+            for op in group {
+                for change in diff.iter_changes(&op) {
+                    if lines.len() >= DIFF_MAX_LINES {
+                        truncated = true;
+                        break 'groups;
+                    }
+                    let sign = match change.tag() {
+                        ChangeTag::Delete => "-",
+                        ChangeTag::Insert => "+",
+                        ChangeTag::Equal => " ",
+                    };
+                    let line = change.value().trim_end_matches('\n');
+                    lines.push((change.tag(), format!("{sign} {line}")));
+                }
+            }
+        }
+        Self { lines, truncated }
+    }
+}
+
+#[derive(Default)]
+struct DiffComputer;
+
+impl egui::cache::ComputerMut<(&str, &str), Arc<PreparedDiff>> for DiffComputer {
+    fn compute(&mut self, (old_text, new_text): (&str, &str)) -> Arc<PreparedDiff> {
+        Arc::new(PreparedDiff::compute(old_text, new_text))
+    }
+}
+
+/// Keyed by the two texts themselves rather than by position, so one block's
+/// diff is never mistaken for another's — a session and its subagent tabs
+/// reuse the same block indices. egui drops whatever a frame did not ask
+/// for, so closing a tab reclaims its diffs with no bookkeeping here.
+type DiffCache = egui::cache::FrameCache<Arc<PreparedDiff>, DiffComputer>;
+
 fn diff_ui(ui: &mut egui::Ui, path: &str, old_text: &str, new_text: &str) {
     ui.label(RichText::new(path).strong().monospace());
     let colors = theme::colors(ui.ctx());
-    let diff = TextDiff::from_lines(old_text, new_text);
-    let mut lines_shown = 0usize;
-    for group in diff.grouped_ops(2) {
-        for op in group {
-            for change in diff.iter_changes(&op) {
-                if lines_shown >= DIFF_MAX_LINES {
-                    ui.label(RichText::new("... diff truncated ...").weak().italics());
-                    return;
-                }
-                lines_shown += 1;
-                let line = change.value().trim_end_matches('\n');
-                let (sign, color) = match change.tag() {
-                    ChangeTag::Delete => ("-", colors.diff_del),
-                    ChangeTag::Insert => ("+", colors.diff_add),
-                    ChangeTag::Equal => (" ", ui.visuals().weak_text_color()),
-                };
-                ui.label(
-                    RichText::new(format!("{sign} {line}"))
-                        .monospace()
-                        .color(color),
-                );
-            }
-        }
+    let prepared = ui
+        .ctx()
+        .memory_mut(|mem| mem.caches.cache::<DiffCache>().get((old_text, new_text)));
+    for (tag, line) in &prepared.lines {
+        let color = match tag {
+            ChangeTag::Delete => colors.diff_del,
+            ChangeTag::Insert => colors.diff_add,
+            ChangeTag::Equal => ui.visuals().weak_text_color(),
+        };
+        ui.label(RichText::new(line).monospace().color(color));
+    }
+    if prepared.truncated {
+        ui.label(RichText::new("... diff truncated ...").weak().italics());
     }
 }
 
@@ -348,5 +395,74 @@ fn truncate(text: &str, max_chars: usize) -> String {
     } else {
         let cut: String = text.chars().take(max_chars).collect();
         format!("{cut}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DIFF_MAX_LINES, PreparedDiff};
+    use similar::ChangeTag;
+
+    /// Every cached line arrives with its sign already attached, so drawing a
+    /// frame is only a matter of picking the colour.
+    #[test]
+    fn test_prepared_diff_signs_its_lines() {
+        let prepared = PreparedDiff::compute(
+            "alpha
+beta
+",
+            "alpha
+gamma
+",
+        );
+        let tags: Vec<ChangeTag> = prepared.lines.iter().map(|(tag, _)| *tag).collect();
+        assert!(tags.contains(&ChangeTag::Delete), "{tags:?}");
+        assert!(tags.contains(&ChangeTag::Insert), "{tags:?}");
+        assert!(!prepared.truncated);
+        for (tag, line) in &prepared.lines {
+            let sign = match tag {
+                ChangeTag::Delete => '-',
+                ChangeTag::Insert => '+',
+                ChangeTag::Equal => ' ',
+            };
+            assert_eq!(line.chars().next(), Some(sign), "{line:?}");
+        }
+    }
+
+    /// Identical text has nothing to show: `grouped_ops` yields no groups at
+    /// all, so the cached entry is empty rather than a wall of context.
+    #[test]
+    fn test_prepared_diff_of_identical_text_is_empty() {
+        let prepared = PreparedDiff::compute(
+            "same
+", "same
+",
+        );
+        assert!(prepared.lines.is_empty());
+        assert!(!prepared.truncated);
+    }
+
+    /// The cap is what keeps one enormous rewrite from being cached in full.
+    #[test]
+    fn test_prepared_diff_stops_at_the_line_cap() {
+        let old: String = (0..DIFF_MAX_LINES * 2)
+            .map(|i| {
+                format!(
+                    "line {i}
+"
+                )
+            })
+            .collect();
+        let new: String = (0..DIFF_MAX_LINES * 2)
+            .map(|i| {
+                format!(
+                    "changed {i}
+"
+                )
+            })
+            .collect();
+        let prepared = PreparedDiff::compute(&old, &new);
+        assert_eq!(prepared.lines.len(), DIFF_MAX_LINES);
+        assert!(prepared.truncated);
     }
 }
