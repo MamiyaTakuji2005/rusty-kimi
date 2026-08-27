@@ -165,12 +165,16 @@ merge logic), `tools/` (Shell; `file/` Read/Write/Replace/Glob/Grep/ReadMedia;
 `web/` SearchWeb/FetchURL; todo; `agent.rs` Agent + `fork.rs` Fork; `task/`
 background task tools; `snapshot.rs` Undo; dmail; think; `test.rs`
 plus/compare/panic), `skill/` (skill discovery, mermaid/d2 flows),
-`config.rs`/`metadata.rs`/`session.rs`/`share.rs` (persistence), `mcp.rs` (rmcp
-client), `prompts/`, `skills/`, `agents/`.
+`config.rs`/`metadata.rs`/`session.rs`/`share.rs` (persistence; metadata saves
+go through a temp file + rename and log failures instead of panicking), `mcp.rs`
+(rmcp client), `prompts/`, `skills/`, `agents/`.
 
 **`server/kosong/src/`** — `message.rs` (canonical message types), `chat_provider/`
 (Kimi, Echo, ScriptedEcho — the latter two for tests), `tooling/`, `generate.rs`
-(streaming merge + tool-call orchestration).
+(streaming merge + tool-call orchestration). The provider HTTP clients are
+deliberately bounded — 10 s connect, 120 s between stream chunks — so a stalled
+upstream surfaces as a retryable `Timeout` instead of wedging the step forever;
+do not remove those timeouts.
 
 **`server/kaos/src/`** — `Kaos` trait + `LocalKaos`, task-local `current` override,
 `KaosPath` (canonical/expanduser, no symlink resolution), `cached.rs` (glob cache
@@ -214,17 +218,23 @@ historical).
 **`client/kimi-tui/src/`** — the ratatui terminal frontend. One conversation per
 invocation (a TUI owns the whole terminal). `main.rs` (event loop over one mpsc
 channel fed by crossterm input and the client's wake hook; overlays for
-approvals and resume; status bar), `agent.rs` (protocol state machine:
+approvals and resume; status bar; a panic hook restores the terminal before
+the panic message prints), `agent.rs` (protocol state machine:
 initialize → replay → ready/running/failed, request-id correlation, approval
-answering), `input.rs` (single-line editor, char-boundary safe),
+answering), `input.rs` (single-line editor, char-boundary safe; the cursor
+column is display width, so CJK counts two cells),
 `render.rs` (blocks → pre-wrapped styled rows with width-aware wrapping;
 scrollback is index arithmetic on the row list).
 
 **`client/kimi-gui/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
-`focus_owner()`), `session.rs` (one agent child + transcript + approval UI per
-tab), `render.rs` (transcript block widgets), `theme.rs` (light/dark/Kimi
-palettes, moon spinner, `BarStyle`), `palette.rs` (command palette), `os.rs`
-(open-in-default-app); transcript/session-list moved to `wire-client`.
+`focus_owner()`; holds one `RemoteLink` per configured `[[remotes]]` entry —
+the tab strip paints a chain button each, and `pick_link` resolves which one a
+remote command means), `session.rs` (one agent child + transcript + approval
+UI per tab), `render.rs` (transcript block widgets), `remote_link.rs`
+(per-remote connection state machine: tunnel child, background version probe,
+the painted chain button), `theme.rs` (light/dark/Kimi palettes, moon spinner,
+`BarStyle`), `palette.rs` (command palette), `os.rs` (open-in-default-app);
+transcript/session-list moved to `wire-client`.
 
 **Palette vs. slash commands — a deliberate boundary, held strictly.** The
 command palette is for **GUI and orchestration only**: commands that act on the
@@ -236,6 +246,14 @@ typed into the session's input, so it behaves identically in every frontend,
 including headless wire clients. Do not move session behavior into the palette
 (or vice versa): one place per action is what keeps the two from becoming
 confusingly overlapping menus.
+
+The remote palette commands take an optional **trailing remote name**
+(`open remote session vps`); the bare command means the default remote (the
+entry marked `default = true` in `bridge.toml`, else the first) — the same
+contract as the CLI's `--remote`. The query split lives in `palette.rs`
+(`Match::arg`, only for `takes_remote` entries); name resolution and the
+typo error happen at run time in `app.rs` (`pick_link`/`target_link`), so
+mid-typing never blanks the palette list.
 
 **`remote/kimi-bridge/`** — the relay daemon pair (`remote/AGENTS.md` has the
 map; `remote/PLAN.md` the design record). One binary, two subcommands:
