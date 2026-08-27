@@ -12,9 +12,9 @@
 //! not the default. See [`Entry::takes_remote`] and [`Match::arg`].
 //!
 //! The boundary is deliberate and held strictly: palette commands are **GUI
-//! and orchestration only** — they act on the app and its tabs (open, close,
-//! resume, connect, theme, open files and folders), never on what a *session*
-//! does. Anything that changes or affects the session's conversation —
+//! and orchestration only** — they act on the app, its tabs and its panes
+//! (open, close, resume, connect, split, theme, open files and folders),
+//! never on what a *session* does. Anything that changes or affects the session's conversation —
 //! compaction, model switching, YOLO, forking, skills, flows — is a **slash
 //! command** owned by the agent (`dvadva-agent`'s soul) and typed into the
 //! session's input, so it works identically in every frontend. Do not add
@@ -28,6 +28,9 @@ pub enum Command {
     NewSession,
     ResumeSession,
     CloseSession,
+    SplitRight,
+    SplitDown,
+    CloseSplit,
     ConnectRemote,
     NewRemoteSession,
     OpenRemoteSession,
@@ -77,6 +80,30 @@ pub const COMMANDS: &[Entry] = &[
         detail: "close the active tab",
         binding: Some("Ctrl+T"),
         needs_session: true,
+        takes_remote: false,
+    },
+    Entry {
+        command: Command::SplitRight,
+        title: "Split right",
+        detail: "a second view of the same tabs, beside this one (re-lays a row split into columns)",
+        binding: None,
+        needs_session: false,
+        takes_remote: false,
+    },
+    Entry {
+        command: Command::SplitDown,
+        title: "Split down",
+        detail: "a second view of the same tabs, below this one (re-lays a column split into rows)",
+        binding: None,
+        needs_session: false,
+        takes_remote: false,
+    },
+    Entry {
+        command: Command::CloseSplit,
+        title: "Close split",
+        detail: "drop the focused pane; the window keeps the last one",
+        binding: None,
+        needs_session: false,
         takes_remote: false,
     },
     Entry {

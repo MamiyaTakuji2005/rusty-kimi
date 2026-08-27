@@ -28,6 +28,42 @@ enum Phase {
 /// Inner margin of the transcript's central panel, per side.
 const PANEL_MARGIN: i8 = 8;
 
+/// Which pane of a split window a session is being drawn into.
+///
+/// A session is not owned by a pane: the same one can be open in two panes at
+/// once, and each needs its own scroll position, chat box and modal. That is
+/// what `index` is for — it salts every id below the session, so egui sees
+/// two independent copies rather than one widget drawn twice.
+#[derive(Clone, Copy)]
+pub struct PaneSlot {
+    /// Position of this pane in the window, and the id salt.
+    pub index: usize,
+    /// How many panes share the window's *width*. The transcript's wrap floor
+    /// is measured against the whole monitor, which overflows a pane that
+    /// only owns a fraction of it; this is what divides it down.
+    pub columns: usize,
+    /// Whether this is the pane the keyboard belongs to.
+    ///
+    /// Distinct from `suppress_keys`, which is also set by an overlay: this
+    /// one says *which copy is real*. A session drawn in two panes has one
+    /// set of "did the chat box have focus last frame" flags, and only the
+    /// pane the typing happens in may write them — otherwise the idle copy,
+    /// drawn afterwards, reports its own unfocused box and the typing pane
+    /// wakes up next frame believing Enter is not a send.
+    pub focused: bool,
+}
+
+impl Default for PaneSlot {
+    /// The unsplit window: one pane, owning the full width.
+    fn default() -> Self {
+        Self {
+            index: 0,
+            columns: 1,
+            focused: true,
+        }
+    }
+}
+
 struct SlashCommand {
     name: String,
     description: String,
@@ -396,15 +432,24 @@ impl Session {
         }
     }
 
-    /// Draw this session's panels. `suppress_keys` disables the session's
-    /// keyboard shortcuts (e.g. while an app-level popup is open).
-    pub fn ui(&mut self, ctx: &egui::Context, suppress_keys: bool) {
+    /// Draw this session into one pane of the window. `suppress_keys`
+    /// disables the session's keyboard shortcuts — an app-level popup is
+    /// open, or this is not the focused pane.
+    ///
+    /// The panels here are `show_inside` rather than window panels: a pane is
+    /// a region, and two of them draw side by side. Everything id-shaped is
+    /// salted with `slot.index` so the same session may be open in both.
+    pub fn ui(&mut self, ui: &mut egui::Ui, slot: PaneSlot, suppress_keys: bool) {
+        // The panels below borrow `ui`, so the context cannot be borrowed
+        // from it at the same time. It is an `Arc` handle; a clone is a
+        // pointer copy.
+        let ctx = ui.ctx().clone();
         // While the keyboard has climbed into the transcript it owns Escape
         // too — closing the climb takes priority over cancelling a turn.
         let mut toggle_fold = false;
         if !suppress_keys {
             if self.selected_block.is_some() {
-                toggle_fold = self.transcript_nav_keys(ctx);
+                toggle_fold = self.transcript_nav_keys(&ctx, slot);
             } else if self.phase == Phase::Running && ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.client.send_request("cancel", json!({}));
             }
@@ -413,21 +458,23 @@ impl Session {
         // When an approval arrives, drop the chat box's focus once so the
         // 1/2/3 shortcuts answer the modal. Clicking back into the box
         // restores normal typing (digits included) for this approval.
-        if let Some(pending) = self.approvals.first() {
-            if self.focus_released_for.as_deref() != Some(pending.request_id.as_str()) {
-                self.focus_released_for = Some(pending.request_id.clone());
-                ctx.memory_mut(|mem| mem.surrender_focus(self.input_id()));
+        if slot.focused {
+            if let Some(pending) = self.approvals.first() {
+                if self.focus_released_for.as_deref() != Some(pending.request_id.as_str()) {
+                    self.focus_released_for = Some(pending.request_id.clone());
+                    ctx.memory_mut(|mem| mem.surrender_focus(self.input_id(slot)));
+                }
+            } else {
+                self.focus_released_for = None;
             }
-        } else {
-            self.focus_released_for = None;
         }
 
-        egui::TopBottomPanel::bottom("input_panel")
+        egui::TopBottomPanel::bottom(egui::Id::new(("input_panel", slot.index)))
             .resizable(false)
-            .show(ctx, |ui| {
-                ui.push_id(self.id, |ui| {
+            .show_inside(ui, |ui| {
+                ui.push_id((slot.index, self.id), |ui| {
                     ui.add_space(4.0);
-                    self.input_area(ui, suppress_keys);
+                    self.input_area(ui, slot, suppress_keys);
                     self.status_bar(ui);
                     ui.add_space(2.0);
                 });
@@ -440,15 +487,17 @@ impl Session {
             top: 2,
             ..egui::Margin::same(PANEL_MARGIN)
         });
-        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            ui.push_id(self.id, |ui| {
-                self.subtab_strip(ui);
-                self.transcript_view(ui, toggle_fold);
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show_inside(ui, |ui| {
+                ui.push_id((slot.index, self.id), |ui| {
+                    self.subtab_strip(ui);
+                    self.transcript_view(ui, slot, toggle_fold);
+                });
             });
-        });
 
         if !suppress_keys {
-            self.approval_modal(ctx);
+            self.approval_modal(&ctx, slot);
         }
     }
 
@@ -505,7 +554,7 @@ impl Session {
     /// past the newest block — drops back to the chat box. Returns whether a
     /// fold was requested, for [`Self::transcript_view`] to apply to the one
     /// block it lands on.
-    fn transcript_nav_keys(&mut self, ctx: &egui::Context) -> bool {
+    fn transcript_nav_keys(&mut self, ctx: &egui::Context, slot: PaneSlot) -> bool {
         let (up, down, toggle, copy, cancel) = ctx.input_mut(|i| {
             (
                 i.consume_key(Modifiers::NONE, Key::ArrowUp),
@@ -517,7 +566,7 @@ impl Session {
             )
         });
         if cancel {
-            self.exit_nav(ctx);
+            self.exit_nav(ctx, slot);
             return false;
         }
         let Some(index) = self.selected_block else {
@@ -534,19 +583,19 @@ impl Session {
                 self.selected_block = Some(index + 1);
                 self.nav_scroll = true;
             } else {
-                self.exit_nav(ctx);
+                self.exit_nav(ctx, slot);
             }
         }
         toggle
     }
 
     /// Drop the climb and hand the keyboard back to the chat box.
-    fn exit_nav(&mut self, ctx: &egui::Context) {
+    fn exit_nav(&mut self, ctx: &egui::Context, slot: PaneSlot) {
         self.selected_block = None;
-        ctx.memory_mut(|mem| mem.request_focus(self.input_id()));
+        ctx.memory_mut(|mem| mem.request_focus(self.input_id(slot)));
     }
 
-    fn transcript_view(&mut self, ui: &mut egui::Ui, toggle_fold: bool) {
+    fn transcript_view(&mut self, ui: &mut egui::Ui, slot: PaneSlot, toggle_fold: bool) {
         // A fork/subagent tab runs on its own clock: the child streams while
         // the parent is Ready, so "running" comes from its done flag there.
         let (blocks, running) = match &self.active_subtab {
@@ -584,7 +633,7 @@ impl Session {
                 // third of the screen clips text instead of folding it
                 // tighter. The scroll area's clip rect does the clipping.
                 let monitor = ui.input(|i| i.viewport().monitor_size).map(|size| size.x);
-                ui.set_max_width(wrap_width(ui.available_width(), monitor));
+                ui.set_max_width(wrap_width(ui.available_width(), monitor, slot.columns));
                 let last = blocks.len().saturating_sub(1);
                 for (index, block) in blocks.iter().enumerate() {
                     let is_selected = selected == Some(index);
@@ -619,7 +668,7 @@ impl Session {
             });
     }
 
-    fn approval_modal(&mut self, ctx: &egui::Context) {
+    fn approval_modal(&mut self, ctx: &egui::Context, slot: PaneSlot) {
         let Some(pending) = self.approvals.first() else {
             return;
         };
@@ -643,7 +692,7 @@ impl Session {
             });
         }
         egui::Window::new("Approval required")
-            .id(egui::Id::new(("approval_modal", self.id)))
+            .id(egui::Id::new(("approval_modal", slot.index, self.id)))
             .collapsible(false)
             .resizable(true)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -738,11 +787,13 @@ impl Session {
     }
 
     /// Stable id of the chat input box (also used to surrender its focus).
-    fn input_id(&self) -> egui::Id {
-        egui::Id::new(("session_input", self.id))
+    /// Per pane: two panes showing this session are two boxes, and one of
+    /// them holds the keyboard.
+    fn input_id(&self, slot: PaneSlot) -> egui::Id {
+        egui::Id::new(("session_input", slot.index, self.id))
     }
 
-    fn input_area(&mut self, ui: &mut egui::Ui, suppress_keys: bool) {
+    fn input_area(&mut self, ui: &mut egui::Ui, slot: PaneSlot, suppress_keys: bool) {
         // Slash-command hints while typing a command.
         if self.input.starts_with('/') && !self.slash_commands.is_empty() {
             let needle = self.input.trim_start_matches('/').to_ascii_lowercase();
@@ -788,7 +839,7 @@ impl Session {
             self.selected_block = self.active_blocks().len().checked_sub(1);
             self.nav_scroll = true;
             ui.ctx()
-                .memory_mut(|mem| mem.surrender_focus(self.input_id()));
+                .memory_mut(|mem| mem.surrender_focus(self.input_id(slot)));
         }
 
         // Enter submits (consumed before the widget sees it); Shift+Enter = newline.
@@ -801,7 +852,7 @@ impl Session {
         } else {
             "Message the agent... (Enter to send, Shift+Enter for newline)"
         };
-        let input_id = self.input_id();
+        let input_id = self.input_id(slot);
         let output = egui::TextEdit::multiline(&mut self.input)
             // Stable id: the slash-command hint above toggles in and out,
             // which would otherwise change this widget's auto-generated id
@@ -812,14 +863,18 @@ impl Session {
             .hint_text(hint)
             .show(ui);
         let response = output.response;
-        self.input_had_focus = response.has_focus();
+        // Last frame's state, for the keys consumed above before this widget
+        // redraws — and only ever written by the pane those keys go to.
+        if slot.focused {
+            self.input_had_focus = response.has_focus();
+            self.input_at_start = output.cursor_range.is_none_or(|r| r.primary.index == 0);
+        }
         // Regaining focus — a click, most likely — is how climbing ends
         // early: the box owns the arrows again the moment it is the thing
         // being typed into.
         if response.has_focus() {
             self.selected_block = None;
         }
-        self.input_at_start = output.cursor_range.is_none_or(|r| r.primary.index == 0);
         if submit {
             self.submit_input();
             response.request_focus();
@@ -841,19 +896,23 @@ impl Session {
 }
 
 /// The width the transcript lays its text out at: the real width while the
-/// window is wide enough, floored at a third of the monitor below that.
+/// pane is wide enough, floored at a third of the monitor — divided by the
+/// panes sharing that monitor — below that.
 ///
 /// This is what "word wrap" means here once the window gets small: text
-/// follows the window down to a third of the screen, and past that the
-/// layout freezes and the window edge clips it — a squeezed window stays a
-/// readable column instead of folding prose one word per line. Widths are in
-/// logical points and the monitor is whichever one the window is on, so the
-/// third holds at any DPI scale; some backends cannot report a monitor, so
-/// assume WQHD. The margin term makes a window of exactly a third wrap
-/// seamlessly at its real width.
-fn wrap_width(available: f32, monitor_width: Option<f32>) -> f32 {
+/// follows the pane down to a third of the screen, and past that the layout
+/// freezes and the pane edge clips it — a squeezed window stays a readable
+/// column instead of folding prose one word per line. Widths are in logical
+/// points and the monitor is whichever one the window is on, so the third
+/// holds at any DPI scale; some backends cannot report a monitor, so assume
+/// WQHD. The margin term makes a pane of exactly its share wrap seamlessly
+/// at its real width.
+fn wrap_width(available: f32, monitor_width: Option<f32>, columns: usize) -> f32 {
     let monitor = monitor_width.filter(|width| *width > 0.0).unwrap_or(2560.0);
-    let floor = monitor / 3.0 - f32::from(PANEL_MARGIN) * 2.0;
+    // A split window is still one window on one monitor: the floor is a
+    // third of what this pane could ever be given, not a third of the
+    // screen, or half a screen of transcript would clip at every width.
+    let floor = monitor / (3 * columns.max(1)) as f32 - f32::from(PANEL_MARGIN) * 2.0;
     available.max(floor)
 }
 
@@ -881,28 +940,44 @@ mod tests {
     /// A wide-enough window wraps at its real width — the floor is invisible.
     #[test]
     fn test_wrap_width_uses_the_real_width_when_wide() {
-        assert_eq!(wrap_width(1200.0, Some(2560.0)), 1200.0);
+        assert_eq!(wrap_width(1200.0, Some(2560.0), 1), 1200.0);
     }
 
     #[test]
     fn test_wrap_width_floors_at_a_third_of_the_monitor() {
         let floor = 2560.0 / 3.0 - f32::from(PANEL_MARGIN) * 2.0;
-        assert_eq!(wrap_width(400.0, Some(2560.0)), floor);
+        assert_eq!(wrap_width(400.0, Some(2560.0), 1), floor);
         // At exactly a third of the screen the two widths agree, so shrinking
         // through the boundary never jumps.
-        assert_eq!(wrap_width(floor, Some(2560.0)), floor);
+        assert_eq!(wrap_width(floor, Some(2560.0), 1), floor);
     }
 
     #[test]
     fn test_wrap_width_follows_the_monitor_the_window_is_on() {
-        assert!(wrap_width(100.0, Some(1920.0)) < wrap_width(100.0, Some(2560.0)));
+        assert!(wrap_width(100.0, Some(1920.0), 1) < wrap_width(100.0, Some(2560.0), 1));
     }
 
     /// No monitor info (or a nonsense zero) falls back to assuming WQHD.
     #[test]
     fn test_wrap_width_assumes_wqhd_without_monitor_info() {
-        assert_eq!(wrap_width(400.0, None), wrap_width(400.0, Some(2560.0)));
-        assert_eq!(wrap_width(400.0, Some(0.0)), wrap_width(400.0, None));
+        assert_eq!(
+            wrap_width(400.0, None, 1),
+            wrap_width(400.0, Some(2560.0), 1)
+        );
+        assert_eq!(wrap_width(400.0, Some(0.0), 1), wrap_width(400.0, None, 1));
+    }
+
+    /// Side by side, each pane's floor is its own share of the screen —
+    /// otherwise both halves of a split clip at every width.
+    #[test]
+    fn test_wrap_width_divides_the_floor_between_columns() {
+        let single = wrap_width(100.0, Some(2560.0), 1);
+        let halved = wrap_width(100.0, Some(2560.0), 2);
+        assert!(halved < single);
+        assert_eq!(halved, 2560.0 / 6.0 - f32::from(PANEL_MARGIN) * 2.0);
+        // A vertical split shares no width, so it passes one column and gets
+        // the unsplit floor back.
+        assert_eq!(wrap_width(100.0, Some(2560.0), 0), single);
     }
 
     #[test]

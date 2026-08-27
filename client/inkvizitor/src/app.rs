@@ -16,6 +16,16 @@
 //! tab's machine — a parallel session of what you are looking at — and each
 //! connect button opens one on its own remote.
 //!
+//! The window can be **split** into panes ("Split right" / "Split down" in
+//! the palette). A pane is a whole duplicate of the scene — its own tab
+//! strip listing *every* session, its own active tab, its own scroll and chat
+//! box — so a split is two views of one set of tabs, not two workspaces.
+//! Only the overlays stay single: the palette, the resume list and the
+//! confirmations are centered windows that act on the focused pane, since two
+//! copies would fight over the same middle of the screen. `Alt+←/→` (or
+//! `↑/↓`, along whichever axis the split runs) moves the focus, and so does
+//! clicking into a pane.
+//!
 //! Everything here is also reachable from the keyboard alone — see
 //! [`InkvizitorApp::handle_shortcuts`].
 
@@ -28,7 +38,7 @@ use dvadva_agent::share::get_share_dir as share_dir;
 
 use crate::palette::{Command, Palette};
 use crate::remote_link::{LinkLight, RemoteLink};
-use crate::session::Session;
+use crate::session::{PaneSlot, Session};
 use crate::theme::Theme;
 use wire_client::remotes;
 use wire_client::session_list::{ResumeEntry, spawn_remote_session_listing, spawn_session_listing};
@@ -65,6 +75,22 @@ enum FocusOwner {
     Session,
 }
 
+/// One view of the hub: a tab strip listing every session, over the one it
+/// currently has open. Panes are duplicates — two of them may well be
+/// looking at the same tab — so only the *choice* of tab lives here.
+struct Pane {
+    active: usize,
+}
+
+/// Which way the panes divide the window. One axis for the whole window
+/// rather than a tree of splits: two columns or two rows, three of either,
+/// and nothing that needs a layout model to explain.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Split {
+    Columns,
+    Rows,
+}
+
 pub struct InkvizitorApp {
     agent_bin: String,
     /// One connection state per configured remote — a chain button each —
@@ -78,7 +104,13 @@ pub struct InkvizitorApp {
     /// the connect button is where the user learns of it.
     config_error: Option<String>,
     sessions: Vec<Session>,
-    active: usize,
+    /// The panes, left to right or top to bottom. **Never empty** — closing
+    /// the last one is refused, so `focused` always indexes something.
+    panes: Vec<Pane>,
+    /// Which way `panes` divides the window; meaningless while there is one.
+    split: Split,
+    /// The pane the keyboard and every overlay act on.
+    focused: usize,
     next_session_id: usize,
     /// In-flight native folder picker started by the `+` button.
     folder_pick: Option<Receiver<Option<PathBuf>>>,
@@ -114,6 +146,8 @@ pub struct InkvizitorApp {
 struct Keys {
     next_session: bool,
     prev_session: bool,
+    next_pane: bool,
+    prev_pane: bool,
     next_subtab: bool,
     prev_subtab: bool,
     new_session: bool,
@@ -133,6 +167,11 @@ impl Keys {
     /// The same for the fork/subagent row.
     fn subtab_step(&self) -> Option<bool> {
         (self.next_subtab || self.prev_subtab).then_some(self.next_subtab)
+    }
+
+    /// The same for the panes of a split.
+    fn pane_step(&self) -> Option<bool> {
+        (self.next_pane || self.prev_pane).then_some(self.next_pane)
     }
 }
 
@@ -191,7 +230,9 @@ impl InkvizitorApp {
             links,
             config_error,
             sessions: Vec::new(),
-            active: 0,
+            panes: vec![Pane { active: 0 }],
+            split: Split::Columns,
+            focused: 0,
             next_session_id: 1,
             folder_pick: None,
             resume_sessions: Vec::new(),
@@ -228,12 +269,49 @@ impl InkvizitorApp {
         self.resume_source = target;
     }
 
+    /// The focused pane's active tab — what "the session" means to every
+    /// command that does not name one.
+    fn active(&self) -> usize {
+        self.panes[self.focused].active
+    }
+
+    /// Panes sharing the window's *width*: all of them when the split runs in
+    /// columns, one otherwise. The transcript's wrap floor needs it — see
+    /// `session::wrap_width`.
+    fn columns(&self) -> usize {
+        match self.split {
+            Split::Columns => self.panes.len(),
+            Split::Rows => 1,
+        }
+    }
+
+    /// Add a pane beside (or below) the focused one, showing what it shows,
+    /// and move the focus into it. The new pane is a second view, not a
+    /// second workspace: same tabs, same one selected, its own scroll
+    /// position and chat box.
+    fn split_pane(&mut self, axis: Split) {
+        let active = self.active();
+        self.split = axis;
+        self.panes.insert(self.focused + 1, Pane { active });
+        self.focused += 1;
+    }
+
+    /// Drop the focused pane. The last one is the window itself and stays.
+    fn close_split(&mut self) {
+        if self.panes.len() == 1 {
+            self.error = Some("this is the only pane — nothing to close".into());
+            return;
+        }
+        self.panes.remove(self.focused);
+        self.focused = self.focused.min(self.panes.len() - 1);
+    }
+
     /// The machine the active tab runs on. `+` and the resume menu follow it,
     /// so both mean "more of what I am looking at".
     fn active_target(&self) -> SessionTarget {
         match self
             .sessions
-            .get(self.active)
+            .get(self.active())
             .and_then(|s| s.remote.clone())
         {
             Some((name, endpoint)) => SessionTarget::Remote(name, endpoint),
@@ -270,7 +348,8 @@ impl InkvizitorApp {
             self.last_workdir = work_dir.or(self.last_workdir.take());
         }
         self.sessions.push(session);
-        self.active = self.sessions.len() - 1;
+        // A new tab opens in the pane that asked for it, and nowhere else.
+        self.panes[self.focused].active = self.sessions.len() - 1;
         Ok(())
     }
 
@@ -386,11 +465,11 @@ impl InkvizitorApp {
     fn close_session(&mut self, index: usize) {
         let mut session = self.sessions.remove(index);
         session.shutdown();
-        if self.active > index {
-            self.active -= 1;
-        }
-        if self.active >= self.sessions.len() {
-            self.active = self.sessions.len().saturating_sub(1);
+        // Every pane indexes the same list, so they all shift — not just the
+        // one the close came from.
+        let len = self.sessions.len();
+        for pane in &mut self.panes {
+            pane.active = shift_active(pane.active, index, len);
         }
     }
 
@@ -420,6 +499,8 @@ impl InkvizitorApp {
     /// * `Ctrl+T` — close the active session, after a confirmation
     /// * `Ctrl+P` — command palette, for everything without a key of its own
     /// * `Ctrl+D` — cycle the theme: light → dark → Kimi
+    /// * `Alt+←`/`Alt+→` (or `↑`/`↓`) — focus the previous / next pane of a
+    ///   split, along whichever axis it runs
     ///
     /// This runs before any widget is drawn and *consumes* the keys: the chat
     /// box holds focus permanently and would otherwise swallow `Tab` as an
@@ -434,6 +515,13 @@ impl InkvizitorApp {
             FocusOwner::Session => {}
         }
 
+        // Read before the closure: which arrows move the focus depends on
+        // which way the window is divided.
+        let (back, forward) = match self.split {
+            Split::Columns => (Key::ArrowLeft, Key::ArrowRight),
+            Split::Rows => (Key::ArrowUp, Key::ArrowDown),
+        };
+        let split = self.panes.len() > 1;
         let keys = ctx.input_mut(|i| {
             // Most specific first: `consume_key` ignores an *extra* shift, so
             // a Ctrl+Tab pattern matches Ctrl+Shift+Tab too and would eat it.
@@ -454,6 +542,13 @@ impl InkvizitorApp {
                 // command everywhere else and so does the same thing here.
                 palette: i.consume_key(Modifiers::COMMAND, Key::P),
                 theme: i.consume_key(Modifiers::COMMAND, Key::D),
+                // Alt, not Shift: these keys are consumed before any widget
+                // sees them, and Shift+arrow is how text is selected in the
+                // chat box that holds focus permanently. Short-circuited on
+                // `split`, so an undivided window consumes nothing new and
+                // behaves exactly as it did.
+                prev_pane: split && i.consume_key(Modifiers::ALT, back),
+                next_pane: split && i.consume_key(Modifiers::ALT, forward),
             }
         });
 
@@ -462,12 +557,20 @@ impl InkvizitorApp {
         {
             let len = self.sessions.len();
             let step = if forward { 1 } else { len - 1 };
-            self.active = (self.active + step) % len;
+            let active = &mut self.panes[self.focused].active;
+            *active = (*active + step) % len;
         }
-        if let Some(forward) = keys.subtab_step()
-            && let Some(session) = self.sessions.get_mut(self.active)
-        {
-            session.cycle_subtab(forward);
+        if let Some(forward) = keys.pane_step() {
+            let len = self.panes.len();
+            let step = if forward { 1 } else { len - 1 };
+            self.focused = (self.focused + step) % len;
+        }
+        if let Some(forward) = keys.subtab_step() {
+            // Resolved after the step above, which may just have moved it.
+            let active = self.active();
+            if let Some(session) = self.sessions.get_mut(active) {
+                session.cycle_subtab(forward);
+            }
         }
         if keys.new_session {
             self.start_folder_pick(ctx);
@@ -476,7 +579,7 @@ impl InkvizitorApp {
             self.open_resume_menu(ctx);
         }
         if keys.close {
-            self.request_close(self.active);
+            self.request_close(self.active());
         }
         if keys.palette {
             self.palette.open();
@@ -535,7 +638,10 @@ impl InkvizitorApp {
         match command {
             Command::NewSession => self.start_folder_pick(ctx),
             Command::ResumeSession => self.open_resume_menu(ctx),
-            Command::CloseSession => self.request_close(self.active),
+            Command::CloseSession => self.request_close(self.active()),
+            Command::SplitRight => self.split_pane(Split::Columns),
+            Command::SplitDown => self.split_pane(Split::Rows),
+            Command::CloseSplit => self.close_split(),
             Command::ConnectRemote => self.connect_remote(ctx, arg),
             Command::NewRemoteSession => self.open_remote_session(ctx, arg),
             Command::OpenRemoteSession => self.open_remote_resume_menu(ctx, arg),
@@ -551,7 +657,7 @@ impl InkvizitorApp {
                 // The tab may be running in the GUI's own cwd, with no `-w`.
                 let dir = self
                     .sessions
-                    .get(self.active)
+                    .get(self.active())
                     .and_then(|session| session.work_dir.clone())
                     .or_else(|| std::env::current_dir().ok());
                 match dir {
@@ -666,7 +772,7 @@ impl InkvizitorApp {
         // this run, else the newest past session on disk, else cwd.
         let start = self
             .sessions
-            .get(self.active)
+            .get(self.active())
             .and_then(|session| session.work_dir.clone())
             .or_else(|| self.last_workdir.clone())
             .or_else(|| {
@@ -773,7 +879,14 @@ impl InkvizitorApp {
         }
     }
 
-    fn tab_strip(&mut self, ctx: &egui::Context) {
+    /// The strip at the top of one pane. Every pane lists every session —
+    /// the tabs are the window's, only the selection is the pane's — and
+    /// carries its own copy of the buttons, so no pane is the one that owns
+    /// the toolbar.
+    fn tab_strip(&mut self, pane: usize, ui: &mut egui::Ui) {
+        // The panel below borrows `ui`; the context is an `Arc` handle, so
+        // the clone that outlives the borrow is a pointer copy.
+        let ctx = ui.ctx().clone();
         let mut close: Option<usize> = None;
         let mut pick_folder = false;
         let mut refresh_resume = false;
@@ -782,7 +895,7 @@ impl InkvizitorApp {
         let theme = self.theme;
         let colors = theme.colors();
         let bar = crate::theme::SESSION_BAR;
-        egui::TopBottomPanel::top("session_tabs").show(ctx, |ui| {
+        egui::TopBottomPanel::top(egui::Id::new(("session_tabs", pane))).show_inside(ui, |ui| {
             // One set of metrics for the whole strip: the tabs, their ×, the
             // `+`, and the two buttons in the panel below all inherit it.
             bar.apply(ui);
@@ -813,31 +926,33 @@ impl InkvizitorApp {
             // margins, plus the slack the old fixed 99 carried for three.
             let buttons = 2 + lights.len();
             let width = 15.0 + buttons as f32 * bar.height + (buttons - 1) as f32 * bar.spacing;
-            let (book, link_hits, paint) = egui::SidePanel::right("tabs_right")
-                .resizable(false)
-                .exact_width(width)
-                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0)))
-                .show_inside(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let book = bar
-                            .square(ui, "📖")
-                            .on_hover_text("resume a session (Ctrl+O)");
-                        let mut hits = None;
-                        for (index, (light, hover)) in lights.iter().enumerate() {
-                            let link = crate::remote_link::link_button(bar, ui, *light, &colors)
-                                .on_hover_text(hover);
-                            if link.clicked() {
-                                hits = Some((index, true));
-                            } else if link.secondary_clicked() {
-                                hits = Some((index, false));
+            let (book, link_hits, paint) =
+                egui::SidePanel::right(egui::Id::new(("tabs_right", pane)))
+                    .resizable(false)
+                    .exact_width(width)
+                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0)))
+                    .show_inside(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let book = bar
+                                .square(ui, "📖")
+                                .on_hover_text("resume a session (Ctrl+O)");
+                            let mut hits = None;
+                            for (index, (light, hover)) in lights.iter().enumerate() {
+                                let link =
+                                    crate::remote_link::link_button(bar, ui, *light, &colors)
+                                        .on_hover_text(hover);
+                                if link.clicked() {
+                                    hits = Some((index, true));
+                                } else if link.secondary_clicked() {
+                                    hits = Some((index, false));
+                                }
                             }
-                        }
-                        let paint = bar.square(ui, theme.glyph()).on_hover_text(theme.hover());
-                        (book, hits, paint)
+                            let paint = bar.square(ui, theme.glyph()).on_hover_text(theme.hover());
+                            (book, hits, paint)
+                        })
+                        .inner
                     })
-                    .inner
-                })
-                .inner;
+                    .inner;
             if book.clicked() {
                 refresh_resume = true;
             }
@@ -858,9 +973,10 @@ impl InkvizitorApp {
                         text = RichText::new(format!("▶ {}", session.title));
                     }
                     let (tab, close_button) =
-                        bar.tab_with_close(ui, index == self.active, text, &colors);
+                        bar.tab_with_close(ui, index == self.panes[pane].active, text, &colors);
                     if tab.clicked() {
-                        self.active = index;
+                        self.panes[pane].active = index;
+                        self.focused = pane;
                     }
                     if close_button
                         .on_hover_text("close session (Ctrl+T)")
@@ -878,21 +994,26 @@ impl InkvizitorApp {
                 }
             });
         });
+        // A click on this strip is a click in this pane: the actions below
+        // run on it, not on whichever pane the keyboard happened to have.
+        if close.is_some() || pick_folder || refresh_resume || link_click.is_some() {
+            self.focused = pane;
+        }
         if let Some(index) = close {
             self.request_close(index);
         }
         if pick_folder {
-            self.start_folder_pick(ctx);
+            self.start_folder_pick(&ctx);
         }
         if refresh_resume {
             if self.resume_open {
                 self.resume_open = false;
             } else {
-                self.open_resume_menu(ctx);
+                self.open_resume_menu(&ctx);
             }
         }
         if cycle_theme {
-            self.cycle_theme(ctx);
+            self.cycle_theme(&ctx);
         }
         match link_click {
             // Green means there is something to open; anything else means
@@ -902,13 +1023,97 @@ impl InkvizitorApp {
             Some((_, true)) if self.links.is_empty() => {
                 self.error = Some(self.unconfigured_message());
             }
-            Some((index, true)) => self.connect_remote_at(index, ctx),
+            Some((index, true)) => self.connect_remote_at(index, &ctx),
             Some((index, false)) => {
                 if let Some(link) = self.links.get_mut(index) {
                     link.disconnect();
                 }
             }
             None => {}
+        }
+    }
+
+    /// Lay the panes out and draw each one.
+    ///
+    /// One pane is the whole window and takes the central panel it always
+    /// took, so an unsplit window is pixel-for-pixel what it was. More than
+    /// one and every pane but the last claims a resizable panel first —
+    /// which is where the draggable divider between them comes from.
+    fn panes_ui(&mut self, ctx: &egui::Context) {
+        let axis = self.split;
+        let count = self.panes.len();
+        let screen = ctx.screen_rect();
+        // The panes carry no frame of their own: the tab strip and the
+        // session's panels bring the margins, and a second set here would
+        // inset every pane away from its own divider.
+        let frame = egui::Frame::new().fill(ctx.style().visuals.panel_fill);
+        for index in 0..count - 1 {
+            let id = pane_id(axis, count, index);
+            match axis {
+                Split::Columns => {
+                    egui::SidePanel::left(id)
+                        .resizable(true)
+                        .frame(frame)
+                        .default_width(screen.width() / count as f32)
+                        .show(ctx, |ui| self.pane_ui(index, ui));
+                }
+                Split::Rows => {
+                    egui::TopBottomPanel::top(id)
+                        .resizable(true)
+                        .frame(frame)
+                        .default_height(screen.height() / count as f32)
+                        .show(ctx, |ui| self.pane_ui(index, ui));
+                }
+            }
+        }
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show(ctx, |ui| self.pane_ui(count - 1, ui));
+    }
+
+    /// One pane: its own tab strip, then the tab it has open.
+    fn pane_ui(&mut self, pane: usize, ui: &mut egui::Ui) {
+        // Before the strip claims its share, so the ring below frames the
+        // whole pane rather than what is left of it.
+        let rect = ui.max_rect();
+        self.tab_strip(pane, ui);
+        if self.sessions.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    RichText::new("no sessions — Ctrl+N to pick a folder, Ctrl+O to resume one")
+                        .weak(),
+                );
+            });
+        } else {
+            // The session's own keys (Esc cancels, Enter sends) and its habit
+            // of grabbing focus belong to one pane at a time — and stay out
+            // of the way entirely while anything is over it.
+            let focused = pane == self.focused;
+            let suppress = !focused || self.focus_owner() != FocusOwner::Session;
+            let slot = PaneSlot {
+                index: pane,
+                columns: self.columns(),
+                focused,
+            };
+            let active = self.panes[pane].active;
+            self.sessions[active].ui(ui, slot, suppress);
+        }
+        // Which pane the keyboard, the palette and the next new tab act on
+        // has to be visible, so the focused one wears a thin accent ring; a
+        // click is what moves it, the way it moves between an editor's panes.
+        // Neither exists in an unsplit window — there is nothing to say.
+        if self.panes.len() > 1 {
+            if pane == self.focused {
+                ui.painter().rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(1.0, self.theme.colors().accent),
+                    egui::StrokeKind::Inside,
+                );
+            } else if ui.rect_contains_pointer(rect) && ui.ctx().input(|i| i.pointer.any_pressed())
+            {
+                self.focused = pane;
+            }
         }
     }
 
@@ -1182,30 +1387,14 @@ impl eframe::App for InkvizitorApp {
         // Before any widget: the shortcuts take the keys they need out of the
         // event queue, ahead of the always-focused chat box.
         self.handle_shortcuts(ctx);
-        self.tab_strip(ctx);
+        // The overlays are windows and float above the panes regardless of
+        // order; declaring them first keeps `focus_owner` answering the same
+        // question for every pane the panes below then ask it.
         self.resume_window(ctx);
         self.palette_window(ctx);
         self.close_confirm_window(ctx);
         self.error_window(ctx);
-
-        if self.sessions.is_empty() {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        RichText::new(
-                            "no sessions — Ctrl+N to pick a folder, Ctrl+O to resume one",
-                        )
-                        .weak(),
-                    );
-                });
-            });
-            return;
-        }
-
-        // The session's own keys (Esc cancels, Enter sends) and its habit of
-        // grabbing focus stay out of the way while anything is over it.
-        let overlaid = self.focus_owner() != FocusOwner::Session;
-        self.sessions[self.active].ui(ctx, overlaid);
+        self.panes_ui(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1213,6 +1402,36 @@ impl eframe::App for InkvizitorApp {
             session.shutdown();
         }
     }
+}
+
+/// The id egui files a pane's divider position under.
+///
+/// **The axis has to be part of it.** egui keeps one `PanelState` per id and
+/// reads a *width* out of it for a side panel but a *height* for a top one,
+/// so an id shared between the two hands a row split the full-window height
+/// its column incarnation stored: the top pane claims everything, the pane
+/// below it gets nothing, and the split appears to do nothing at all — then
+/// does the same in mirror image the next time the window is split the other
+/// way.
+///
+/// The count is in there for a different reason: each layout then remembers
+/// its own dividers, so a third pane divides the window evenly instead of
+/// squeezing itself into whatever the first two left over — and closing it
+/// again brings the old divider back.
+fn pane_id(axis: Split, count: usize, index: usize) -> egui::Id {
+    let axis = match axis {
+        Split::Columns => "col",
+        Split::Rows => "row",
+    };
+    egui::Id::new(("pane", axis, count, index))
+}
+
+/// Where a pane's active tab lands once the tab at `removed` is closed: the
+/// tabs after it shift down one, and a pane left pointing past the end falls
+/// back to the last tab there is.
+fn shift_active(active: usize, removed: usize, len: usize) -> usize {
+    let active = if active > removed { active - 1 } else { active };
+    active.min(len.saturating_sub(1))
 }
 
 /// Which of `links` a remote command means: the named one, else the default
@@ -1397,7 +1616,7 @@ fn install_fallback_fonts(ctx: &egui::Context) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_fallback_fonts, pick_link};
+    use super::{Split, install_fallback_fonts, pane_id, pick_link, shift_active};
     use crate::remote_link::RemoteLink;
     use crate::theme::{MOON_PHASES, Theme};
     use wire_client::remotes::Remote;
@@ -1414,6 +1633,47 @@ mod tests {
     /// The palette's contract: a bare remote command means the default —
     /// the entry marked in bridge.toml, else the first — and a name picks
     /// its remote wherever it sits in the file.
+    /// The regression that made "split down" look like a no-op: egui stores
+    /// one panel state per id, reading a width from it for a column and a
+    /// height for a row, so the two axes must never share one.
+    #[test]
+    fn test_pane_ids_differ_between_the_axes() {
+        assert_ne!(pane_id(Split::Columns, 2, 0), pane_id(Split::Rows, 2, 0));
+    }
+
+    /// Each layout keeps its own dividers — and the same layout keeps the
+    /// same ones, or every repaint would reset the drag.
+    #[test]
+    fn test_pane_ids_are_per_layout_and_stable() {
+        assert_ne!(pane_id(Split::Columns, 2, 0), pane_id(Split::Columns, 3, 0));
+        assert_ne!(pane_id(Split::Columns, 3, 0), pane_id(Split::Columns, 3, 1));
+        assert_eq!(pane_id(Split::Columns, 2, 0), pane_id(Split::Columns, 2, 0));
+    }
+
+    /// Closing a tab renumbers every pane's selection, not just the one the
+    /// close came from — they all index the same list.
+    #[test]
+    fn test_closing_an_earlier_tab_shifts_the_selection_down() {
+        // Four tabs, tab 1 closed: a pane on 2 follows it to 1.
+        assert_eq!(shift_active(2, 1, 3), 1);
+        assert_eq!(shift_active(3, 1, 3), 2);
+    }
+
+    #[test]
+    fn test_closing_a_later_tab_leaves_the_selection_alone() {
+        assert_eq!(shift_active(0, 2, 3), 0);
+        assert_eq!(shift_active(1, 2, 3), 1);
+    }
+
+    /// The pane that was showing the closed tab keeps its index, which is now
+    /// its neighbour — unless it was the last, and there is no neighbour.
+    #[test]
+    fn test_closing_the_shown_tab_lands_on_a_real_one() {
+        assert_eq!(shift_active(1, 1, 3), 1);
+        assert_eq!(shift_active(3, 3, 3), 2);
+        assert_eq!(shift_active(0, 0, 0), 0);
+    }
+
     #[test]
     fn test_pick_link_bare_means_the_default() {
         let links = [link("vps", false), link("buildbox", true)];

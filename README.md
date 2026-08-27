@@ -21,8 +21,9 @@ MCP, and session persistence under `~/.kimi`.
 
 **`inkvizitor`** (`client/inkvizitor/`) is the native egui frontend and canonical
 client: sessions in tabs (one `dvadva-agent` subprocess each, forks as sub-tabs),
-full keyboard control, a `Ctrl+P` command palette, light/dark/Kimi themes,
-approval prompts, a live status bar, and the streamed transcript.
+splittable into panes that each view the same set of tabs, full keyboard
+control, a `Ctrl+P` command palette, light/dark/Kimi themes, approval prompts,
+a live status bar, and the streamed transcript.
 
 **`dvadva-tui`** (`client/dvadva-tui/`) is the ratatui terminal frontend — one
 session per invocation. (The original Python TUI is archived in a separate

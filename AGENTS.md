@@ -255,19 +255,55 @@ column is display width, so CJK counts two cells),
 scrollback is index arithmetic on the row list).
 
 **`client/inkvizitor/src/`** — `app.rs` (top-level wiring, shortcuts, overlays,
-`focus_owner()`; holds one `RemoteLink` per configured `[[remotes]]` entry —
-the tab strip paints a chain button each, and `pick_link` resolves which one a
-remote command means), `session.rs` (one agent child + transcript + approval
-UI per tab), `render.rs` (transcript block widgets), `remote_link.rs`
+`focus_owner()`, the split panes; holds one `RemoteLink` per configured
+`[[remotes]]` entry — the tab strip paints a chain button each, and
+`pick_link` resolves which one a remote command means), `session.rs` (one
+agent child + transcript + approval UI per tab), `render.rs` (transcript
+block widgets), `remote_link.rs`
 (per-remote connection state machine: tunnel child, background version probe,
 the painted chain button), `theme.rs` (light/dark/Kimi palettes, moon spinner,
 `BarStyle`), `palette.rs` (command palette), `os.rs` (open-in-default-app);
 transcript/session-list moved to `wire-client`.
 
+**Split panes are duplicate views, not workspaces.** The window divides into
+`app.rs`'s `panes: Vec<Pane>` along one `Split` axis for the whole window —
+columns or rows, no tree. Every pane draws the *whole* scene: its own tab
+strip listing **every** session, its own active tab, its own scroll position
+and chat box. Only the choice of tab is per-pane; the sessions, the remote
+links and the overlays are the window's. The overlays deliberately stay
+single — palette, resume list, close confirmation and errors are centered
+windows, and two copies would fight over the same middle of the screen — so
+they act on `self.focused`, which `Alt+arrow` moves along the split axis and a
+click into a pane also moves. `Alt`, not `Shift`: shortcuts are consumed
+before any widget sees them and `Shift+arrow` is how text is selected in the
+permanently focused chat box.
+
+Three mechanical consequences, all easy to reintroduce by accident:
+
+- **A pane's panel id must name the axis** (`pane_id`). egui keeps one
+  `PanelState` per id and reads a *width* out of it for a `SidePanel` but a
+  *height* for a `TopBottomPanel`, so an id shared between the two hands a row
+  split the full-window height its column incarnation stored: the top pane
+  claims everything, the one below gets nothing, and the split looks like a
+  no-op — then does it in mirror image the next time you split the other way.
+  The pane count is in the id too, so each layout remembers its own dividers.
+- **Ids are salted by pane.** `Session::ui` takes a `PaneSlot`, and every id
+  under it (`push_id`, the chat box, the approval window) carries
+  `slot.index`. Without it, the same session open in two panes is one widget
+  drawn twice: shared scroll offset, shared focus, egui id collisions.
+- **Only the focused pane writes frame state.** `input_had_focus` and
+  `input_at_start` live on the `Session`, are read next frame by keys consumed
+  before the widget redraws, and are guarded by `slot.focused` — otherwise the
+  idle copy, drawn afterwards, reports its own unfocused box and Enter stops
+  sending in the pane being typed in. Same guard on the approval
+  focus-surrender. `slot.columns` is the other half: the transcript's wrap
+  floor is a fraction of the *monitor*, so it has to be divided among panes
+  sharing the width or both halves of a split clip at every size.
+
 **Palette vs. slash commands — a deliberate boundary, held strictly.** The
 command palette is for **GUI and orchestration only**: commands that act on the
-app and its tabs (open/close/resume sessions, connect a remote, cycle the
-theme, open config files and folders). Anything that changes or affects what
+app, its tabs and its panes (open/close/resume sessions, connect a remote,
+split and unsplit, cycle the theme, open config files and folders). Anything that changes or affects what
 a **session** does — compaction, model switching, YOLO, forking, skills and
 flows — is a **slash command** owned by the agent (`soul/kimisoul.rs`) and
 typed into the session's input, so it behaves identically in every frontend,
