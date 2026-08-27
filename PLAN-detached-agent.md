@@ -1,6 +1,11 @@
 # Detached agent — attach/detach plan
 
-Status: **Phases 0 and 1 done**, Phases 2-3 not started. Written 2026-08-27.
+Status: **Phases 0, 1 and 2 done**, Phase 3 not started. Written 2026-08-27.
+
+An agent now outlives its clients, and something that did not start it can
+find it and join it. What is left is policy and frontends: the GUI and the
+TUI still treat a closed connection as the end of a session, and nothing yet
+uses `attach`.
 
 Goal: a `dvadva-agent` that runs with no frontend attached, that several
 frontends (GUI, TUI, a daemon, a script) can attach to and detach from while
@@ -268,7 +273,7 @@ turn, as before.
 
 ---
 
-## Phase 2 — detach — **soft detach done**, supervisor and registry not started
+## Phase 2 — detach — **DONE** (frame protocol 1.1; wire protocol still 1.3)
 
 Small once Phase 1 lands.
 
@@ -283,7 +288,7 @@ documents connection lifetime *as* agent lifetime.
   path and every test uses it.
 - ~~**stdin EOF stops being fatal**~~ **Done**, on the listening transport;
   the last client detaching leaves the process running.
-- **Make `dvadva-bridge remote` a supervisor.** `Request::Spawn { args }`
+- ~~**Make `dvadva-bridge remote` a supervisor.**~~ **Done.** `Request::Spawn { args }`
   becomes `Request::Attach { session_id }`: find-or-start an agent for that
   session, relay, and do not kill it when the socket drops. The daemon already
   owns session listing (`list_sessions`), the frontends already know how to
@@ -292,11 +297,12 @@ documents connection lifetime *as* agent lifetime.
   This also settles Windows: there is no `setsid`, so somebody must spawn with
   `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, and the daemon is the natural
   somebody.
-- **A live-session registry**: pid + endpoint under `~/.kimi`, with reaping of
-  entries whose pid is gone. `list_sessions` marks which sessions are live.
-- **Drop `kill_on_drop`** for supervised agents, and rework the exit-trailer
-  machinery (`remote_daemon.rs`), which assumes the daemon owns the child's
-  stderr for the life of the connection.
+- ~~**A live-session registry**~~ **Done**: pid + endpoint under `~/.kimi`,
+  with reaping of entries whose pid is gone. `list_sessions` marks which
+  sessions are live.
+- ~~**Drop `kill_on_drop`**~~ **Done** for supervised agents, and rework the
+  exit-trailer machinery (`remote_daemon.rs`), which assumes the daemon owns
+  the child's stderr for the life of the connection.
 
 ### Constraint: one process per session
 
@@ -349,10 +355,84 @@ allocation per connection. Harmless when the only connection was stdio, not
 once every attached client makes one. Line length never depended on it —
 `read_until` grows its own output — so it is now 64 KB.
 
-**Not done here, and next**: the bridge supervisor, the live-session registry,
-dropping `kill_on_drop`, and an explicit stop over the wire. Stopping a
-detached agent today is `SIGTERM`/interrupt (handled) or a kill. Windows note:
-there is no graceful terminate signal, so `taskkill` is a hard kill there.
+### What shipped in the supervisor slice
+
+`live.rs` (the registry), `Request::Attach` and the supervising half of
+`remote_daemon.rs`, plus the `--listen` mock agent the e2e suite needed in
+order to test any of it honestly.
+
+**Liveness is the endpoint, not the pid.** The plan said "reaping of entries
+whose pid is gone". What a reader actually wants to know is whether it can
+still attach, and a live pid with a dead listener answers the wrong question
+— while asking the pid portably costs either a new dependency or `unsafe`,
+and the workspace denies the second. So `Registry::list` connects, keeps what
+answers, and deletes what does not; the pid stays in the entry for the humans
+(`kill`, a task manager, a log line). One consequence worth knowing: a listing
+opens a connection to every live agent, so the listener logs that shape of
+close at debug rather than warn (`SilentClose`) — otherwise every listing left
+a warning behind in every agent.
+
+**The supervisor waits by pid, not by session id.** The interesting case is a
+brand-new session, whose id nobody knows until the agent mints it. So the
+daemon starts the agent, watches the registry for *its* pid, and reports the
+id it finds in the ack (`Reply::session`) — which is the only way a caller who
+asked for a new session learns which one it got. It never has to parse the
+announce line, which stays what it is: the channel for whoever holds the
+pipes.
+
+**Three ways a supervised agent is not the daemon's child in spirit**:
+`kill_on_drop(false)`, its own process group (`process_group(0)` /
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` — this is the Windows answer to
+there being no `setsid`), and **stderr to a file** rather than to a pipe. That
+last one was not in the plan and is not cosmetic: a piped stderr dies with the
+daemon, and the agent writes to stderr from places that *panic* if the write
+fails (`soul/toolset.rs` reports MCP connections that way). An agent that
+cannot survive its supervisor is not detached.
+
+**The exit trailer moved rather than being reworked.** On the supervised path
+its case — a bad work directory, a missing key — happens *before* any relay
+exists, so it is the ack that carries the diagnosis, quoted from the agent's
+log. During a relay the trailer is still there, for the agent that falls over
+under an attached client. What it cannot do is diagnose an agent this
+connection did not start: only the daemon that spawned one knows its log file
+by name, and inventing a claim there would be worse than the plain fact.
+
+**Telling a detach from a death is an ordering question, and getting it wrong
+was the one real bug this slice had.** The first cut asked whether the
+client-to-agent copy ended *cleanly*, on the theory that an EOF is somebody
+leaving and an error is the agent going away underneath. It is not: a killed
+frontend with bytes still in its receive buffer resets the connection, so a
+hard drop — the exact case the phase exists for — arrived as an error and got
+filed as a dead agent. What actually distinguishes them is which direction
+ended first, since a client leaving *causes* the agent to close its side a
+moment later while an agent dying leaves the other copy pending on a client
+that is still there. Caught by running the real binaries, not by the tests,
+which is its own lesson; there is a test for it now
+(`a_client_that_says_goodbye_gets_no_trailer`), and both endings now
+half-close the client socket explicitly rather than letting it fall out of
+scope.
+
+**`--session` is the caller's to write.** The daemon uses the header's session
+id as a registry key and nothing else — it does not synthesize agent argv from
+it. A cold resume therefore names the session twice, once for each meaning,
+which is what the frontends already do on the `spawn` path.
+
+**Frame protocol 1.1**, additively: the `attach` op, `Reply::session`, and
+`SessionEntry::live`. A 1.0 daemon refuses an `attach` frame as an unknown op,
+which is exactly why the minor is reported in the `version` reply. The wire
+protocol is untouched at 1.3 — this whole phase happens beside it.
+
+**Also shipped**: `list_sessions` marks the live ones, *and* appends live
+sessions the cold listing has no file for yet (a brand-new session has no
+context to read, and `Session::list` skips it — a live session nobody can see
+is a live session nobody can attach to). The local listing
+(`wire_client::session_list`) reads the same registry, for the same reason.
+
+**Still open, and Phase 3's**: an explicit stop over the wire. Stopping a
+detached agent today is `SIGTERM`/interrupt (handled), a kill, or the
+supervised path's `stop` semantics that do not exist yet. Windows note: there
+is no graceful terminate signal, so `taskkill` is a hard kill there — which
+the registry survives, because a stale entry is reaped by whoever reads it.
 
 ---
 
@@ -377,7 +457,8 @@ or feels haunted.
 
 ```
 Phase 0 (versioning)  ──▶ Phase 1 (fan-out, 1.3)  ──▶ Phase 2 (detach)  ──▶ Phase 3
-                                                  └──▶ registry / supervisor
+   done                       done                  └──▶ registry / supervisor
+                                                          done (frame 1.1)
 ```
 
 Phase 1 is shippable alone. Phase 2 without Phase 1 would give a detached agent

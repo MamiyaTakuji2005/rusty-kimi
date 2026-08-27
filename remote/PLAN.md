@@ -51,6 +51,10 @@ local:  dvadva-tui/gui ─stdio─▶ dvadva-bridge local ──TCP/SSH tunnel�
   and approval prompts with no auth/TLS. Deploy behind `ssh -L` with both
   daemons bound to loopback, or add TLS + token inside the daemons.
 - One agent per connection (matches the GUI's one-agent-per-tab model).
+  **Superseded for the `attach` op** by `PLAN-detached-agent.md` Phase 2:
+  an attached agent is one per *session*, several connections may reach it,
+  and a connection closing detaches instead of killing. `spawn` still works
+  exactly as written here, and is still the one-shot path.
 - Session/persistence (`~/.kimi`) stays on the remote box; the agent resolves
   its config, keys, skills, MCP there. Local config is not shared.
 
@@ -83,7 +87,11 @@ local:  dvadva-tui/gui ─stdio─▶ dvadva-bridge local ──TCP/SSH tunnel�
 - **True mid-session attach** (joining a live agent): the wire server is
   single-client, picks the session at spawn time, and `initialize` rejects
   while a turn runs. Needs server changes + a protocol version bump —
-  deliberately a separate project.
+  deliberately a separate project. **That project has since happened**:
+  `PLAN-detached-agent.md`, wire protocol 1.3, frame protocol 1.1. It was
+  right to keep it out of here — it took three phases and touched all three
+  tiers — and this file's insistence that the daemons stay dumb is why the
+  supervisor could be added without rewriting the relay.
 - **Shared `wire-protocol` crate extraction** (client depends on
   `dvadva_agent::wire` + `Session::list`): already deferred — do not start as a
   side quest.

@@ -101,6 +101,41 @@ async fn assert_eof(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) {
     assert_eq!(n, 0, "expected EOF, got a byte");
 }
 
+/// A supervising daemon with a share directory of its own, so the registry
+/// it reads and the agents it starts never touch the machine's real one.
+async fn supervisor() -> (u16, tempfile::TempDir) {
+    let share = tempfile::tempdir().expect("temp share dir");
+    let config =
+        remote_daemon::Config::new(mock_agent()).with_share_dir(Some(share.path().to_path_buf()));
+    (remote_with(config).await, share)
+}
+
+/// Attach, and return the connection plus the session the ack names.
+async fn attach(port: u16, session: Option<&str>) -> (Conn, String) {
+    attach_with(port, session, vec![]).await
+}
+
+/// Same, for a caller that also has agent arguments to pass.
+async fn attach_with(port: u16, session: Option<&str>, args: Vec<String>) -> (Conn, String) {
+    let (conn, reply) = connect_and_send(
+        port,
+        &Request::Attach {
+            session: session.map(str::to_string),
+            args,
+        },
+    )
+    .await;
+    assert!(reply.ok, "attach failed: {reply:?}");
+    let named = reply.session.expect("an attach ack names its session");
+    (conn, named)
+}
+
+/// Ask the agent on the other end of a relay for one line.
+async fn ask(conn: &mut Conn, line: &str) -> String {
+    send_line(&mut conn.0, line).await;
+    read_line(&mut conn.1).await
+}
+
 // --- remote daemon ---------------------------------------------------------
 
 #[tokio::test]
@@ -345,4 +380,154 @@ async fn local_reports_unreachable_upstream() {
     assert!(!reply.ok);
     assert!(reply.error.unwrap().contains("failed to reach upstream"));
     assert_eof(&mut reader).await;
+}
+
+// --- the supervisor --------------------------------------------------------
+
+#[tokio::test]
+async fn attach_starts_an_agent_and_names_the_session_it_got() {
+    let (port, _share) = supervisor().await;
+    let (mut conn, session) = attach(port, None).await;
+    assert!(!session.is_empty(), "the ack must name a session");
+
+    // The relay is as opaque as the spawn path's.
+    assert_eq!(ask(&mut conn, "say hello").await, "hello");
+
+    // And the agent was told to listen, on top of whatever it was given.
+    let argv = ask(&mut conn, "argv").await;
+    assert!(argv.split('\u{1f}').any(|arg| arg == "--listen"), "{argv}");
+
+    send_line(&mut conn.0, "stop").await;
+}
+
+#[tokio::test]
+async fn a_client_that_leaves_does_not_take_the_agent_with_it() {
+    // The phase in one test: attach, walk away, come back, find the same
+    // process still holding the session.
+    let (port, _share) = supervisor().await;
+    let (mut first, session) = attach(port, None).await;
+    let pid = ask(&mut first, "pid").await;
+
+    // Not a half-close: the whole socket goes, the way a killed frontend's
+    // does. On the spawn path this is the end of the agent.
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let (mut second, again) = attach(port, Some(&session)).await;
+    assert_eq!(again, session, "the same session, not a new one");
+    assert_eq!(
+        ask(&mut second, "pid").await,
+        pid,
+        "a second attach must reach the same process, not start another"
+    );
+
+    send_line(&mut second.0, "stop").await;
+}
+
+#[tokio::test]
+async fn an_agent_that_never_listens_is_reported_with_its_log() {
+    // The diagnosis the exit trailer exists for, arriving earlier: on the
+    // supervised path there is no relay to append it to, so it has to be
+    // the ack itself.
+    let (port, _share) = supervisor().await;
+    let ((_conn, mut reader), reply) = connect_and_send(
+        port,
+        &Request::Attach {
+            session: None,
+            args: vec!["--fail-to-start".into(), "no work dir over here".into()],
+        },
+    )
+    .await;
+
+    assert!(!reply.ok, "a failed start must not be acknowledged");
+    let error = reply.error.expect("a reason");
+    assert!(
+        error.contains("exited before it started listening"),
+        "{error}"
+    );
+    assert!(error.contains("no work dir over here"), "{error}");
+    assert_eof(&mut reader).await;
+}
+
+#[tokio::test]
+async fn an_agent_that_falls_over_ends_the_relay_with_a_trailer() {
+    let (port, _share) = supervisor().await;
+    let (mut conn, session) = attach(port, None).await;
+
+    send_line(&mut conn.0, "crash").await;
+    let reason = read_trailer(&mut conn.1).await;
+
+    assert!(reason.contains(&session), "{reason}");
+    assert!(reason.contains("closed the connection"), "{reason}");
+    // The log of an agent this connection started is quotable, so the
+    // client gets the same diagnosis a local one leaves in its stderr tail.
+    assert!(reason.contains("falling over on request"), "{reason}");
+    assert_eof(&mut conn.1).await;
+}
+
+#[tokio::test]
+async fn a_stale_registry_entry_does_not_fail_the_attach() {
+    // The killed-agent case: something is listed for this session, and it
+    // is not there any more. The request can still be served by starting a
+    // live one, so it is.
+    let (port, _share) = supervisor().await;
+    let session = "a-session-that-outlives-its-agent";
+    // A cold resume names the session twice and means two different things
+    // by it: the registry key here, and the agent's own `--session` over
+    // there. The daemon does not invent the second from the first.
+    let args = vec!["--session".to_string(), session.to_string()];
+
+    let (mut first, named) = attach_with(port, Some(session), args.clone()).await;
+    assert_eq!(named, session, "the agent kept the id it was given");
+    let pid = ask(&mut first, "pid").await;
+    send_line(&mut first.0, "stop").await;
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let (mut second, again) = attach_with(port, Some(session), args).await;
+    assert_eq!(again, session);
+    assert_ne!(
+        ask(&mut second, "pid").await,
+        pid,
+        "the dead agent's entry must not be attached to"
+    );
+
+    send_line(&mut second.0, "stop").await;
+}
+
+#[tokio::test]
+async fn list_sessions_says_which_ones_are_live() {
+    let (port, _share) = supervisor().await;
+    let (mut conn, session) = attach(port, None).await;
+
+    let ((_writer, mut reader), reply) = connect_and_send(port, &Request::ListSessions).await;
+    assert!(reply.ok, "listing failed: {reply:?}");
+    let sessions = reply.sessions.expect("a listing");
+    let listed = sessions
+        .iter()
+        .find(|entry| entry.id == session)
+        .unwrap_or_else(|| panic!("the live session is missing from {sessions:?}"));
+    assert!(listed.live, "a session with an agent on it must say so");
+    assert_eof(&mut reader).await;
+
+    send_line(&mut conn.0, "stop").await;
+}
+
+#[tokio::test]
+async fn a_client_that_says_goodbye_gets_no_trailer() {
+    // How the daemon's two endings are told apart from the outside: a
+    // detach ends the stream and says nothing, because nothing died. Only
+    // an agent going away earns last words.
+    let (port, _share) = supervisor().await;
+    let (mut conn, session) = attach(port, None).await;
+    assert_eq!(ask(&mut conn, "say still here").await, "still here");
+
+    conn.0.shutdown().await.unwrap();
+    assert_eof(&mut conn.1).await;
+
+    // And the agent it left behind is still the one holding the session.
+    let (mut second, again) = attach(port, Some(&session)).await;
+    assert_eq!(again, session);
+    assert_eq!(ask(&mut second, "say back").await, "back");
+    send_line(&mut second.0, "stop").await;
 }

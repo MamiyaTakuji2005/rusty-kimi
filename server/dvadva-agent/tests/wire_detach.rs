@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpStream;
 
+use dvadva_agent::live::Registry;
 use dvadva_agent::wire::WIRE_PROTOCOL_VERSION;
 use dvadva_agent::wire::listener::{ListenOptions, TOKEN_FILE_NAME, bind};
 use dvadva_agent::wire::server::WireServer;
@@ -30,6 +31,7 @@ struct Listening {
     addr: SocketAddr,
     token: String,
     agent: Fixture,
+    registry: Registry,
     _tmp: TempDir,
 }
 
@@ -37,12 +39,16 @@ impl Listening {
     /// Put a scripted agent on a loopback port, exactly as `--listen` does.
     async fn start(agent: Fixture) -> Self {
         let tmp = TempDir::new().expect("temp dir");
+        let registry = Registry::at(tmp.path().join("live"));
         let listening = bind(ListenOptions {
             addr: "127.0.0.1:0".parse().expect("addr"),
             token_file: tmp.path().join(TOKEN_FILE_NAME),
             // The test harness owns this process's stdin; only the real
             // binary hands it to a client.
             inherit_stdio: false,
+            // And a test agent must not advertise itself to the frontends
+            // running on the machine the test runs on.
+            registry_dir: Some(registry.dir().to_path_buf()),
         })
         .await
         .expect("bind");
@@ -58,6 +64,7 @@ impl Listening {
             addr,
             token,
             agent,
+            registry,
             _tmp: tmp,
         }
     }
@@ -80,6 +87,21 @@ impl Listening {
         let socket = TcpStream::connect(self.addr).await.expect("connect");
         TestClient::over(socket)
     }
+}
+
+/// Wait for the listening agent to appear in the registry it was given.
+/// Registration happens on the serving task, a moment after `bind` returns.
+async fn wait_for_listing(registry: &Registry) -> dvadva_agent::live::LiveSession {
+    for _ in 0..100 {
+        if let Some(entry) = registry.list().await.into_iter().next() {
+            return entry;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "the agent never listed itself in {}",
+        registry.dir().display()
+    );
 }
 
 /// Run a whole turn and wait for its result.
@@ -265,4 +287,35 @@ async fn two_sockets_share_one_agent_and_one_leaving_does_not_silence_the_other(
 
     let finished = prompt(&mut watcher, "hi").await;
     assert_eq!(finished.pointer("/result/status"), Some(&json!("finished")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listening_agent_lists_itself_and_can_be_reached_from_the_listing_alone() {
+    // The supervisor's path: something that did not spawn this agent, and
+    // never saw its announce line, finds it and attaches with nothing but
+    // what the registry says.
+    let listening = Listening::start(talking_agent()).await;
+
+    let entry = wait_for_listing(&listening.registry).await;
+    assert_eq!(entry.addr, listening.addr.to_string());
+    assert_eq!(entry.pid, std::process::id());
+    assert_eq!(entry.protocol_version, WIRE_PROTOCOL_VERSION);
+
+    let token = tokio::fs::read_to_string(&entry.token_file)
+        .await
+        .expect("the registry names a token file that exists");
+    let socket = TcpStream::connect(entry.addr.parse::<SocketAddr>().expect("addr"))
+        .await
+        .expect("connect to the listed address");
+    let mut client = TestClient::over(socket);
+    client
+        .send_raw(&format!(
+            "{{\"auth\":\"{}\",\"client\":\"a supervisor\"}}",
+            token.trim()
+        ))
+        .await;
+    let hello = client.next_frame(ARRIVES).await.expect("a handshake reply");
+
+    assert_eq!(hello.get("auth"), Some(&json!("ok")), "denied: {hello}");
+    assert_eq!(hello.get("session"), Some(&json!(entry.session)));
 }

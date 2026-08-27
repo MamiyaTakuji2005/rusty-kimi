@@ -108,10 +108,12 @@ async fn handle(socket: TcpStream, upstream: &str) -> io::Result<()> {
             write_frame(&mut client, reply_line).await?;
             client.get_mut().shutdown().await
         }
-        Request::Spawn { .. } => {
-            // The upstream acknowledges the spawn; hand that frame to the
-            // client (verbatim — errors pass through too), then relay
-            // opaquely until either side closes.
+        Request::Spawn { .. } | Request::Attach { .. } => {
+            // The upstream acknowledges the spawn or the attach; hand that
+            // frame to the client (verbatim — errors pass through too), then
+            // relay opaquely until either side closes. Which of the two it
+            // was is the remote daemon's business: this half only carries
+            // bytes, and detach-versus-kill is decided at the far end.
             let ack_line = proto::read_line(&mut upstream_sock).await?;
             write_frame(&mut client, ack_line).await?;
             relay(client, upstream_sock).await

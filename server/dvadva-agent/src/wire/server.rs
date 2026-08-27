@@ -139,6 +139,19 @@ impl WireServer {
         self.core.soul.runtime().session.id.clone()
     }
 
+    /// Which directory this session works in, for a listing that wants to
+    /// say *which project* is running without opening the session.
+    pub fn session_work_dir(&self) -> String {
+        self.core
+            .soul
+            .runtime()
+            .session
+            .work_dir
+            .as_path()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// Serve one attached client until its stream ends.
     ///
     /// Stdio is one caller; a listener would be another, and the tests are a

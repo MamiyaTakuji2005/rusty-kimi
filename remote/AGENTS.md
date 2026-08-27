@@ -17,10 +17,30 @@ Corollaries:
 - No auth, no TLS, no wire knowledge in the relay path. Bind to loopback,
   cross the network through `ssh -L`. The binary prints this warning on
   startup on purpose.
-- Close propagation is the only semantics: client half-close → agent stdin
-  EOF → agent exits; agent exit → one exit trailer, then socket write
-  shutdown → client sees EOF. One agent per connection; the connection's
-  lifetime *is* the agent's.
+- Close propagation is the only semantics, and what it propagates *to*
+  depends on which op opened the connection.
+  - `spawn` — the one-shot path: client half-close → agent stdin EOF →
+    agent exits; agent exit → one exit trailer, then socket write shutdown →
+    client sees EOF. One agent per connection; the connection's lifetime
+    *is* the agent's.
+  - `attach` — the supervised path: client half-close → the daemon closes
+    *its* socket to the agent, which the agent reads as one client
+    detaching. The agent keeps its turn, its context and its pid, and the
+    next `attach` for that session lands on the same process.
+
+  The two endings are told apart by **which direction ended first**, not by
+  whether the copy ended cleanly: a killed frontend with bytes still in its
+  receive buffer resets the connection, and a reset is an error on a read
+  that is nonetheless a client leaving. Both endings half-close the client
+  socket explicitly — a detach has to read as the end of a stream at the
+  other end, not as a connection that broke — and only the agent-went-away
+  ending writes a trailer first.
+
+The daemon's one exception to "never parse the wire" grew a second member,
+and it is still not the wire: on the `attach` path the daemon speaks the
+agent's **token handshake** (`server/dvadva-agent/src/wire/listener.rs`),
+which is a transport check settled before the first wire byte. Everything
+after that line flows untouched, as before.
 
 The one exception to "the daemon writes no bytes of its own after the
 header" is that **exit trailer**: a final `BRIDGE1 {"ok":false,"error":…}`
@@ -41,11 +61,27 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
 - `src/remote_daemon.rs` — runs on the agent machine. `spawn` op: spawn
   `dvadva-agent` with the caller's args (header `args` — verbatim agent CLI
   args), ack, relay, wait-with-grace-then-kill, exit trailer.
+  `attach` op: find the agent hosting a session in the live-session registry
+  (`dvadva_agent::live`) and dial it, or start one that is nobody's child in
+  particular — `--listen`, its own process group, `kill_on_drop(false)`, and
+  stderr to a log file beside the registry rather than to a pipe this daemon
+  holds. It is found again by *pid*, because a brand-new session has no id
+  until the agent mints one; the ack reports the id, which is the only way a
+  caller who asked for a new session learns it. Three things it deliberately
+  does not do: synthesize `--session` from the header's session id (that is
+  the caller's argv to write), keep a stale registry entry from being served
+  (it starts a fresh agent instead), or claim a diagnosis it does not have
+  (only an agent *this connection* started has a log this daemon can quote).
   `list_sessions` op: the remote twin of
   `wire_client::session_list::list_all_sessions` (same `load_metadata` +
   `Session::list` reads, wrapped in a task so a listing panic can't kill the
-  daemon). Agent stderr is forwarded to the daemon's stderr tagged `conn N`
-  *and* kept as a 20-line tail for the trailer.
+  daemon), plus a `live` flag from the registry — and the live sessions the
+  cold listing has no file for yet, because a live session nobody can see is
+  a live session nobody can attach to. Agent stderr is forwarded to the
+  daemon's stderr tagged `conn N` *and* kept as a 20-line tail for the
+  trailer (on the `spawn` path; supervised agents log to a file instead,
+  since a pipe dies with the daemon and the agent writes to stderr from
+  places that panic if that write fails).
   `Config::default_work_dir` prepends `-w` when the caller named none — the
   daemon owns that decision because a frontend on another OS cannot know a
   path that exists here. Prepended, not appended, so a caller's own `-w`
@@ -65,13 +101,25 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
   ones ignored. Not a section in `config.toml` — the agent rewrites that
   file from its own struct and would drop what it does not know.
 - `tests/bin/mock_agent.rs` — scripted stand-in for `dvadva-agent` (echo /
-  `say X` / `argv` / `die` / `fail X`, `MOCK-AGENT-EOF` on stdin EOF); it is
-  a `[[bin]]` so `CARGO_BIN_EXE_dvadva-bridge-mock-agent` works from
-  `tests/e2e.rs`.
+  `say X` / `argv` / `pid` / `die` / `crash` / `stop` / `fail X`,
+  `MOCK-AGENT-EOF` on stdin EOF); it is a `[[bin]]` so
+  `CARGO_BIN_EXE_dvadva-bridge-mock-agent` works from `tests/e2e.rs`. Given
+  `--listen` it does the listening half too — binds a port, mints a token,
+  registers itself, and serves attachers — because the supervisor cannot be
+  tested against something that only speaks stdio. It exits by itself after
+  two minutes: a test agent nobody stopped holds its own binary open, which
+  on Windows fails the next build rather than the next test.
 - `tests/e2e.rs` — loopback e2e over real TCP sockets; covers relay
   opacity, arg passing, the work-dir default and its override, close
   propagation in both directions, the exit trailer (status + stderr tail),
-  spawn failure frames, garbage headers, and both local-daemon ops.
+  spawn failure frames, garbage headers, and both local-daemon ops. The
+  supervisor half covers the whole of it: attach starts an agent and names
+  the session, a client leaving finds the *same pid* on its way back in, a
+  start that never listens is reported with its log, a crash ends the relay
+  with a trailer, a stale entry starts a fresh agent instead of failing, and
+  a listing marks the live one. Each supervising test gets a `share_dir` of
+  its own (`Config::with_share_dir`), so a test run never advertises itself
+  in the developer's `~/.kimi/live`.
 
 ## Conventions
 
@@ -88,7 +136,12 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
   call on a timer and must answer even when the agent binary is missing.
 - `SessionEntry` (proto) and `ResumeEntry` (wire-client) are the same wire
   shape; `list_sessions` is read-only against the daemon's `~/.kimi` and
-  must never write there.
+  must never write there. (Reading the registry does prune entries that no
+  longer answer — that is the registry's own contract, not the listing's.)
+- The frame protocol's minor is the additive one: `attach`, `Reply::session`
+  and `SessionEntry::live` are 1.1, and a 1.0 daemon refuses an `attach`
+  frame as an unknown op. Bump `BRIDGE_PROTOCOL_VERSION` in **both** copies
+  (`proto.rs` and `wire-client/src/bridge.rs`) — a test pins them together.
 
 ## Testing
 

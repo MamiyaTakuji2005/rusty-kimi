@@ -92,6 +92,17 @@
   100 MB, which was one allocation when the only client was stdio. Line
   length never depended on it (`read_until` grows its own output), so it is
   now 64 KB.
+- **Two channels say where the agent is, for two askers.** The announce line
+  answers the process that spawned it and holds its pipes. The live-session
+  registry (`crate::live`, `~/.kimi/live/<session>.json`) answers everyone
+  who did not: a second frontend, a supervisor that has since restarted, a
+  person with a terminal. A listing is enough to attach with — it names the
+  address *and* the token file — which is what `dvadva-bridge`'s `attach`
+  op does.
+- **A connection that closes without saying anything is a probe, not an
+  intrusion.** The registry decides liveness by connecting, so that shape of
+  failure logs at debug (`SilentClose`); everything else still warns. A
+  listing must not fill an agent's log.
 
 ## Merge Behavior
 

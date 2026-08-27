@@ -137,6 +137,10 @@ async fn main() {
             eprintln!("dvadva-bridge: no auth/TLS — keep this on loopback behind an ssh tunnel");
             let config = remote_daemon::Config::new(agent_bin)
                 .with_default_work_dir(default_work_dir.clone());
+            eprintln!(
+                "dvadva-bridge: supervising agents; live sessions and their logs in {}",
+                config.live_dir().display()
+            );
             run(&listen, |listener| {
                 remote_daemon::serve(listener, config.clone())
             })

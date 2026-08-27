@@ -79,7 +79,7 @@ client/                  frontends + shared frontend kit
 remote/                  relay daemons for remote access
   dvadva-bridge/           byte-relay daemon pair (bin: dvadva-bridge; design in remote/PLAN.md)
 _history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
-PLAN-detached-agent.md   design record: headless agent + attach/detach (phases 0-1 done, 2 begun)
+PLAN-detached-agent.md   design record: headless agent + attach/detach (phases 0-2 done, 3 open)
 ```
 
 Per-module notes live in sub-tree `AGENTS.md` files — read them before touching
@@ -125,8 +125,16 @@ the loop**.
   takes a token from the session's `attach.token`, checked before any wire
   byte is read. The bound address is announced on stderr as
   `dvadva-agent: listening {json}`, which is how a supervisor learns an
-  ephemeral port. The rest of Phase 2 (bridge supervisor, live-session
-  registry) is in `PLAN-detached-agent.md`.
+  ephemeral port.
+- **Finding a detached agent again**: a listening agent writes itself into
+  `~/.kimi/live/<session>.json` (`live.rs`) — address, token file, pid, work
+  dir — and withdraws on a clean stop. Whoever reads the registry reaps the
+  entries that no longer answer, so liveness is decided by the endpoint
+  rather than by the pid. `dvadva-bridge remote` is the supervisor over it:
+  its `attach` op finds the agent for a session or starts one that outlives
+  the connection, and its `list_sessions` marks the live ones.
+  `PLAN-detached-agent.md` has the design record; Phase 3 (reconnect in the
+  frontends, headless approvals, idle shutdown) is still open.
 - **Wire surface**: the frontend sends `initialize` / `prompt` / `cancel` /
   `replay` / `steer` plus approval replies; the agent answers with typed
   events (`TurnBegin`, `StepBegin`, `ContentPart`, `ToolResult`,

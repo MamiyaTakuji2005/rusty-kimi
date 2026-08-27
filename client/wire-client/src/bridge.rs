@@ -32,7 +32,12 @@ pub const MAGIC_FAMILY: &str = "BRIDGE";
 /// `dvadva_bridge::proto::BRIDGE_PROTOCOL_VERSION`. The major must equal the
 /// digit in [`MAGIC`]; the minor rises with additive ops, and a daemon's own
 /// minor arrives in its `version` reply.
-pub const BRIDGE_PROTOCOL_VERSION: &str = "1.0";
+///
+/// 1.1 added the `attach` op ([`attach_header`]) and the `live` flag on a
+/// listed session. A 1.0 daemon refuses an `attach` frame as an unknown op,
+/// so a caller that means to use one should look at the minor a `version`
+/// probe reports first.
+pub const BRIDGE_PROTOCOL_VERSION: &str = "1.1";
 
 /// Upper bound on a frame line, matching `dvadva_bridge::proto::MAX_LINE_BYTES`.
 /// A frontend pointed at the wrong port (an HTTP server, a log stream) must
@@ -58,6 +63,19 @@ fn frame(json: &str) -> String {
 /// (verbatim agent CLI arguments: `-w`, `--session`, …) and relay.
 pub fn spawn_header(agent_args: &[String]) -> String {
     frame(&serde_json::json!({ "op": "spawn", "args": agent_args }).to_string())
+}
+
+/// The header asking a bridge daemon to attach to the agent hosting
+/// `session`, starting one with `agent_args` if none is live.
+///
+/// The difference from [`spawn_header`] is lifetime, not transport: closing
+/// this connection detaches, and the agent keeps its turn and its pid. Pass
+/// `None` for a session that does not exist yet — the ack names the one the
+/// agent minted.
+pub fn attach_header(session: Option<&str>, agent_args: &[String]) -> String {
+    frame(
+        &serde_json::json!({ "op": "attach", "session": session, "args": agent_args }).to_string(),
+    )
 }
 
 /// The header asking a bridge daemon for the sessions on its machine.
@@ -129,6 +147,11 @@ pub struct BridgeReply {
     /// a daemon built before the field existed, which means frame 1.0.
     #[serde(default)]
     pub proto: Option<String>,
+    /// Which session the relay that follows is attached to, on an `attach`
+    /// ack — the only way a caller who asked for a new one learns its id
+    /// before the wire starts.
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 /// Parse a reply frame line (as produced by the daemon) into a
@@ -247,6 +270,47 @@ mod tests {
             r#"BRIDGE1 {"op":"spawn","args":["-w","/srv"]}"#
         );
         assert_eq!(list_sessions_header(), r#"BRIDGE1 {"op":"list_sessions"}"#);
+        assert_eq!(
+            attach_header(Some("abc"), &["-w".into(), "/srv".into()]),
+            r#"BRIDGE1 {"op":"attach","session":"abc","args":["-w","/srv"]}"#
+        );
+        assert_eq!(
+            attach_header(None, &[]),
+            r#"BRIDGE1 {"op":"attach","session":null,"args":[]}"#
+        );
+    }
+
+    /// The daemon must read both spellings of "no session": the field
+    /// missing, and the field present and null. `Option` covers the first
+    /// only by serde's default; this pins the second, which is what
+    /// [`attach_header`] actually emits.
+    #[test]
+    fn an_attach_without_a_session_reaches_the_daemon_as_a_new_one() {
+        let expected = dvadva_bridge::proto::Request::Attach {
+            session: None,
+            args: Vec::new(),
+        };
+        let emitted = attach_header(None, &[]);
+        assert_eq!(
+            dvadva_bridge::proto::decode::<dvadva_bridge::proto::Request>(&emitted).unwrap(),
+            expected
+        );
+        assert_eq!(
+            dvadva_bridge::proto::decode::<dvadva_bridge::proto::Request>(
+                r#"BRIDGE1 {"op":"attach"}"#
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn an_attach_ack_names_its_session() {
+        let ack =
+            dvadva_bridge::proto::encode(&dvadva_bridge::proto::Reply::attach_ok("session-id"));
+        let reply = decode_reply(&ack).expect("attach ack must parse");
+        assert!(reply.ok);
+        assert_eq!(reply.session.as_deref(), Some("session-id"));
     }
 
     #[test]
@@ -299,6 +363,7 @@ mod tests {
                     title: "t".into(),
                     work_dir: "/w".into(),
                     updated_at: 1.5,
+                    live: true,
                 },
             ]));
         let reply = decode_reply(&daemon_listing).expect("listing reply must parse");

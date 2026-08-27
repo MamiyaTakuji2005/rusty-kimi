@@ -47,7 +47,12 @@ pub const MAGIC_FAMILY: &str = "BRIDGE";
 
 /// This build's frame protocol version, `major.minor`. The major must equal
 /// the digit in [`MAGIC`]; the minor rises with additive ops.
-pub const BRIDGE_PROTOCOL_VERSION: &str = "1.0";
+///
+/// 1.1 added [`Request::Attach`] and the two fields that answer it —
+/// [`Reply::session`] and [`SessionEntry::live`]. A 1.0 daemon refuses an
+/// `attach` frame as an unknown op, which is why the minor is worth
+/// reporting: a client can ask before it asks for something new.
+pub const BRIDGE_PROTOCOL_VERSION: &str = "1.1";
 
 /// Upper bound on a frame line. Real frames are a few hundred bytes; the
 /// cap keeps a hostile or confused client from buffering unbounded memory.
@@ -59,7 +64,29 @@ pub const MAX_LINE_BYTES: usize = 64 * 1024;
 pub enum Request {
     /// Spawn an agent with these CLI arguments (verbatim, e.g. `-w`,
     /// `--session`), then relay bytes both ways until either side closes.
+    ///
+    /// The one-shot path: this connection's lifetime *is* the agent's, and
+    /// the daemon kills it on the way out. [`Request::Attach`] is the other
+    /// one, where the agent outlives whoever is looking at it.
     Spawn { args: Vec<String> },
+    /// Attach to the agent hosting `session`, starting one with these CLI
+    /// arguments if none is live, then relay bytes both ways.
+    ///
+    /// The supervised path. The connection closing is a *detach*: the agent
+    /// keeps its turn, its context and its pid, and the next `attach` for
+    /// the same session reaches the same process.
+    ///
+    /// `session` is the registry key and nothing else — the daemon does not
+    /// synthesize agent arguments from it. A caller resuming a cold session
+    /// passes both: the id here, and its own `--session <id> -w <dir>` in
+    /// `args`. A caller starting a fresh session passes no id, gets whatever
+    /// the agent mints, and is told which in the ack.
+    Attach {
+        #[serde(default)]
+        session: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+    },
     /// List the sessions visible on the machine the daemon runs on.
     ListSessions,
     /// Liveness probe: answer with the daemon's version and close. Spawns
@@ -79,6 +106,17 @@ pub struct SessionEntry {
     pub title: String,
     pub work_dir: String,
     pub updated_at: f64,
+    /// Whether an agent is hosting this session right now — an `attach`
+    /// would join it rather than start one. Absent on the wire when false,
+    /// so a listing from a 1.0 daemon reads as "all cold", which is what a
+    /// daemon that cannot supervise anything means.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub live: bool,
+}
+
+/// `skip_serializing_if` for a `bool` that defaults to false.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Every daemon reply: exactly one line, then the connection either closes
@@ -99,6 +137,11 @@ pub struct Reply {
     /// answer: frame protocol 1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proto: Option<String>,
+    /// Which session the relay that follows is attached to, on an `attach`
+    /// ack. The only way a caller who asked for a *new* session learns its
+    /// id before the wire starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 impl Reply {
@@ -110,6 +153,7 @@ impl Reply {
             sessions: None,
             version: None,
             proto: None,
+            session: None,
         }
     }
 
@@ -121,6 +165,7 @@ impl Reply {
             sessions: Some(entries),
             version: None,
             proto: None,
+            session: None,
         }
     }
 
@@ -133,6 +178,21 @@ impl Reply {
             sessions: None,
             version: Some(version.into()),
             proto: Some(BRIDGE_PROTOCOL_VERSION.to_string()),
+            session: None,
+        }
+    }
+
+    /// The `attach` acknowledgement: an agent is on the other end of this
+    /// relay, and this is which session it hosts. Named even when the caller
+    /// asked for a session by id, so an ack always reads the same way.
+    pub fn attach_ok(session: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            sessions: None,
+            version: None,
+            proto: None,
+            session: Some(session.into()),
         }
     }
 
@@ -144,6 +204,7 @@ impl Reply {
             sessions: None,
             version: None,
             proto: None,
+            session: None,
         }
     }
 }
@@ -177,13 +238,18 @@ fn magic_mismatch(line: &str) -> String {
     }
 }
 
-/// Read one `\n`-terminated frame line, bounded by [`MAX_LINE_BYTES`].
+/// Read one `\n`-terminated line, bounded by [`MAX_LINE_BYTES`].
 ///
 /// Hand-rolled over `fill_buf`/`consume` rather than `read_until` so that
-/// (a) the size cap actually applies, and (b) bytes a client pipelined
+/// (a) the size cap actually applies, and (b) bytes a peer pipelined
 /// *after* the newline stay buffered in the reader for whoever owns the
 /// stream next. Errors on close-before-delimiter: the caller treats that
 /// as "no usable frame".
+///
+/// Used for bridge frames in both directions, and by the supervisor for the
+/// one line an agent answers its attach handshake with — same shape, same
+/// cap, same need to leave the wire bytes behind it alone. Its messages are
+/// therefore about *lines*, and the caller says what it was reading.
 pub async fn read_line<R>(reader: &mut R) -> io::Result<String>
 where
     R: tokio::io::AsyncBufRead + Unpin,
@@ -194,7 +260,7 @@ where
         if available.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "connection closed before a bridge frame",
+                "connection closed before a complete line",
             ));
         }
         match available.iter().position(|&b| b == b'\n') {
@@ -210,7 +276,7 @@ where
                 if buf.len() > MAX_LINE_BYTES {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "bridge frame exceeds size limit",
+                        "line exceeds size limit",
                     ));
                 }
             }
@@ -242,6 +308,59 @@ mod tests {
     }
 
     #[test]
+    fn an_attach_frame_carries_a_session_or_asks_for_a_new_one() {
+        let resume = Request::Attach {
+            session: Some("abc".into()),
+            args: vec!["--session".into(), "abc".into()],
+        };
+        let encoded = encode(&resume);
+        assert_eq!(decode::<Request>(&encoded).unwrap(), resume);
+
+        // A fresh session names no id: the agent mints one and the ack
+        // reports it.
+        let fresh = decode::<Request>(r#"BRIDGE1 {"op":"attach"}"#).unwrap();
+        assert_eq!(
+            fresh,
+            Request::Attach {
+                session: None,
+                args: Vec::new()
+            }
+        );
+
+        let ack = Reply::attach_ok("abc");
+        assert_eq!(encode(&ack), r#"BRIDGE1 {"ok":true,"session":"abc"}"#);
+        assert_eq!(decode::<Reply>(&encode(&ack)).unwrap(), ack);
+    }
+
+    #[test]
+    fn a_listing_says_which_sessions_are_live_and_stays_quiet_about_the_rest() {
+        // The `live` flag is additive both ways: a 1.0 daemon's listing has
+        // no such field and reads as cold, and a cold session in a 1.1
+        // listing puts nothing on the wire either.
+        let cold = SessionEntry {
+            id: "a".into(),
+            title: "t".into(),
+            work_dir: "/w".into(),
+            updated_at: 1.5,
+            live: false,
+        };
+        let encoded = encode(&Reply::sessions(vec![cold]));
+        assert!(!encoded.contains("live"), "{encoded}");
+
+        let live = decode::<Reply>(
+            r#"BRIDGE1 {"ok":true,"sessions":[{"id":"a","title":"t","work_dir":"/w","updated_at":1.5,"live":true}]}"#,
+        )
+        .unwrap();
+        assert!(live.sessions.unwrap()[0].live);
+
+        let old = decode::<Reply>(
+            r#"BRIDGE1 {"ok":true,"sessions":[{"id":"a","title":"t","work_dir":"/w","updated_at":1.5}]}"#,
+        )
+        .unwrap();
+        assert!(!old.sessions.unwrap()[0].live);
+    }
+
+    #[test]
     fn replies_round_trip() {
         let ok = encode(&Reply::spawn_ok());
         assert_eq!(decode::<Reply>(&ok).unwrap(), Reply::spawn_ok());
@@ -251,6 +370,7 @@ mod tests {
             title: "t (abc)".into(),
             work_dir: "/w".into(),
             updated_at: 1.5,
+            live: true,
         }]);
         let encoded = encode(&sessions);
         assert_eq!(decode::<Reply>(&encoded).unwrap(), sessions);
@@ -261,7 +381,7 @@ mod tests {
         let version = Reply::version("1.8.0");
         assert_eq!(
             encode(&version),
-            r#"BRIDGE1 {"ok":true,"version":"1.8.0","proto":"1.0"}"#
+            r#"BRIDGE1 {"ok":true,"version":"1.8.0","proto":"1.1"}"#
         );
         assert_eq!(decode::<Reply>(&encode(&version)).unwrap(), version);
     }

@@ -238,6 +238,7 @@ impl KimiCLI {
                 addr,
                 token_file,
                 inherit_stdio: true,
+                registry_dir: None,
             },
         )
         .await

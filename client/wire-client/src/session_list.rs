@@ -12,6 +12,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Local};
+use dvadva_agent::live::Registry;
 use dvadva_agent::metadata::load_metadata;
 use dvadva_agent::session::Session as AgentSession;
 use kaos::KaosPath;
@@ -30,6 +31,12 @@ pub struct ResumeEntry {
     pub work_dir: PathBuf,
     /// Last modification time of `context.jsonl` (unix seconds).
     pub updated_at: f64,
+    /// Whether an agent is hosting this session right now
+    /// (`dvadva_agent::live`) — resuming it would join that process rather
+    /// than start one. Defaulted, so a listing from a bridge daemon too old
+    /// to know reads as "all cold", which is what such a daemon means.
+    #[serde(default)]
+    pub live: bool,
 }
 
 impl ResumeEntry {
@@ -153,11 +160,23 @@ fn list_all_sessions() -> Result<Vec<ResumeEntry>, String> {
         .build()
         .map_err(|err| format!("failed to create runtime: {err}"))?;
     rt.block_on(async {
+        // Which of them an agent is already holding. The same registry the
+        // bridge daemon reads on the remote side, for the same reason: a
+        // session with a live agent is resumed by attaching to it, not by
+        // starting a second process on the same files.
+        let live: std::collections::HashSet<String> = Registry::shared()
+            .list()
+            .await
+            .into_iter()
+            .map(|entry| entry.session)
+            .collect();
+
         let metadata = load_metadata().await;
         let mut entries: Vec<ResumeEntry> = Vec::new();
         for work_dir in &metadata.work_dirs {
             for session in AgentSession::list(KaosPath::new(&work_dir.path)).await {
                 entries.push(ResumeEntry {
+                    live: live.contains(&session.id),
                     id: session.id,
                     title: session.title,
                     work_dir: session.work_dir.as_path().to_path_buf(),

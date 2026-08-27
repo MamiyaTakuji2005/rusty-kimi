@@ -26,6 +26,12 @@
 //!   which is not itself a gate, since nothing stops a client from sending
 //!   `prompt` first.
 //!
+//! Two channels say where the agent went, because they answer for two
+//! different askers: the announce line on stderr, for the process that
+//! spawned it and is holding its pipes, and the live-session registry
+//! (`crate::live`), for everyone who did not — a second frontend, a
+//! supervisor that has since restarted, a person with a terminal.
+//!
 //! A client that inherited this process's stdio does not do the handshake:
 //! holding the pipes is a stronger claim than knowing the token, and making
 //! the one-shot path carry a secret would have made every existing caller a
@@ -46,6 +52,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::live::{self, LiveSession, Registration, Registry};
 use crate::wire::protocol::WIRE_PROTOCOL_VERSION;
 use crate::wire::server::WireServer;
 
@@ -75,6 +82,11 @@ pub struct ListenOptions {
     /// too. True for the agent binary, where stdin is either a parent's pipe
     /// or nothing; false in tests, where it belongs to the harness.
     pub inherit_stdio: bool,
+    /// Where to announce this agent to anybody who did not spawn it
+    /// (`crate::live`). `None` is the shared registry every process on the
+    /// machine reads; tests name their own so a test run does not advertise
+    /// itself to the user's frontends.
+    pub registry_dir: Option<PathBuf>,
 }
 
 /// A bound listener with its secret already resolved.
@@ -88,6 +100,7 @@ pub struct Listening {
     token: Arc<str>,
     token_file: PathBuf,
     inherit_stdio: bool,
+    registry: Registry,
 }
 
 /// Take the address and the token, or fail before anything is running.
@@ -102,13 +115,29 @@ pub async fn bind(options: ListenOptions) -> Result<Listening> {
         .await
         .with_context(|| format!("failed to listen on {}", options.addr))?;
 
+    let registry = match options.registry_dir {
+        Some(dir) => Registry::at(dir),
+        None => Registry::shared(),
+    };
+
     Ok(Listening {
         listener,
         token,
         token_file: options.token_file,
         inherit_stdio: options.inherit_stdio,
+        registry,
     })
 }
+
+/// A connection that opened and closed without saying anything.
+///
+/// Its own type because it is the shape of a *probe*, not of an intrusion:
+/// the live-session registry decides whether an agent is still there by
+/// connecting to it (`crate::live`), and every listing would otherwise leave
+/// a warning behind in this agent's log.
+#[derive(Debug, thiserror::Error)]
+#[error("the connection closed before its handshake")]
+struct SilentClose;
 
 /// What an attaching client sends first. `client` is for the log only: the
 /// token is the whole of the decision.
@@ -152,6 +181,9 @@ impl Listening {
             "listening on {addr} for session {session_id}; token in {}",
             self.token_file.display()
         );
+        // Held for exactly as long as this call runs: the entry appears when
+        // the agent starts answering and is withdrawn when it stops.
+        let _registration = self.publish(&server, addr, &session_id).await;
 
         let background = server.spawn_background();
         if self.inherit_stdio {
@@ -169,6 +201,39 @@ impl Listening {
         signals.abort();
         background.abort();
         result
+    }
+
+    /// Put this agent in the live-session registry, so that something which
+    /// did not spawn it — another frontend, a restarted supervisor, a person
+    /// — can still find it.
+    ///
+    /// Best effort on purpose. The agent is already bound and serving by
+    /// now, and whoever started it has the announce line; a registry that
+    /// cannot be written is a discoverability problem, not a reason to
+    /// refuse to run.
+    async fn publish(
+        &self,
+        server: &Arc<WireServer>,
+        addr: SocketAddr,
+        session_id: &str,
+    ) -> Option<Registration> {
+        let entry = LiveSession {
+            session: session_id.to_string(),
+            pid: std::process::id(),
+            addr: addr.to_string(),
+            token_file: self.token_file.clone(),
+            work_dir: server.session_work_dir(),
+            protocol_version: WIRE_PROTOCOL_VERSION.to_string(),
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            started_at: live::now_seconds(),
+        };
+        match self.registry.register(&entry).await {
+            Ok(registration) => Some(registration),
+            Err(err) => {
+                warn!("not listed in {}: {err:#}", self.registry.dir().display());
+                None
+            }
+        }
     }
 
     async fn accept_loop(
@@ -201,7 +266,14 @@ impl Listening {
             let session_id = session_id.to_string();
             tokio::spawn(async move {
                 if let Err(err) = attach(server, socket, &token, &session_id).await {
-                    warn!("{peer} did not attach: {err}");
+                    // A connection that closed without saying anything is
+                    // the registry's reachability probe (`crate::live`), and
+                    // a listing must not fill this log.
+                    if err.downcast_ref::<SilentClose>().is_some() {
+                        debug!("{peer} looked and left without attaching");
+                    } else {
+                        warn!("{peer} did not attach: {err}");
+                    }
                 }
             });
         }
@@ -333,7 +405,7 @@ where
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            bail!("the connection closed before its handshake");
+            return Err(SilentClose.into());
         }
         match available.iter().position(|byte| *byte == b'\n') {
             Some(end) => {
@@ -550,6 +622,7 @@ mod tests {
             addr: "0.0.0.0:0".parse().expect("addr"),
             token_file: dir.path().join(TOKEN_FILE_NAME),
             inherit_stdio: false,
+            registry_dir: Some(dir.path().join("live")),
         };
 
         // Deliberately not built with a soul: the refusal has to come before
