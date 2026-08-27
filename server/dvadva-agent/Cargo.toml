@@ -61,3 +61,8 @@ wiremock = "0.6"
 filetime = "0.2"
 axum = "0.8"
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
+
+# Embeds the .exe's own icon (build.rs). Host-gated: nothing else in the
+# tree needs it, and the Linux side of the build should not carry it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

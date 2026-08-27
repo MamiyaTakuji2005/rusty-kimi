@@ -25,6 +25,20 @@ mod theme;
 
 use wire_client::launch::AgentLaunch;
 
+/// The window icon: two squared, the arithmetic the project is named for.
+///
+/// Raw RGBA rather than a PNG — eframe wants pixels, and decoding one would
+/// mean pulling the `image` crate in for 16 KB of them. The .exe's *file*
+/// icon is a separate thing that no run-time call can set; `build.rs`
+/// embeds that as a Windows resource. Both come from the workspace's
+/// `assets/make_icon.py`, and all three binaries share the one mark.
+const ICON: &[u8] = include_bytes!("../../../assets/icon-64.rgba");
+const ICON_SIDE: u32 = 64;
+const _: () = assert!(
+    ICON.len() == (ICON_SIDE * ICON_SIDE * 4) as usize,
+    "icon-64.rgba is not 64x64 RGBA — regenerate it, or fix ICON_SIDE"
+);
+
 fn main() -> eframe::Result<()> {
     let launch = match AgentLaunch::from_env() {
         Ok(launch) => launch,
@@ -37,7 +51,12 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([980.0, 760.0])
-            .with_min_inner_size([480.0, 360.0]),
+            .with_min_inner_size([480.0, 360.0])
+            .with_icon(eframe::egui::IconData {
+                rgba: ICON.to_vec(),
+                width: ICON_SIDE,
+                height: ICON_SIDE,
+            }),
         ..Default::default()
     };
     eframe::run_native(

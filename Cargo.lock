@@ -1566,13 +1566,14 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "toml",
+ "toml 0.9.11+spec-1.1.0",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
  "url",
  "uuid",
  "webbrowser",
+ "winresource",
  "wiremock",
  "zip",
 ]
@@ -1588,7 +1589,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "toml",
+ "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]
@@ -1602,6 +1603,7 @@ dependencies = [
  "serde_json",
  "similar",
  "unicode-width",
+ "winresource",
  "wire-client",
 ]
 
@@ -2902,6 +2904,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "winresource",
  "wire-client",
 ]
 
@@ -6250,6 +6253,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.0.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "399b1124a3c9e16766831c6bba21e50192572cdd98706ea114f9502509686ffc"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 0.7.14",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "0.7.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7736,6 +7754,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "toml 1.0.6+spec-1.1.0",
+ "version_check",
+]
+
+[[package]]
 name = "wire-client"
 version = "1.8.0"
 dependencies = [
@@ -7747,7 +7775,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "toml",
+ "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]

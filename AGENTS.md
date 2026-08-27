@@ -265,6 +265,27 @@ the painted chain button), `theme.rs` (light/dark/Kimi palettes, moon spinner,
 `BarStyle`), `palette.rs` (command palette), `os.rs` (open-in-default-app);
 transcript/session-list moved to `wire-client`.
 
+**The mark** lives in the workspace's `assets/`, not in any one crate:
+`make_icon.py` draws **2 squared** -- the arithmetic the project is named for
+-- as a cyan tile at seven sizes into `dvadva.ico`, and all three Windows
+binaries embed that one file through a near-identical `build.rs`
+(`winresource`, host-gated in each `Cargo.toml` so the Linux build never
+carries it). That resource *is* the .exe's own icon in Explorer, which no
+run-time call can set; inkvizitor additionally hands eframe `icon-64.rgba`
+for the **window** icon, raw RGBA so nothing has to pull the `image` crate in
+to decode 16 KB, with a compile-time assert in `main.rs` catching a
+regenerated file of another size. A failed `res.compile()` warns and carries
+on: the icon is cosmetic, and a machine without the SDK's `rc.exe` should
+still get a working binary.
+
+Three traps are commented where they bite. Pillow silently **drops any .ico
+size larger than the image `save` was called on**, so the call must be made
+on the largest tile or the file quietly comes out 16px and nothing else; the
+small sizes are drawn at 8x and filtered down, since a 16px tile straight out
+of a hinted font loses the exponent; and the script writes beside itself
+rather than into the working directory, so running it from the repo root does
+not scatter three files across it.
+
 **Split panes are duplicate views, not workspaces.** The window divides into
 `app.rs`'s `panes: Vec<Pane>` along one `Split` axis for the whole window —
 columns or rows, no tree. Every pane draws the *whole* scene: its own tab
