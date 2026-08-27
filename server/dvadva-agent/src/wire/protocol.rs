@@ -27,7 +27,15 @@ use thiserror::Error;
 /// was removed or given a new meaning, so a 1.2 client sees exactly the
 /// session it saw before — it simply cannot ask whether the agent accepts a
 /// second one.
-pub const WIRE_PROTOCOL_VERSION: &str = "1.3";
+///
+/// 1.4 is what a client that may *leave and come back* needs: `session` in
+/// the `initialize` result (which session am I attached to — the question a
+/// reconnect has to answer, and one only the agent could), `turn_running` in
+/// the `replay` result (a client that attaches mid-turn must not offer a
+/// prompt the agent will refuse), and the `shutdown` method (asking a
+/// detached agent to stop, rather than only killing it). All three are
+/// additive: a 1.3 client sends none of them and reads past the two fields.
+pub const WIRE_PROTOCOL_VERSION: &str = "1.4";
 
 /// The version assumed for a `wire.jsonl` written before the metadata header
 /// existed. A file-format concern only — never a negotiation input.
@@ -43,7 +51,7 @@ pub struct ProtocolVersion {
 impl ProtocolVersion {
     /// What this build speaks. Kept in step with [`WIRE_PROTOCOL_VERSION`] by
     /// `current_matches_the_wire_constant`.
-    pub const CURRENT: Self = Self { major: 1, minor: 3 };
+    pub const CURRENT: Self = Self { major: 1, minor: 4 };
 
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }

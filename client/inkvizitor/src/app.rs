@@ -40,8 +40,11 @@ use crate::palette::{Command, Palette};
 use crate::remote_link::{LinkLight, RemoteLink};
 use crate::session::{PaneSlot, Session};
 use crate::theme::Theme;
+use wire_client::launch::session_arg;
 use wire_client::remotes;
-use wire_client::session_list::{ResumeEntry, spawn_remote_session_listing, spawn_session_listing};
+use wire_client::session_list::{
+    ResumeEntry, find_live_session, spawn_remote_session_listing, spawn_session_listing,
+};
 
 /// Which machine a session runs on. Sessions are per-tab, so both kinds live
 /// in one window and every path in `args` means whatever it means *there*.
@@ -326,10 +329,34 @@ impl InkvizitorApp {
         title: Option<String>,
         target: &SessionTarget,
     ) -> Result<(), String> {
+        self.open_session_for(args, ctx, title, target, None)
+    }
+
+    /// As [`Self::open_session`], naming the session to rejoin.
+    ///
+    /// `session` is the *attach key*, and separate from any `--session` in
+    /// `args` on purpose: one says which live agent to look for, the other is
+    /// what a cold start should be told to resume. A resumed row passes both,
+    /// which is the same thing the daemon's own contract asks for.
+    fn open_session_for(
+        &mut self,
+        args: Vec<String>,
+        ctx: &egui::Context,
+        title: Option<String>,
+        target: &SessionTarget,
+        session: Option<&str>,
+    ) -> Result<(), String> {
         // Only an explicit `-w` counts as a chosen directory; a session
         // launched without one runs in the GUI's incidental cwd, which must
         // not shadow the newest-on-disk default in the folder picker.
         let work_dir = args_workdir(&args).map(PathBuf::from);
+        // A `--session` in the args is also an attach key, even when the
+        // caller did not think of it as one — the command line this window
+        // was started with, for instance. Without this, `--remote vps
+        // --session abc` would start a *second* agent on a session that
+        // already has one.
+        let from_args = session_arg(&args);
+        let session = session.or(from_args.as_deref());
         let id = self.next_session_id;
         self.next_session_id += 1;
         let title = title.unwrap_or_else(|| session_title(&args, id, target));
@@ -337,9 +364,14 @@ impl InkvizitorApp {
             // Paths in `args` (e.g. `-w`) resolve on the remote machine, and
             // a remote session naming none gets the daemon's default.
             SessionTarget::Remote(name, endpoint) => {
-                Session::connect(id, title, name, endpoint, &args, ctx.clone())?
+                Session::connect(id, title, name, endpoint, session, &args, ctx.clone())?
             }
-            SessionTarget::Local => Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?,
+            // A live local session is joined, never re-spawned: two agents
+            // on one session's files would be two writers of one transcript.
+            SessionTarget::Local => match session.and_then(find_live_session) {
+                Some(entry) => Session::join_local(id, title, &entry, ctx.clone())?,
+                None => Session::spawn(id, title, &self.agent_bin, &args, ctx.clone())?,
+            },
         };
         session.work_dir = work_dir.clone();
         // Only a local directory belongs in the folder picker's memory: a
@@ -639,6 +671,11 @@ impl InkvizitorApp {
             Command::NewSession => self.start_folder_pick(ctx),
             Command::ResumeSession => self.open_resume_menu(ctx),
             Command::CloseSession => self.request_close(self.active()),
+            Command::StopAgent => {
+                if let Some(id) = self.sessions.get(self.active()).map(|session| session.id) {
+                    self.stop_agent(id);
+                }
+            }
             Command::SplitRight => self.split_pane(Split::Columns),
             Command::SplitDown => self.split_pane(Split::Rows),
             Command::CloseSplit => self.close_split(),
@@ -842,7 +879,9 @@ impl InkvizitorApp {
             entry.id.clone(),
         ];
         let target = self.resume_source.clone();
-        if let Err(error) = self.open_session(args, ctx, Some(entry.tab_title()), &target) {
+        if let Err(error) =
+            self.open_session_for(args, ctx, Some(entry.tab_title()), &target, Some(&entry.id))
+        {
             self.error = Some(error);
         }
     }
@@ -967,6 +1006,10 @@ impl InkvizitorApp {
                     let mut text = RichText::new(&session.title);
                     if session.is_failed() {
                         text = text.color(colors.error);
+                    } else if session.is_detached() {
+                        // Not red: the agent is probably still there, and
+                        // this tab is on its way back to it.
+                        text = RichText::new(format!("⇄ {}", session.title)).color(colors.warning);
                     } else if session.has_pending_approvals() {
                         text = RichText::new(format!("⚠ {}", session.title)).color(colors.warning);
                     } else if session.is_running() {
@@ -1160,18 +1203,37 @@ impl InkvizitorApp {
                     .auto_shrink([false, false])
                     .max_height(height)
                     .show(ui, |ui| {
+                        let colors = crate::theme::colors(ui.ctx());
                         for (index, entry) in sessions.iter().enumerate() {
                             let selected = index == cursor;
-                            let row = ui
-                                .selectable_label(selected, RichText::new(&entry.title).strong())
-                                .on_hover_text(format!("resume {}", entry.id));
+                            // A live row is joined, not resumed, and the two
+                            // are worth telling apart before clicking: one
+                            // reaches a process that has been thinking since
+                            // you left, the other reads a file.
+                            let label = if entry.live {
+                                RichText::new(format!("● {}", entry.title))
+                                    .strong()
+                                    .color(colors.accent)
+                            } else {
+                                RichText::new(&entry.title).strong()
+                            };
+                            let hint = if entry.live {
+                                format!("join the running agent for {}", entry.id)
+                            } else {
+                                format!("resume {}", entry.id)
+                            };
+                            let row = ui.selectable_label(selected, label).on_hover_text(hint);
                             if row.clicked() {
                                 resume = Some(entry.clone());
                             }
                             if selected && want_scroll {
                                 row.scroll_to_me(Some(Align::Center));
                             }
-                            ui.label(RichText::new(entry.meta_line()).weak().small());
+                            let meta = match entry.live {
+                                true => format!("{} · running", entry.meta_line()),
+                                false => entry.meta_line(),
+                            };
+                            ui.label(RichText::new(meta).weak().small());
                             ui.add_space(2.0);
                         }
                     });
@@ -1195,38 +1257,82 @@ impl InkvizitorApp {
         };
         let title = session.title.clone();
         let running = session.is_running();
-        let (mut confirm, mut cancel) = (false, false);
+        let detaches = session.outlives_its_tab();
+        let (mut confirm, mut cancel, mut stop) = (false, false, false);
         egui::Window::new("Close session")
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.label(RichText::new(format!("Close “{title}”?")).strong());
-                if running {
+                // Closing means two different things now, and the difference
+                // is the whole of this project: an attached tab is a window
+                // onto an agent it does not own, so closing it is leaving.
+                if detaches {
+                    ui.label("The agent keeps running; reopening this session rejoins it.");
+                    if running {
+                        ui.label(
+                            RichText::new("The turn in progress carries on without you.")
+                                .color(crate::theme::colors(ui.ctx()).warning),
+                        );
+                    }
+                } else {
+                    if running {
+                        ui.label(
+                            RichText::new("A turn is still running and will be cancelled.")
+                                .color(crate::theme::colors(ui.ctx()).warning),
+                        );
+                    }
                     ui.label(
-                        RichText::new("A turn is still running and will be cancelled.")
-                            .color(crate::theme::colors(ui.ctx()).warning),
+                        RichText::new("The transcript is on disk — Ctrl+O reopens it.")
+                            .weak()
+                            .small(),
                     );
                 }
-                ui.label(
-                    RichText::new("The transcript is on disk — Ctrl+O reopens it.")
-                        .weak()
-                        .small(),
-                );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Close (Enter)").clicked() {
+                    let close_label = if detaches {
+                        "Detach (Enter)"
+                    } else {
+                        "Close (Enter)"
+                    };
+                    if ui.button(close_label).clicked() {
                         confirm = true;
+                    }
+                    if detaches
+                        && ui
+                            .button("Stop the agent")
+                            .on_hover_text("end the agent process too, not just this window")
+                            .clicked()
+                    {
+                        stop = true;
                     }
                     if ui.button("Cancel (Esc)").clicked() {
                         cancel = true;
                     }
                 });
             });
-        if confirm {
+        if stop {
+            self.stop_agent(id);
+        } else if confirm {
             self.confirm_close();
         } else if cancel {
             self.close_confirm = None;
+        }
+    }
+
+    /// End the agent behind a tab, then close the tab.
+    ///
+    /// The one thing a detached session cannot be talked out of by dropping a
+    /// socket. Only meaningful for an attached tab; a local child is stopped
+    /// by closing it, which is what `close_session` already does.
+    fn stop_agent(&mut self, id: usize) {
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+            session.stop_agent();
+        }
+        self.close_confirm = None;
+        if let Some(index) = self.sessions.iter().position(|session| session.id == id) {
+            self.close_session(index);
         }
     }
 
@@ -1363,9 +1469,11 @@ impl InkvizitorApp {
 
 impl eframe::App for InkvizitorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Background sessions keep progressing even while not visible.
+        // Background sessions keep progressing even while not visible — and
+        // a background session whose connection dropped keeps trying to get
+        // back, so it is there when the tab is looked at.
         for session in &mut self.sessions {
-            session.drain_inbound();
+            session.poll(ctx);
         }
         if self.sessions.iter().any(Session::is_running) {
             // Keep spinners animated.

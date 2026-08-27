@@ -79,7 +79,7 @@ client/                  frontends + shared frontend kit
 remote/                  relay daemons for remote access
   dvadva-bridge/           byte-relay daemon pair (bin: dvadva-bridge; design in remote/PLAN.md)
 _history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
-PLAN-detached-agent.md   design record: headless agent + attach/detach (phases 0-2 done, 3 open)
+PLAN-detached-agent.md   design record: headless agent + attach/detach (all phases done)
 ```
 
 Per-module notes live in sub-tree `AGENTS.md` files — read them before touching
@@ -103,9 +103,12 @@ the loop**.
 | Wire protocol framing | both | both |
 | MCP tool calls | | ✓ (rmcp client) |
 
-- **GUI runtime path**: `inkvizitor` spawns one `dvadva-agent` per session tab
-  (`session.rs`), speaking JSON-RPC over the child's stdio; the transcript is a
-  block stream rendered by `render.rs`; forks appear as sub-tabs.
+- **GUI runtime path**: `inkvizitor` spawns one `dvadva-agent` per local
+  session tab (`session.rs`), speaking JSON-RPC over the child's stdio; a
+  remote tab attaches through a `dvadva-bridge` daemon instead, and a tab for
+  a session already running on this machine joins it through the live-session
+  registry. The transcript is a block stream rendered by `render.rs`; forks
+  appear as sub-tabs.
 - **Agent runtime path**: `cli/` (arg parsing; subcommands `info`, `mcp`) →
   `app.rs` (`KimiCLI::create` wiring) → `soul/kimisoul.rs` (loop, steps,
   flow/Ralph runner) → `tools/` dispatch; `wire/server.rs` exposes the
@@ -133,11 +136,27 @@ the loop**.
   rather than by the pid. `dvadva-bridge remote` is the supervisor over it:
   its `attach` op finds the agent for a session or starts one that outlives
   the connection, and its `list_sessions` marks the live ones.
-  `PLAN-detached-agent.md` has the design record; Phase 3 (reconnect in the
-  frontends, headless approvals, idle shutdown) is still open.
+  `PLAN-detached-agent.md` has the design record.
+- **Leaving and coming back**: a remote session in either frontend is
+  *attached*, not owned — closing the tab (or quitting the TUI) leaves the
+  agent with its turn, and reopening rejoins the same process. A connection
+  that drops on its own puts the session in a **detached** state rather than a
+  failed one: the GUI retries with a backoff and then offers a button, the TUI
+  binds `Ctrl+R`. Both work by re-attaching, which finds the live agent or
+  starts one on the same session files, so neither has to know which happened.
+  A local session is still a child over stdio, and closing it still ends it.
+- **How a detached agent ends**: three ways, all cancelling the one token
+  `WireServer::stop_token` hands out — a signal, the wire's `shutdown` method
+  (any attached client; the GUI's "Stop agent", the TUI's `Ctrl+K`), and
+  `--idle-timeout` with nobody attached and nothing to do. A turn *parked on
+  an approval* with no clients counts as idle, because a turn waiting for a
+  person with nobody attached is waiting for nobody; a turn that is working
+  never does. `dvadva-bridge remote` passes an idle timeout to every agent it
+  starts (`[serve] agent_idle_timeout`, default one hour), because the daemon
+  is where agents accumulate.
 - **Wire surface**: the frontend sends `initialize` / `prompt` / `cancel` /
-  `replay` / `steer` plus approval replies; the agent answers with typed
-  events (`TurnBegin`, `StepBegin`, `ContentPart`, `ToolResult`,
+  `replay` / `steer` / `shutdown` plus approval replies; the agent answers
+  with typed events (`TurnBegin`, `StepBegin`, `ContentPart`, `ToolResult`,
   `StatusUpdate`, `TurnEnd`, …). The full lists are `wire/types.rs` and the
   method dispatch in `wire/server.rs`.
 
@@ -157,7 +176,9 @@ against the agent:
   recognize — and a peer's *lower* minor means do not use what it predates,
   which is what `ProtocolVersion::has` is for. 1.3 added the `initialize`
   result's `capabilities` object; ask it, do not infer capability from a
-  version number.
+  version number. 1.4 added what a client that may *leave and come back*
+  needs: `session` in the `initialize` result, `turn_running` in the `replay`
+  result, and the `shutdown` method.
 - **A client's own JSON-RPC ids are not addresses.** They come from
   `WireClient::next_id` and are unique only within one connection — two
   attached clients both call their first request `"1"`. Nothing on the agent
@@ -329,7 +350,8 @@ wrapper jar is generated, not committed).
 `focus_owner()`, the split panes; holds one `RemoteLink` per configured
 `[[remotes]]` entry — the tab strip paints a chain button each, and
 `pick_link` resolves which one a remote command means), `session.rs` (one
-agent child + transcript + approval UI per tab), `render.rs` (transcript
+agent connection + transcript + approval UI per tab, plus the detached state
+and the way back to an attached agent), `render.rs` (transcript
 block widgets), `remote_link.rs`
 (per-remote connection state machine: tunnel child, background version probe,
 the painted chain button), `theme.rs` (light/dark/Kimi palettes, moon spinner,

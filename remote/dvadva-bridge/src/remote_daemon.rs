@@ -102,6 +102,11 @@ pub struct Config {
     /// told to use. `None` means this user's own, which is what every
     /// deployment wants and no test does.
     pub share_dir: Option<PathBuf>,
+    /// How long a supervised agent may idle before stopping itself, in
+    /// seconds; `0` means never. Only ever passed to agents *this* daemon
+    /// starts — an agent somebody else started keeps whatever policy it was
+    /// given, which is the same rule as every other argument here.
+    pub agent_idle_timeout: u64,
 }
 
 impl Config {
@@ -112,7 +117,14 @@ impl Config {
             agent_bin: agent_bin.into(),
             default_work_dir: None,
             share_dir: None,
+            agent_idle_timeout: crate::config::DEFAULT_AGENT_IDLE_TIMEOUT,
         }
+    }
+
+    /// Same, with a different idle policy for the agents it starts.
+    pub fn with_agent_idle_timeout(mut self, seconds: u64) -> Self {
+        self.agent_idle_timeout = seconds;
+        self
     }
 
     /// Same, with a default work directory for args that name none.
@@ -414,6 +426,7 @@ async fn start_agent(
     args: Vec<String>,
 ) -> Result<(LiveSession, BufReader<TcpStream>, PathBuf), String> {
     let args = with_default_work_dir(args, config.default_work_dir.as_deref());
+    let args = with_idle_timeout(args, config.agent_idle_timeout);
     let log = config.agent_log_path(conn);
     if let Some(parent) = log.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -790,6 +803,29 @@ fn with_default_work_dir(args: Vec<String>, default: Option<&str>) -> Vec<String
     with_default.push(dir.to_string());
     with_default.extend(args);
     with_default
+}
+
+/// Prepend the daemon's idle policy unless the caller stated one.
+///
+/// Prepended for the same reason as `-w`: a caller who names its own wins
+/// under clap's last-one-wins. Unlike `-w` this is the daemon's decision by
+/// default rather than only in the absence of one — a frontend has no idea
+/// how many agents this machine is already holding, and the daemon is the
+/// only party that can see the accumulation it causes.
+fn with_idle_timeout(args: Vec<String>, seconds: u64) -> Vec<String> {
+    if args_name_idle_timeout(&args) {
+        return args;
+    }
+    let mut with_timeout = Vec::with_capacity(args.len() + 2);
+    with_timeout.push("--idle-timeout".to_string());
+    with_timeout.push(seconds.to_string());
+    with_timeout.extend(args);
+    with_timeout
+}
+
+fn args_name_idle_timeout(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--idle-timeout" || arg.starts_with("--idle-timeout="))
 }
 
 /// Every spelling of the agent's work-dir flag: `-w DIR`, `-wDIR`,

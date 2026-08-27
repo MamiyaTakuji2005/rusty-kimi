@@ -228,6 +228,7 @@ impl KimiCLI {
         &self,
         addr: SocketAddr,
         token_file: Option<PathBuf>,
+        idle_timeout: Option<std::time::Duration>,
     ) -> anyhow::Result<()> {
         let token_file = token_file
             .unwrap_or_else(|| self.runtime.session.dir().join(listener::TOKEN_FILE_NAME));
@@ -239,6 +240,7 @@ impl KimiCLI {
                 token_file,
                 inherit_stdio: true,
                 registry_dir: None,
+                idle_timeout,
             },
         )
         .await

@@ -12,13 +12,20 @@
 //! `dvadva-bridge` daemon instead of spawning a local agent: the agent runs on
 //! the daemon's machine, and agent arguments like `-w` name paths *there*.
 //!
+//! A remote session is **attached**, not owned: quitting leaves the agent
+//! running with its turn and its context, and the command printed on the way
+//! out rejoins it. `Ctrl+K` is the other ending — quit *and* stop the agent,
+//! which is the only way to end one on a machine this process cannot signal.
+//! A local session is still this process's child, and quitting ends it.
+//!
 //! Keys:
 //!   Enter   send the message (or steer mid-turn)
 //!   Esc     cancel the running turn / close an overlay
 //!   1/2/3   answer the approval overlay
 //!   Tab     cycle subagent sub-transcripts
 //!   PgUp/PgDn, mouse wheel   scroll
-//!   Ctrl+O  resume menu · Ctrl+C / q(when idle) quit
+//!   Ctrl+O  resume menu · Ctrl+R rejoin after a detach
+//!   Ctrl+C / q(when idle) quit · Ctrl+K quit and stop a remote agent
 
 mod agent;
 mod input;
@@ -149,6 +156,9 @@ struct App {
     /// Set when the user picked a session to resume: run_app exits with the
     /// agent args to relaunch with, printed after terminal restore.
     resume_command: Option<String>,
+    /// Set by `Ctrl+K`: end the agent on the way out rather than only
+    /// detaching from it.
+    stop_on_exit: bool,
     /// Visible transcript: None = main, Some(task_tool_call_id) = subagent.
     active_subtab: Option<String>,
 }
@@ -264,12 +274,27 @@ fn run_app(
     }
 
     let resume_command = app.resume_command.take();
+    // Say what quitting just did, when quitting did not end the agent. An
+    // attached session's agent keeps its turn and its context, and the
+    // command that rejoins it is worth having in the scrollback rather than
+    // worked out later.
+    let rejoin = app.rejoin_command();
+    let stopping = app.stop_on_exit;
+    if stopping {
+        app.session.stop_agent();
+    }
     app.session.shutdown();
     if let Some(args) = resume_command {
         // After restore_terminal this lands in the normal scrollback.
         println!(
             "To resume the picked session, run:\n  dvadva-tui {args}\n(or add -w <dir> for its work directory)"
         );
+    } else if let Some(args) = rejoin {
+        if stopping {
+            println!("Asked the agent to stop.");
+        } else {
+            println!("The agent is still running. To rejoin it:\n  dvadva-tui {args}");
+        }
     }
     Ok(())
 }
@@ -298,6 +323,7 @@ impl App {
             resume_cursor: 0,
             list_state: ListState::default(),
             resume_command: None,
+            stop_on_exit: false,
             active_subtab: None,
         })
     }
@@ -389,6 +415,12 @@ impl App {
                 self.open_resume_menu();
                 true
             }
+            // Rejoin after a detach. Only bound while detached, so the key
+            // stays free for the editor the rest of the time.
+            (KeyModifiers::CONTROL, KeyCode::Char('r')) if self.session.can_reconnect() => {
+                self.session.reconnect();
+                true
+            }
             (_, KeyCode::Esc) => {
                 self.session.cancel();
                 true
@@ -398,6 +430,15 @@ impl App {
                 true
             }
             (m, KeyCode::Char('q')) if m.is_empty() && self.editor.text().is_empty() => false,
+            // Quit *and* end the agent, for an attached session that would
+            // otherwise keep running. The only way to stop an agent on
+            // another machine, which cannot be signalled from here.
+            (m, KeyCode::Char('k'))
+                if m.contains(KeyModifiers::CONTROL) && self.session.outlives_this_process() =>
+            {
+                self.stop_on_exit = true;
+                false
+            }
             (_, KeyCode::Enter) => {
                 let text = self.editor.text().to_string();
                 self.editor.clear();
@@ -494,12 +535,31 @@ impl App {
                     }
                     command.push_str(&format!("--session {}", entry.id));
                     self.resume_command = Some(command);
+                    // The same command joins a live agent rather than
+                    // starting one, because `--remote` attaches: the id in
+                    // the argv is also the attach key.
                     return false;
                 }
             }
             _ => {}
         }
         true
+    }
+
+    /// The command that rejoins this session, for a session quitting does not
+    /// end. `None` when the agent is this process's own child, where quitting
+    /// and ending are the same act.
+    fn rejoin_command(&self) -> Option<String> {
+        if !self.session.outlives_this_process() {
+            return None;
+        }
+        let remote = self.remote.as_ref()?;
+        // By name, so the printed command keeps working if the endpoint
+        // behind it moves — the same choice the resume menu makes.
+        Some(match self.session.session_id() {
+            Some(id) => format!("--remote {} --session {id}", remote.name),
+            None => format!("--remote {}", remote.name),
+        })
     }
 
     fn open_resume_menu(&mut self) {
@@ -633,6 +693,7 @@ impl App {
             Phase::Running => "working · Esc cancels · Enter steers",
             Phase::Initializing => "initializing",
             Phase::Replaying => "loading history",
+            Phase::Detached(_) => "detached · Ctrl+R rejoins",
             Phase::Failed(_) => "failed",
         };
         let mut label = String::from("input");
@@ -645,6 +706,10 @@ impl App {
         let sep_style = match self.session.phase {
             Phase::Running => Style::default().fg(theme::ACCENT),
             Phase::Failed(_) => Style::default().fg(theme::ERROR),
+            // Not the error colour: the agent is probably still there with
+            // the turn, and saying "error" would be a claim about the agent
+            // rather than about this connection.
+            Phase::Detached(_) => Style::default().fg(theme::WARNING),
             _ => theme::dim(),
         };
         frame.render_widget(
@@ -749,6 +814,10 @@ impl App {
             Phase::Replaying => "· loading history".to_string(),
             Phase::Running => "▶ working".to_string(),
             Phase::Ready => "ready".to_string(),
+            Phase::Detached(reason) => format!(
+                "⇄ detached: {} · Ctrl+R rejoins",
+                reason.lines().next().unwrap_or("connection closed")
+            ),
             Phase::Failed(err) => format!("✗ {}", err.lines().next().unwrap_or("failed")),
         };
         if self.session.has_pending_approvals() {
@@ -876,13 +945,25 @@ impl App {
             ))));
         } else {
             for entry in &self.resume_entries {
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled(
-                        entry.tab_title(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("  {}", entry.meta_line()), theme::dim()),
-                ])));
+                // A live row is joined, not resumed. Worth seeing before
+                // choosing: one reaches a process that has been thinking
+                // since you left, the other reads a file.
+                let mut spans = Vec::new();
+                if entry.live {
+                    spans.push(Span::styled("● ", theme::accent()));
+                }
+                spans.push(Span::styled(
+                    entry.tab_title(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("  {}", entry.meta_line()),
+                    theme::dim(),
+                ));
+                if entry.live {
+                    spans.push(Span::styled(" · running", theme::accent()));
+                }
+                items.push(ListItem::new(Line::from(spans)));
             }
         }
         self.list_state.select(Some(self.resume_cursor));

@@ -61,6 +61,8 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
 - `src/remote_daemon.rs` — runs on the agent machine. `spawn` op: spawn
   `dvadva-agent` with the caller's args (header `args` — verbatim agent CLI
   args), ack, relay, wait-with-grace-then-kill, exit trailer.
+  Supervised agents are also given `--idle-timeout`, which is what keeps a
+  long-lived daemon from collecting one process per session ever opened.
   `attach` op: find the agent hosting a session in the live-session registry
   (`dvadva_agent::live`) and dial it, or start one that is nobody's child in
   particular — `--listen`, its own process group, `kill_on_drop(false)`, and
@@ -95,7 +97,11 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
 - `src/local_daemon.rs` — runs on the frontend machine, forwards frames
   verbatim and relays bytes; optional in the `ssh -L` deployment.
 - `src/config.rs` — the `[serve]` half of `~/.kimi/bridge.toml`, so a
-  service unit can run a bare `dvadva-bridge remote`. The frontends' half
+  service unit can run a bare `dvadva-bridge remote`. `agent_idle_timeout`
+  lives here rather than in a frontend's hands because the daemon is where
+  agents accumulate — it starts one per session anybody ever attaches to, and
+  nothing else would end them. It is prepended to the agent's argv the way
+  `-w` is, so a caller who states one still wins. The frontends' half
   (`[[remotes]]`) is read by `wire_client::remotes` and the two never share
   a type: **disjoint sections**, no dependency in either direction, unknown
   ones ignored. Not a section in `config.toml` — the agent rewrites that
@@ -107,8 +113,12 @@ closed". `wire_client::bridge::exit_trailer` is the client-side twin.
   `--listen` it does the listening half too — binds a port, mints a token,
   registers itself, and serves attachers — because the supervisor cannot be
   tested against something that only speaks stdio. It exits by itself after
-  two minutes: a test agent nobody stopped holds its own binary open, which
-  on Windows fails the next build rather than the next test.
+  twenty seconds — several tests leave one running deliberately, that being
+  the phase under test, and a stray one holds its own binary open, which on
+  Windows fails the next *build* rather than the next test, with a message
+  about file permissions that says nothing about where it came from. Keep
+  that number well above the suite's own runtime (seconds) and well below how
+  long anyone waits before building again.
 - `tests/e2e.rs` — loopback e2e over real TCP sockets; covers relay
   opacity, arg passing, the work-dir default and its override, close
   propagation in both directions, the exit trailer (status + stderr tail),

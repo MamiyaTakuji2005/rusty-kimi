@@ -135,12 +135,25 @@ async fn main() {
                 ),
             }
             eprintln!("dvadva-bridge: no auth/TLS — keep this on loopback behind an ssh tunnel");
+            let idle_timeout = serve
+                .agent_idle_timeout
+                .unwrap_or(config::DEFAULT_AGENT_IDLE_TIMEOUT);
             let config = remote_daemon::Config::new(agent_bin)
-                .with_default_work_dir(default_work_dir.clone());
+                .with_default_work_dir(default_work_dir.clone())
+                .with_agent_idle_timeout(idle_timeout);
             eprintln!(
                 "dvadva-bridge: supervising agents; live sessions and their logs in {}",
                 config.live_dir().display()
             );
+            match idle_timeout {
+                0 => eprintln!(
+                    "dvadva-bridge: supervised agents never stop on their own                      (serve.agent_idle_timeout = 0)"
+                ),
+                seconds => eprintln!(
+                    "dvadva-bridge: supervised agents stop after {seconds}s idle ({})",
+                    source(false, serve.agent_idle_timeout.is_some())
+                ),
+            }
             run(&listen, |listener| {
                 remote_daemon::serve(listener, config.clone())
             })

@@ -2,7 +2,7 @@
 //! (initialize -> replay -> ready -> turn running), its transcript, and the
 //! per-session UI (input, status bar, approvals, subagent sub-tabs).
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use eframe::egui::{self, Align, Align2, Key, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
@@ -22,8 +22,45 @@ enum Phase {
     Replaying,
     Ready,
     Running,
+    /// The connection ended, and this session knows a way back to its agent.
+    /// Distinct from [`Phase::Failed`] because it is not an ending: the agent
+    /// still has the turn, the context and the pid it had a moment ago, and
+    /// the reason here is why *this* connection stopped, not why the session
+    /// did.
+    Detached(String),
     Failed(String),
 }
+
+/// How a detached session gets back to its agent.
+///
+/// Both roads end at an `attach`, which finds the live agent or starts one on
+/// the same session files — so a reconnect works whether the agent is still
+/// there or not, and does not have to know which.
+#[derive(Clone)]
+enum WayBack {
+    /// Through a bridge daemon, which does the finding.
+    Remote { endpoint: String, args: Vec<String> },
+    /// Straight to a listening agent on this machine, found in the
+    /// live-session registry. Nothing to start one with if it has gone, so
+    /// this road can dead-end — and says so.
+    Local,
+}
+
+/// How long to wait before the *n*th reconnect attempt. Doubling from a
+/// second, capped: a tunnel that blinks is back almost immediately, and a
+/// daemon that is down should not be dialled once a second all afternoon.
+fn backoff(attempts: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1 << attempts.min(4))
+}
+
+/// How many times to try before waiting to be asked. Four attempts spans
+/// about half a minute, which covers a blink; past that, something needs a
+/// person, and a button is more honest than a spinner.
+const RECONNECT_ATTEMPTS: u32 = 4;
+
+/// What a reconnect thread hands back: the new connection, and the session
+/// the far side says it landed on.
+type Dialled = (WireClient, Receiver<Inbound>, Option<String>);
 
 /// Inner margin of the transcript's central panel, per side.
 const PANEL_MARGIN: i8 = 8;
@@ -87,6 +124,22 @@ pub struct Session {
     /// picker opens here so a parallel session of the active tab is one
     /// Enter away.
     pub work_dir: Option<std::path::PathBuf>,
+    /// Which session on the agent's machine this tab is, once anything has
+    /// said so — the daemon's attach ack, or the agent's own `initialize`
+    /// result. Without it a reconnect has nothing to ask for.
+    session_id: Option<String>,
+    /// How to get back after a detach, or `None` for a tab whose agent's
+    /// life is this connection (a locally spawned child over stdio).
+    way_back: Option<WayBack>,
+    /// Reconnects tried since the connection dropped, reset by success.
+    attempts: u32,
+    /// When to try again. `None` while connected, while an attempt is in
+    /// flight, or once the automatic attempts are spent and it is the user's
+    /// turn to ask.
+    retry_at: Option<std::time::Instant>,
+    /// An attempt in flight on its own thread, because dialling can take
+    /// tens of seconds and this session is polled from the draw loop.
+    dialing: Option<Receiver<Result<Dialled, String>>>,
     client: WireClient,
     inbound: Receiver<Inbound>,
     transcript: Transcript,
@@ -132,26 +185,69 @@ impl Session {
         let (client, inbound) =
             WireClient::spawn_without_console(agent_bin, agent_args, move || ctx.request_repaint())
                 .map_err(|err| format!("failed to spawn agent `{agent_bin}`: {err}"))?;
-        Self::from_client(id, title, None, client, inbound)
+        Self::from_client(id, title, None, client, inbound, None, None)
     }
 
     /// Connect this tab through a remote `dvadva-bridge` daemon instead of
     /// spawning a local agent; the agent (and its `~/.kimi`) lives on the
     /// daemon's machine.
+    ///
+    /// `session` names a past session to rejoin, or `None` for a new one.
+    /// Either way this *attaches*: closing the tab leaves the agent running
+    /// and reopening reaches the same process, unless the daemon is too old
+    /// to supervise anything — in which case `wire_client` falls back to a
+    /// spawn and says so, and this tab quietly loses its way back.
     pub fn connect(
         id: usize,
         title: String,
         name: &str,
         endpoint: &str,
+        session: Option<&str>,
         agent_args: &[String],
         egui_ctx: egui::Context,
     ) -> Result<Self, String> {
         let ctx = egui_ctx;
-        let (client, inbound) =
-            WireClient::connect_tcp(endpoint, agent_args, move || ctx.request_repaint())
+        let attached =
+            WireClient::attach_tcp(endpoint, session, agent_args, move || ctx.request_repaint())
                 .map_err(|err| format!("remote bridge `{name}`: {err}"))?;
         let remote = Some((name.to_string(), endpoint.to_string()));
-        Self::from_client(id, title, remote, client, inbound)
+        let way_back = attached.supervised.then(|| WayBack::Remote {
+            endpoint: endpoint.to_string(),
+            args: agent_args.to_vec(),
+        });
+        Self::from_client(
+            id,
+            title,
+            remote,
+            attached.client,
+            attached.inbound,
+            attached.session,
+            way_back,
+        )
+    }
+
+    /// Join an agent already running on *this* machine, found in the
+    /// live-session registry. What the resume list offers for a row it has
+    /// marked live: starting a second process on the same session files
+    /// would be two agents writing one transcript.
+    pub fn join_local(
+        id: usize,
+        title: String,
+        entry: &dvadva_agent::live::LiveSession,
+        egui_ctx: egui::Context,
+    ) -> Result<Self, String> {
+        let ctx = egui_ctx;
+        let (client, inbound) = WireClient::attach_live(entry, move || ctx.request_repaint())
+            .map_err(|err| format!("session {}: {err}", entry.session))?;
+        Self::from_client(
+            id,
+            title,
+            None,
+            client,
+            inbound,
+            Some(entry.session.clone()),
+            Some(WayBack::Local),
+        )
     }
 
     fn from_client(
@@ -160,6 +256,8 @@ impl Session {
         remote: Option<(String, String)>,
         client: WireClient,
         inbound: Receiver<Inbound>,
+        session_id: Option<String>,
+        way_back: Option<WayBack>,
     ) -> Result<Self, String> {
         let init_id = client.send_request(
             "initialize",
@@ -176,6 +274,11 @@ impl Session {
             title,
             remote,
             work_dir: None,
+            session_id,
+            way_back,
+            attempts: 0,
+            retry_at: None,
+            dialing: None,
             client,
             inbound,
             transcript: Transcript::default(),
@@ -205,12 +308,200 @@ impl Session {
         matches!(self.phase, Phase::Failed(_))
     }
 
+    pub fn is_detached(&self) -> bool {
+        matches!(self.phase, Phase::Detached(_))
+    }
+
+    /// Whether closing this tab leaves something running. True for an
+    /// attached session, whose agent this window does not own.
+    pub fn outlives_its_tab(&self) -> bool {
+        self.way_back.is_some()
+    }
+
     pub fn has_pending_approvals(&self) -> bool {
         !self.approvals.is_empty()
     }
 
     pub fn shutdown(&mut self) {
         self.client.shutdown();
+    }
+
+    /// Ask the agent itself to stop, rather than only leaving it.
+    ///
+    /// The counterpart to detaching, and the only way to end an agent that
+    /// this window does not own — it may be on another machine, behind two
+    /// daemons, with nothing here able to signal it. No confirmation of its
+    /// own: the caller closes the tab, and the agent's stream ending is the
+    /// acknowledgement.
+    pub fn stop_agent(&mut self) {
+        if self.way_back.is_some() {
+            self.client.send_request("shutdown", json!({}));
+        }
+        // A tab whose agent is its own child needs no asking: dropping the
+        // client is already the ask.
+        self.way_back = None;
+        self.client.shutdown();
+    }
+
+    /// One frame's worth of session upkeep: drain what arrived, and take the
+    /// next step back if this session is trying to reconnect.
+    ///
+    /// Called for every tab, not only the visible one — a session whose
+    /// tunnel dropped while it sat in the background should be back by the
+    /// time it is looked at.
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        self.drain_inbound();
+        self.poll_reconnect(ctx);
+    }
+
+    /// The connection ended. Whether that is an ending depends on whether
+    /// anything else was holding the agent up.
+    fn connection_ended(&mut self, reason: String) {
+        if matches!(self.phase, Phase::Failed(_) | Phase::Detached(_)) {
+            return;
+        }
+        // Whatever was on screen decides nothing now; a modal whose answer
+        // cannot reach anyone is worse than no modal.
+        self.approvals.clear();
+        self.focus_released_for = None;
+        self.init_id = None;
+        self.replay_id = None;
+        self.prompt_id = None;
+        match self.way_back {
+            Some(_) => {
+                self.phase = Phase::Detached(reason);
+                // Deliberately *not* resetting the attempt count here. Only
+                // a connection that got all the way to ready does that
+                // (`handle_response`), so an agent that accepts and dies
+                // again immediately still climbs the backoff instead of
+                // being dialled once a second forever.
+                self.retry_at = self.next_attempt_at();
+            }
+            None => self.phase = Phase::Failed(format!("agent exited: {reason}")),
+        }
+    }
+
+    /// When to try again, or `None` once the automatic attempts are spent and
+    /// it is the user's turn to ask.
+    fn next_attempt_at(&self) -> Option<std::time::Instant> {
+        (self.attempts < RECONNECT_ATTEMPTS)
+            .then(|| std::time::Instant::now() + backoff(self.attempts))
+    }
+
+    fn poll_reconnect(&mut self, ctx: &egui::Context) {
+        if let Some(dialing) = self.dialing.take() {
+            match dialing.try_recv() {
+                Ok(Ok(dialled)) => self.adopt(dialled),
+                Ok(Err(err)) => {
+                    self.phase = Phase::Detached(err);
+                    self.retry_at = self.next_attempt_at();
+                }
+                Err(TryRecvError::Empty) => self.dialing = Some(dialing),
+                // The dialling thread died without answering. Treat it as a
+                // failed attempt rather than as a session that can never
+                // come back.
+                Err(TryRecvError::Disconnected) => self.retry_at = self.next_attempt_at(),
+            }
+            return;
+        }
+        if !self.is_detached() {
+            return;
+        }
+        let Some(due) = self.retry_at else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if now < due {
+            // Come back exactly when the attempt is due; without this the
+            // window only retries when something else happens to redraw it.
+            ctx.request_repaint_after(due - now);
+            return;
+        }
+        self.attempts += 1;
+        self.reconnect(ctx);
+    }
+
+    /// Start one attempt at the way back.
+    ///
+    /// On a thread, and that is not an optimization. Dialling is bounded but
+    /// generously — ten seconds to connect, fifteen more for the daemon's ack
+    /// — and this runs on the thread that draws the window. A hand-made
+    /// connection may freeze it for that long; an automatic retry every one,
+    /// two, four, eight seconds must not.
+    ///
+    /// Failure is not fatal. The tab stays detached with whatever the attempt
+    /// had to say, and either the next attempt or the button tries again.
+    pub fn reconnect(&mut self, ctx: &egui::Context) {
+        let Some(way_back) = self.way_back.clone() else {
+            return;
+        };
+        self.retry_at = None;
+        let repaint = ctx.clone();
+        let session_id = self.session_id.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("session-reconnect".into())
+            .spawn(move || {
+                let wake = {
+                    let repaint = repaint.clone();
+                    move || repaint.request_repaint()
+                };
+                let result = match &way_back {
+                    WayBack::Remote { endpoint, args } => {
+                        WireClient::attach_tcp(endpoint, session_id.as_deref(), args, wake)
+                            .map(|attached| (attached.client, attached.inbound, attached.session))
+                    }
+                    WayBack::Local => match session_id
+                        .as_deref()
+                        .and_then(wire_client::session_list::find_live_session)
+                    {
+                        Some(entry) => WireClient::attach_live(&entry, wake)
+                            .map(|(client, inbound)| (client, inbound, Some(entry.session))),
+                        // Nothing on this machine to attach to, and no daemon
+                        // to ask to start one. That is the end of this road,
+                        // and saying so beats retrying forever.
+                        None => Err(std::io::Error::other(
+                            "the agent for this session is no longer running on this machine",
+                        )),
+                    },
+                };
+                let _ = tx.send(result.map_err(|err| format!("{err}")));
+                // The result arrives while the window is idle, so it has to
+                // ask for the frame that will pick it up.
+                repaint.request_repaint();
+            });
+        match spawned {
+            Ok(_) => self.dialing = Some(rx),
+            Err(err) => {
+                self.phase = Phase::Detached(format!("cannot start a reconnect: {err}"));
+                self.retry_at = self.next_attempt_at();
+            }
+        }
+    }
+
+    /// Take over a freshly dialled connection and start the handshake again.
+    fn adopt(&mut self, (client, inbound, session): Dialled) {
+        if session.is_some() {
+            self.session_id = session;
+        }
+        // A fresh connection replays the whole session, so the old transcript
+        // has to go or every block appears twice.
+        self.transcript = wire_client::transcript::Transcript::default();
+        self.active_subtab = None;
+        self.selected_block = None;
+        self.client = client;
+        self.inbound = inbound;
+        self.init_id = Some(self.client.send_request(
+            "initialize",
+            json!({
+                "protocol_version": WIRE_PROTOCOL_VERSION,
+                "client": {
+                    "name": "inkvizitor",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }),
+        ));
+        self.phase = Phase::Initializing;
     }
 
     /// Step through the second-row tabs, wrapping: main → each fork/subagent
@@ -257,17 +548,24 @@ impl Session {
                         self.approvals
                             .retain(|pending| pending.request_id != resp.request_id);
                     }
+                    // A turn this client did not start still ends for it. An
+                    // attached client watching someone else's turn — or its
+                    // own, from before a reconnect — has no `prompt` answer
+                    // coming, so the event is the only thing that can bring
+                    // it back to ready.
+                    if matches!(event, WireMessage::TurnEnd(_))
+                        && self.phase == Phase::Running
+                        && self.prompt_id.is_none()
+                    {
+                        self.phase = Phase::Ready;
+                    }
                     self.transcript.apply_event(event);
                 }
                 Inbound::Request { id, message } => self.handle_request(id, message),
                 Inbound::Response { id, result, error } => {
                     self.handle_response(id, result, error);
                 }
-                Inbound::AgentExited(reason) => {
-                    if !matches!(self.phase, Phase::Failed(_)) {
-                        self.phase = Phase::Failed(format!("agent exited: {reason}"));
-                    }
-                }
+                Inbound::AgentExited(reason) => self.connection_ended(reason),
                 Inbound::ProtocolError(err) => {
                     self.transcript
                         .blocks
@@ -338,6 +636,13 @@ impl Session {
                         self.phase = Phase::Failed(err);
                         return;
                     }
+                    // The agent's own answer to "which session is this",
+                    // which a locally spawned one has no other way to say.
+                    // It never contradicts an attach ack; both name the
+                    // session this connection landed on.
+                    if let Some(session) = result.get("session").and_then(|v| v.as_str()) {
+                        self.session_id = Some(session.to_string());
+                    }
                     self.server_name = result
                         .pointer("/server/name")
                         .and_then(|v| v.as_str())
@@ -376,7 +681,26 @@ impl Session {
             }
         } else if Some(&id) == self.replay_id.as_ref() {
             self.replay_id = None;
-            self.phase = Phase::Ready;
+            // A client that attached mid-turn is watching, not idle. Nothing
+            // in the replayed history can say so — a `TurnBegin` with no end
+            // reads the same whether the turn is running or was interrupted
+            // — so the agent says it outright. An older agent omits the
+            // field, and "not stated" reads as ready, exactly as before.
+            let running = result
+                .as_ref()
+                .and_then(|result| result.get("turn_running"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            self.phase = if running {
+                Phase::Running
+            } else {
+                Phase::Ready
+            };
+            // A connection that got this far worked. Only that resets the
+            // backoff ladder, so a peer that accepts and then dies keeps
+            // climbing it instead of being dialled once a second forever.
+            self.attempts = 0;
+            self.retry_at = None;
         } else if Some(&id) == self.prompt_id.as_ref() {
             self.prompt_id = None;
             self.phase = Phase::Ready;
@@ -754,8 +1078,9 @@ impl Session {
         }
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         let colors = theme::colors(ui.ctx());
+        let mut retry = false;
         ui.horizontal(|ui| {
             match &self.phase {
                 Phase::Initializing => {
@@ -772,6 +1097,29 @@ impl Session {
                 }
                 Phase::Ready => {
                     ui.label(RichText::new("ready").weak());
+                }
+                Phase::Detached(reason) => {
+                    // Amber, not red: the agent is very probably still there
+                    // with the turn this window was watching, and calling
+                    // that an error would be a lie the user acts on.
+                    if self.retry_at.is_some() || self.dialing.is_some() {
+                        theme::spinner(ui);
+                        ui.label(
+                            RichText::new(format!("reconnecting… ({reason})"))
+                                .color(colors.warning),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!("detached: {reason}")).color(colors.warning),
+                        );
+                        retry = ui
+                            .button("Reconnect")
+                            .on_hover_text(
+                                "rejoin the agent if it is still running, or start it again \
+                                 on this session",
+                            )
+                            .clicked();
+                    }
                 }
                 Phase::Failed(err) => {
                     ui.label(RichText::new(err).color(colors.error));
@@ -800,6 +1148,11 @@ impl Session {
                 }
             });
         });
+        if retry {
+            let ctx = ui.ctx().clone();
+            self.attempts = 0;
+            self.reconnect(&ctx);
+        }
     }
 
     /// Stable id of the chat input box (also used to surrender its focus).

@@ -1,11 +1,11 @@
 # Detached agent — attach/detach plan
 
-Status: **Phases 0, 1 and 2 done**, Phase 3 not started. Written 2026-08-27.
+Status: **all four phases done** (wire protocol 1.4, bridge frame protocol
+1.1). Written 2026-08-27.
 
-An agent now outlives its clients, and something that did not start it can
-find it and join it. What is left is policy and frontends: the GUI and the
-TUI still treat a closed connection as the end of a session, and nothing yet
-uses `attach`.
+An agent outlives its clients; something that did not start it can find it and
+join it; both frontends attach rather than own, come back after a drop, and can
+ask an agent to stop; and an agent nobody comes back to stops by itself.
 
 Goal: a `dvadva-agent` that runs with no frontend attached, that several
 frontends (GUI, TUI, a daemon, a script) can attach to and detach from while
@@ -428,28 +428,131 @@ context to read, and `Session::list` skips it — a live session nobody can see
 is a live session nobody can attach to). The local listing
 (`wire_client::session_list`) reads the same registry, for the same reason.
 
-**Still open, and Phase 3's**: an explicit stop over the wire. Stopping a
-detached agent today is `SIGTERM`/interrupt (handled), a kill, or the
-supervised path's `stop` semantics that do not exist yet. Windows note: there
-is no graceful terminate signal, so `taskkill` is a hard kill there — which
-the registry survives, because a stale entry is reaped by whoever reads it.
+**Handed to Phase 3**: an explicit stop over the wire. Stopping a detached
+agent at this point was `SIGTERM`/interrupt (handled) or a kill. Windows note:
+there is no graceful terminate signal, so `taskkill` is a hard kill there —
+which the registry survives, because a stale entry is reaped by whoever reads
+it.
 
 ---
 
-## Phase 3 — policy and frontends
+## Phase 3 — policy and frontends — **DONE** (wire protocol 1.4)
 
 The long tail, and where "one agent, many attached clients" either feels good
 or feels haunted.
 
-- **Reconnect.** Both frontends treat `AgentExited` as terminal
-  (`session.rs:257`, `agent.rs:124`). Detach is not death and needs its own
-  state, plus a way back in.
-- **Headless approvals.** A turn that hits an approval with nobody attached
-  blocks forever. Options: `--yolo`, a timeout that rejects, or park-and-surface
-  on next attach (best, and cheap given the Phase 1 re-arm work).
-- **Idle shutdown** and an explicit stop, so detached agents do not accumulate.
-- **The resume list** distinguishes live sessions from cold ones, in the GUI
-  palette and the TUI menu.
+- ~~**Reconnect.**~~ **Done.** Both frontends treated `AgentExited` as
+  terminal. Detach is not death and needed its own state, plus a way back in.
+- ~~**Headless approvals.**~~ **Done**, and it turned out to be two separate
+  problems wearing one name — see below.
+- ~~**Idle shutdown** and an explicit stop~~ **Done**, so detached agents do
+  not accumulate.
+- ~~**The resume list** distinguishes live sessions from cold ones~~ **Done**,
+  in the GUI palette and the TUI menu.
+
+### What shipped, and where the plan was wrong
+
+**Protocol 1.4 spends its minor on three additive things, and all three are
+"what a client that may leave and come back has to be told".**
+
+- `session` in the `initialize` result. A reconnect has to name the session it
+  wants, and for a session the agent minted itself nothing else could say
+  which one that is. The daemon's `attach` ack says it too, but only over the
+  bridge; putting it here means a local session learns its own id the same
+  way.
+- `turn_running` in the `replay` result. This is the one the plan did not see
+  coming, and without it reconnect is *worse* than no reconnect: a client
+  attaching mid-turn replays a `TurnBegin` with no `TurnEnd` and cannot tell
+  that from an interrupted turn, so it goes to "ready" and offers a prompt the
+  agent refuses with `INVALID_STATE`. The replayed past has no present tense;
+  the agent has to state it.
+- The `shutdown` method. Not `cancel` — that stops a turn and leaves the agent
+  for the next one. Any attached client may ask, because a session is not a
+  client's and the frontend that started an agent is quite likely the one
+  already gone. It is the only ending available to a client two daemons away,
+  which cannot signal the process at all.
+
+**Reconnect is not error handling; it is the normal ending.** The plan framed
+this as "detach needs its own state", which is true and not the whole of it:
+once the frontends `attach` instead of `spawn`, *closing the window is the
+common case* and killing the agent would be the surprise. So the GUI's close
+dialog says "Detach" and explains that the agent carries on, the TUI prints
+the command that rejoins it on the way out, and stopping the agent became an
+explicit second action in both (a button beside Detach, and `Ctrl+K`).
+
+**A dropped connection does not have to be diagnosed.** The first design tried
+to tell "the agent died" from "the link dropped" so it could choose between
+reconnecting and reporting. That is unnecessary: `attach` is find-or-start, so
+one code path recovers either way — it rejoins the live agent, or starts a
+fresh one on the same session files. The frontend never has to know which
+happened, which is a great deal less code and a great deal less to get wrong.
+The GUI retries automatically with a doubling backoff (four attempts, about
+half a minute) and then shows a button; the TUI binds `Ctrl+R`.
+
+**The GUI's retries dial on a thread, and that is not an optimization.**
+Dialling is bounded generously — ten seconds to connect, fifteen more for the
+daemon's ack — and the retry runs from the draw loop. A hand-made connection
+may freeze the window for that long and always has; an automatic attempt every
+one, two, four, eight seconds must not, or a remote that is simply *down*
+makes the whole application unusable rather than one tab. The TUI's `Ctrl+R`
+stays synchronous: it is a keypress, it is the only session there is, and
+there is no automatic ladder behind it.
+
+**Attaching had to be able to fail backwards.** A frame-1.0 daemon refuses an
+`attach` frame as an unknown op, and a deployed one exists. `attach_tcp` dials
+again with `spawn` when the refusal came from the *frame* layer rather than
+from the op, and reports `supervised: false` — because a connection that
+cannot be detached from must not be offered as one, and a "close the window
+and come back" that silently killed the session would be the worst outcome
+available here. Matching on the daemon's error text is normally a bad idea and
+is safe exactly here: the builds that produce that string are already
+released, so it can no longer change.
+
+**Headless approvals were two problems wearing one name.** The *surfacing*
+half was already done: Phase 1's re-arm hands a still-open request to whoever
+attaches next, and that works with zero clients attached, because `pending`
+outlives the fan-out. What was left was the *stranding* half — a turn parked
+on an approval nobody is coming back for holds the agent forever. So the idle
+rule counts a parked turn as idle: an approval waits for a person, and with
+nothing attached there is no person. `SessionCore::shutdown` already rejects
+open requests, so the turn ends coherently and the transcript records the
+rejection rather than stopping mid-sentence. A turn that is *working* is never
+idle, however long it takes and however alone it is; that is the whole point
+of detaching, and the timeout must never touch it.
+
+**`--idle-timeout` is off by default and the supervisor passes one.** The plan
+said "idle shutdown" without saying whose decision it is. A person who typed
+`--listen` owns that process and should not have it vanish from under them;
+the bridge daemon owns the ones it starts and is the only party that can see
+them accumulating, so it prepends `--idle-timeout` the way it already prepends
+`-w` (`[serve] agent_idle_timeout`, default one hour, `0` disables). Nothing
+is lost when it fires: the transcript and the context are on disk, and
+attaching again starts a fresh agent on them.
+
+**The `live` flag needed a second half to be worth anything.** Phase 2 marked
+live sessions in both listings and nothing could act on it. Remotely, `attach`
+already does the finding. Locally there was no way in at all, so
+`WireClient::attach_live` dials a registry entry directly — its address and
+token file are exactly what the agent's own handshake asks for — and the GUI
+joins a live row rather than spawning a second process on one session's files.
+The registry entry never travels over the wire: a remote listing still says
+only `live: true`, and a token file stays on its own machine.
+
+**Deliberately not done: local sessions still spawn over stdio.** The GUI
+could pass `--listen` to every local agent and make its own tabs detachable,
+and it does not, because that turns every window close into a lingering
+process for a benefit the bridge path already provides (`--remote
+127.0.0.1:9000` against a local daemon is the headless story on the dev box,
+as `remote/PLAN.md` says). What the GUI does now is *join* a local agent that
+something else started with `--listen`, which is the half that was missing.
+
+**Also found, and left alone**: `turn_running` can read stale-true for the
+microseconds between a turn emitting `TurnEnd` and the session releasing the
+turn slot. Reading it under the catch-up snapshot narrows the window to the
+case where the recorder has not yet written that `TurnEnd` to the file, and
+the frontends' own `TurnEnd` handling recovers from the rest. Closing it
+properly would need a turn-state notion the session does not have, for a
+window nobody will hit.
 
 ---
 
@@ -457,10 +560,31 @@ or feels haunted.
 
 ```
 Phase 0 (versioning)  ──▶ Phase 1 (fan-out, 1.3)  ──▶ Phase 2 (detach)  ──▶ Phase 3
-   done                       done                  └──▶ registry / supervisor
-                                                          done (frame 1.1)
+   done                       done                  └──▶ registry / supervisor    (frontends, 1.4)
+                                                          done (frame 1.1)         done
 ```
 
 Phase 1 is shippable alone. Phase 2 without Phase 1 would give a detached agent
 that only one client at a time can reach, which is most of the cost for a
-fraction of the value.
+fraction of the value. Phase 3 is the one that had to come last: everything it
+does is a policy question about a lifetime that did not exist until Phase 2.
+
+## What this leaves undone
+
+Not omissions from the phases above — the next things somebody might want,
+recorded so they are not rediscovered as bugs.
+
+- **The GUI shows no list of live agents as such.** The resume list marks the
+  ones it happens to list, which is enough to join them; there is no "what is
+  running on this machine" view, and `~/.kimi/live/` is the answer for now.
+- **Nothing reports *why* an agent stopped.** A frontend that comes back to
+  find a fresh agent on the same session cannot tell "it idled out" from "it
+  crashed" from "somebody stopped it". The agent's log says; the wire does
+  not.
+- **`turn_running` is one bit** and a turn has more state than that (which
+  step, how long, whether it is parked). A frontend that reattaches mid-turn
+  shows the tail of the transcript and a spinner, which is honest and thin.
+- **The idle timeout is not extended by an attached client that is merely
+  watching.** It does not need to be — an attached client makes the session
+  not idle at all — but a client that attaches, sits, and drops in a loop
+  keeps resetting the clock, and nothing bounds that.

@@ -154,6 +154,24 @@ fn list_remote_sessions(endpoint: &str) -> Result<Vec<ResumeEntry>, String> {
     Ok(entries)
 }
 
+/// The agent hosting `session` on this machine right now, if one is.
+///
+/// The other half of the `live` flag: a listing can say a session is live,
+/// and this is what turns that into something to connect to. Reading the
+/// registry also prunes entries that no longer answer, so a `None` here means
+/// "not reachable", not merely "no file".
+///
+/// Blocking, and briefly — the registry dials each candidate with a short
+/// timeout. Frontends call it on the thread that opens a session, which is
+/// already the thread that dials a bridge.
+pub fn find_live_session(session: &str) -> Option<dvadva_agent::live::LiveSession> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    rt.block_on(Registry::shared().find(session))
+}
+
 fn list_all_sessions() -> Result<Vec<ResumeEntry>, String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

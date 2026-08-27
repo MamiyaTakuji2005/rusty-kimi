@@ -401,6 +401,53 @@ async fn attach_starts_an_agent_and_names_the_session_it_got() {
 }
 
 #[tokio::test]
+async fn a_supervised_agent_is_given_an_idle_policy_it_did_not_ask_for() {
+    // The daemon is where agents accumulate — one per session anybody ever
+    // attaches to — so the timeout is its decision by default rather than
+    // only in the absence of one.
+    let share = tempfile::tempdir().expect("temp share dir");
+    let config = remote_daemon::Config::new(mock_agent())
+        .with_share_dir(Some(share.path().to_path_buf()))
+        .with_agent_idle_timeout(900);
+    let port = remote_with(config).await;
+
+    let (mut conn, _) = attach(port, None).await;
+    let argv: Vec<String> = ask(&mut conn, "argv")
+        .await
+        .split('\u{1f}')
+        .map(str::to_string)
+        .collect();
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--idle-timeout")
+        .unwrap_or_else(|| panic!("no idle policy in {argv:?}"));
+    assert_eq!(argv.get(at + 1).map(String::as_str), Some("900"));
+
+    send_line(&mut conn.0, "stop").await;
+}
+
+#[tokio::test]
+async fn a_caller_that_states_its_own_idle_policy_keeps_it() {
+    let share = tempfile::tempdir().expect("temp share dir");
+    let config = remote_daemon::Config::new(mock_agent())
+        .with_share_dir(Some(share.path().to_path_buf()))
+        .with_agent_idle_timeout(900);
+    let port = remote_with(config).await;
+
+    let (mut conn, _) = attach_with(port, None, vec!["--idle-timeout".into(), "60".into()]).await;
+    let argv = ask(&mut conn, "argv").await;
+    assert_eq!(
+        argv.split('\u{1f}')
+            .filter(|arg| *arg == "--idle-timeout")
+            .count(),
+        1,
+        "the daemon must not argue with a caller who stated one: {argv}"
+    );
+
+    send_line(&mut conn.0, "stop").await;
+}
+
+#[tokio::test]
 async fn a_client_that_leaves_does_not_take_the_agent_with_it() {
     // The phase in one test: attach, walk away, come back, find the same
     // process still holding the session.

@@ -136,4 +136,6 @@ pub mod statuses {
     pub const CANCELLED: &str = "cancelled";
     pub const MAX_STEPS_REACHED: &str = "max_steps_reached";
     pub const STEERED: &str = "steered";
+    /// Answer to `shutdown`: the ask was taken, and the stream ends next.
+    pub const STOPPING: &str = "stopping";
 }

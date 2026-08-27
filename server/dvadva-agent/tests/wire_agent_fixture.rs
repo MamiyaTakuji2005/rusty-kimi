@@ -117,6 +117,31 @@ impl ChatProvider for ScriptedProvider {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NoParams {}
 
+/// A tool that blocks until the test releases it, so a turn can be held in
+/// the *working* state for exactly as long as a test needs. A sleep would
+/// have been a race with whatever the test is timing; this is a handshake.
+struct WaitsToBeReleased {
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl CallableTool2 for WaitsToBeReleased {
+    type Params = NoParams;
+
+    fn name(&self) -> &str {
+        "waits"
+    }
+
+    fn description(&self) -> &str {
+        "Does nothing, slowly."
+    }
+
+    async fn call_typed(&self, _params: NoParams) -> ToolReturnValue {
+        self.release.notified().await;
+        tool_ok("done waiting", "done waiting", "")
+    }
+}
+
 /// A tool that parks the turn on an approval, so a test can attach a client
 /// to an agent that is waiting for an answer.
 struct AsksFirst {
@@ -150,6 +175,10 @@ impl CallableTool2 for AsksFirst {
 
 pub struct Fixture {
     pub server: Arc<WireServer>,
+    /// Lets the `waits` tool finish, ending a turn a test has been holding
+    /// open (`notify_one`, so releasing before the tool gets there is not a
+    /// race). Ignored by every agent that does not call it.
+    pub release: Arc<tokio::sync::Notify>,
     _fixture: RuntimeFixture,
     _tmp: TempDir,
 }
@@ -180,6 +209,23 @@ pub fn asking_agent() -> Fixture {
     )
 }
 
+/// An agent whose first turn calls a tool that does not return until the
+/// test says so, and whose second turn just talks. For anything that has to
+/// observe an agent while it is genuinely working.
+pub fn working_agent() -> Fixture {
+    let mut call = ToolCall::new("call-1", "waits");
+    call.function.arguments = Some("{}".to_string());
+    build(
+        vec![
+            vec![StreamedMessagePart::from(call)],
+            vec![StreamedMessagePart::from(ContentPart::Text(TextPart::new(
+                "done",
+            )))],
+        ],
+        true,
+    )
+}
+
 pub fn build(turns: Vec<Vec<StreamedMessagePart>>, yolo: bool) -> Fixture {
     let fixture = RuntimeFixture::new();
     let mut runtime = fixture.runtime.clone();
@@ -196,9 +242,13 @@ pub fn build(turns: Vec<Vec<StreamedMessagePart>>, yolo: bool) -> Fixture {
     };
     *runtime.llm.try_write().expect("llm lock uncontended") = Some(Arc::new(llm));
 
+    let release = Arc::new(tokio::sync::Notify::new());
     let mut toolset = KimiToolset::new();
     toolset.add(Arc::new(AsksFirst {
         approval: runtime.approval.clone(),
+    }));
+    toolset.add(Arc::new(WaitsToBeReleased {
+        release: Arc::clone(&release),
     }));
 
     let tmp = TempDir::new().expect("temp dir");
@@ -211,6 +261,7 @@ pub fn build(turns: Vec<Vec<StreamedMessagePart>>, yolo: bool) -> Fixture {
     let soul = KimiSoul::new(agent, Context::new(tmp.path().join("history.jsonl")));
     Fixture {
         server: Arc::new(WireServer::new(Arc::new(soul))),
+        release,
         _fixture: fixture,
         _tmp: tmp,
     }

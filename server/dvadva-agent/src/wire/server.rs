@@ -76,6 +76,12 @@ struct SessionCore {
     /// Which client registered each external tool. Only that client can
     /// service a call to it, so the registration leaves with it.
     tool_owner: tokio::sync::Mutex<HashMap<String, ConnId>>,
+    /// The session has been asked to end — by an attached client's
+    /// `shutdown`, by a signal, or by an idle timeout. Session-wide, because
+    /// what it ends is the *process*: on the listening transport a client
+    /// leaving is a detach, so somebody has to be able to say the other
+    /// thing.
+    stop: CancellationToken,
 }
 
 pub struct WireServer {
@@ -93,6 +99,7 @@ impl WireServer {
                 pending: tokio::sync::Mutex::new(HashMap::new()),
                 cancel_token: tokio::sync::Mutex::new(None),
                 tool_owner: tokio::sync::Mutex::new(HashMap::new()),
+                stop: CancellationToken::new(),
             }),
         }
     }
@@ -137,6 +144,31 @@ impl WireServer {
     /// directory.
     pub fn session_id(&self) -> String {
         self.core.soul.runtime().session.id.clone()
+    }
+
+    /// The token that ends the session, for a transport that has to watch it.
+    ///
+    /// Cancelled by an attached client's `shutdown`, and cancellable by
+    /// whoever owns the process — a signal handler, an idle timeout. Over
+    /// stdio the pipe closing does the same job, which is why the token is
+    /// the listener's business and not the protocol's.
+    pub fn stop_token(&self) -> CancellationToken {
+        self.core.stop.clone()
+    }
+
+    /// Whether this session has nothing left to do and nobody watching.
+    ///
+    /// Two states qualify, and the second is the interesting one. No clients
+    /// and no turn is plainly idle. No clients and a turn *parked on a
+    /// request* is idle too: a turn waiting for an approval is waiting for a
+    /// person, and with nothing attached there is no person to wait for.
+    /// Excluding it would mean the one way to strand an agent forever is the
+    /// one thing this phase exists to make safe — walking away mid-turn.
+    ///
+    /// A turn that is actually working is never idle, however long it takes
+    /// and however alone it is. That is the whole point of detaching.
+    pub async fn is_idle(&self) -> bool {
+        self.core.is_idle().await
     }
 
     /// Which directory this session works in, for a listing that wants to
@@ -284,6 +316,15 @@ impl SessionCore {
 
         self.fanout.shutdown();
     }
+
+    async fn is_idle(&self) -> bool {
+        if !self.fanout.is_empty() {
+            return false;
+        }
+        let turn_running = self.cancel_token.lock().await.is_some();
+        let parked = !self.pending.lock().await.is_empty();
+        !turn_running || parked
+    }
 }
 
 /// One attached client, for as long as it is attached.
@@ -322,7 +363,14 @@ impl Connection {
         let mut buf = Vec::new();
         loop {
             buf.clear();
-            let n = reader.read_until(b'\n', &mut buf).await?;
+            // A stopping session cuts its clients loose rather than waiting
+            // for each of them to hang up: `shutdown` is an instruction, and
+            // a detached agent's clients may all be gone already.
+            let read = tokio::select! {
+                _ = self.core.stop.cancelled() => break,
+                read = reader.read_until(b'\n', &mut buf) => read,
+            };
+            let n = read?;
             if n == 0 {
                 break;
             }
@@ -411,6 +459,7 @@ impl Connection {
                 "cancel" => self.handle_cancel(msg).await,
                 "replay" => self.handle_replay(msg).await,
                 "steer" => self.handle_steer(msg).await,
+                "shutdown" => self.handle_shutdown(msg).await,
                 _ => {
                     if let Some(id) = msg.id.clone() {
                         self.core.send_error(
@@ -521,6 +570,12 @@ impl Connection {
                 "version": VERSION,
                 "model": self.core.soul.model_name(),
             },
+            // Which session this connection landed on. The agent is the only
+            // one who can answer for a session it minted itself, and a client
+            // that means to come back after a detach has to know the id to
+            // come back *to*. Cheap enough to send always, so a resumed
+            // session and a fresh one are told the same way.
+            "session": self.core.soul.runtime().session.id.clone(),
             "slash_commands": slash_commands,
             // What this build can do beyond the shapes a 1.0 client knows.
             // Additive by construction: a client that does not read it sees
@@ -731,6 +786,12 @@ impl Connection {
                     "status": status,
                     "events": caught_up.events,
                     "requests": caught_up.requests,
+                    // Whether a turn is in flight *now*, which the history
+                    // cannot say: a client attaching mid-turn has replayed
+                    // a `TurnBegin` with no end and cannot tell that from an
+                    // interrupted one. Without it the reconnecting frontend
+                    // goes to "ready" and offers a prompt the agent refuses.
+                    "turn_running": caught_up.turn_running,
                 }),
             };
             core.fanout
@@ -788,6 +849,36 @@ impl Connection {
             self.id,
             serde_json::to_value(response).unwrap_or(Value::Null),
         );
+    }
+
+    /// End the session, at an attached client's request.
+    ///
+    /// Not the same ask as `cancel`, which stops a turn and leaves the agent
+    /// there for the next one. This is how a detached agent is asked to go —
+    /// the counterpart to a signal, for a client that has no way to send one
+    /// (a GUI on another machine, reaching the agent through two daemons).
+    ///
+    /// Any attached client may ask. There is no ownership to appeal to: a
+    /// session is not a client's, and the one frontend that spawned an agent
+    /// may well be the one that is already gone.
+    ///
+    /// The ack goes out before the token is cancelled, and `Fanout::detach`
+    /// drains a connection's queue rather than dropping it, so the caller
+    /// sees its answer and then the end of the stream — in that order.
+    async fn handle_shutdown(&mut self, msg: JsonRpcMessage) {
+        if let Some(id) = msg.id.clone() {
+            let response = JsonRpcSuccessResponse {
+                jsonrpc: "2.0",
+                id,
+                result: json!({"status": statuses::STOPPING}),
+            };
+            self.core.fanout.send_to(
+                self.id,
+                serde_json::to_value(&response).unwrap_or(Value::Null),
+            );
+        }
+        info!("{} asked the session to stop", self.id);
+        self.core.stop.cancel();
     }
 
     async fn handle_cancel(&mut self, msg: JsonRpcMessage) {
@@ -924,6 +1015,9 @@ struct CaughtUp {
     /// The requests that were already awaiting an answer when the catch-up
     /// began. Skipped by the file walk, because they are not history yet.
     still_open: Vec<PendingRequest>,
+    /// Whether a turn was in flight when the catch-up ended — the present
+    /// tense the replayed past cannot express.
+    turn_running: bool,
 }
 
 /// Stream one client the session's recorded past, then release whatever
@@ -940,6 +1034,14 @@ async fn replay_to(
     // from the file and delivered live.
     let still_open = core.begin_catch_up(conn).await;
     let open_ids: Vec<String> = still_open.iter().map(|req| req.id().to_string()).collect();
+
+    // Read the present tense at the same instant, for the same reason. A turn
+    // that ends *during* the file walk is reported as running and its
+    // `TurnEnd` is staged, so the client is told the truth and then told it
+    // changed. Reading it afterwards would leave the opposite ordering, where
+    // the client is told "quiet" and the staged `TurnEnd` of a turn it never
+    // saw begin arrives behind that.
+    let turn_running = core.cancel_token.lock().await.is_some();
 
     let wire_file = core.soul.runtime().session.wire_file();
     let mut events: u64 = 0;
@@ -1014,6 +1116,7 @@ async fn replay_to(
         events,
         requests,
         still_open,
+        turn_running,
     }
 }
 

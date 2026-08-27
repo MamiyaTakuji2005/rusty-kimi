@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use std::collections::HashMap;
 
@@ -124,6 +125,13 @@ pub struct Cli {
         help = "File holding the secret an attaching client must present. Created on first use. Default: attach.token in the session directory."
     )]
     listen_token_file: Option<PathBuf>,
+
+    #[arg(
+        long = "idle-timeout",
+        value_name = "SECONDS",
+        help = "Stop after this many seconds with no client attached and no turn to run. 0 disables. Default: never stop on its own."
+    )]
+    idle_timeout: Option<u64>,
 
     #[arg(
         long = "agent",
@@ -300,7 +308,16 @@ pub async fn run() -> Result<()> {
         // Clients come and go; the process outlives them.
         Some(addr) => {
             instance
-                .run_wire_listening(addr, cli.listen_token_file.clone())
+                .run_wire_listening(
+                    addr,
+                    cli.listen_token_file.clone(),
+                    // 0 spells "never" as well as omitting the flag does, so
+                    // a supervisor with a configurable default can pass the
+                    // number it has without special-casing the off switch.
+                    cli.idle_timeout
+                        .filter(|seconds| *seconds > 0)
+                        .map(Duration::from_secs),
+                )
                 .await?
         }
     }
@@ -355,6 +372,12 @@ async fn validate_cli_args(cli: &Cli) -> Result<()> {
     // read as "this stdio session is protected", which it is not.
     if cli.listen_token_file.is_some() && cli.listen.is_none() {
         anyhow::bail!("Cannot use --listen-token-file without --listen.");
+    }
+
+    // Same reasoning: an stdio session's lifetime is its pipe's, so a timeout
+    // there would either do nothing or contradict the transport.
+    if cli.idle_timeout.is_some() && cli.listen.is_none() {
+        anyhow::bail!("Cannot use --idle-timeout without --listen.");
     }
 
     if let Some(session_id) = cli.session_id.as_ref() {

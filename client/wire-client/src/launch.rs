@@ -42,6 +42,28 @@ pub struct AgentLaunch {
     pub remote: Option<String>,
 }
 
+/// The session id in agent arguments, if they name one.
+///
+/// The **attach key** and the agent's `--session` are two different things
+/// that happen to be the same string on a resume: one says which live agent to
+/// look for, the other is what a cold start should be told to open. The daemon
+/// deliberately does not derive one from the other
+/// (`remote/dvadva-bridge/src/proto.rs`), so a frontend that generates
+/// `--session` has to read its own argv to know what to attach to — otherwise
+/// `--session abc` starts a *second* agent on a session that already has one.
+pub fn session_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--session=") {
+            return Some(value.to_string());
+        }
+        if arg == "--session" || arg == "-S" {
+            return iter.next().cloned();
+        }
+    }
+    None
+}
+
 impl AgentLaunch {
     /// Resolve from this process's arguments (`argv[1..]`) and the
     /// environment. Returns the usage error for a malformed flag.
@@ -200,5 +222,27 @@ mod tests {
     fn dangling_remote_flag_is_a_usage_error() {
         let err = AgentLaunch::from_args(vec!["--remote".into()], None, None).unwrap_err();
         assert!(err.contains("--remote"));
+    }
+
+    #[test]
+    fn the_attach_key_is_read_out_of_the_agent_arguments() {
+        // Every spelling, because a person types these and a frontend's
+        // find-or-start turns on getting one.
+        assert_eq!(
+            session_arg(&["--session".into(), "abc".into()]),
+            Some("abc".to_string())
+        );
+        assert_eq!(
+            session_arg(&["-w".into(), "/p".into(), "-S".into(), "abc".into()]),
+            Some("abc".to_string())
+        );
+        assert_eq!(
+            session_arg(&["--session=abc".into()]),
+            Some("abc".to_string())
+        );
+        // A new session names none, and must not be handed one by accident:
+        // that is how a caller ends up attached to somebody else's agent.
+        assert_eq!(session_arg(&["-w".into(), "/p".into()]), None);
+        assert_eq!(session_arg(&["--session".into()]), None);
     }
 }

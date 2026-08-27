@@ -29,7 +29,7 @@ pub mod tunnel;
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::net::Shutdown;
+use std::net::{Shutdown, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -86,6 +86,43 @@ pub struct WireClient {
     transport: Transport,
     writer_tx: Option<Sender<String>>,
     next_id: AtomicU64,
+}
+
+/// The result of [`WireClient::attach_tcp`]: a connected client, plus the two
+/// things only the daemon's ack could tell us.
+pub struct Attached {
+    pub client: WireClient,
+    pub inbound: Receiver<Inbound>,
+    /// Which session this connection landed on, when the daemon named one.
+    /// For a caller that asked for a *new* session this is the only place
+    /// the id appears before the wire starts; the agent repeats it in the
+    /// `initialize` result, which is where a local session learns its own.
+    pub session: Option<String>,
+    /// Whether the daemon actually attached, rather than falling back to a
+    /// `spawn`. False means this connection is the agent's whole life again,
+    /// so a frontend must not tell anybody they can close the window and
+    /// come back.
+    pub supervised: bool,
+}
+
+/// A bridge connection whose one header frame has been acknowledged.
+struct Dialled {
+    stream: TcpStream,
+    reader: BufReader<TcpStream>,
+    reply: bridge::BridgeReply,
+}
+
+/// Whether a refusal is a daemon that does not know the op, rather than one
+/// that refused it on the merits.
+///
+/// Matching the daemon's own words, which is normally a bad idea and is safe
+/// exactly here: the only builds that produce it are ones already released,
+/// whose text can no longer change. `proto::decode` fails before the daemon
+/// has looked at the request at all, so `bad bridge frame` is the frame layer
+/// speaking — a genuine refusal of an `attach` (no such directory, no API
+/// key) comes from the op and reads nothing like it.
+fn is_unknown_op(err: &std::io::Error) -> bool {
+    err.to_string().contains("bad bridge frame")
 }
 
 /// What a client is connected to — how it shuts down depends on this.
@@ -152,10 +189,123 @@ impl WireClient {
     where
         W: Fn() + Send + 'static,
     {
+        let dialled = Self::dial(endpoint, &bridge::spawn_header(agent_args), "spawn")?;
+        Self::over_bridge(dialled.stream, dialled.reader, wake)
+    }
+
+    /// Attach to the agent hosting `session` on the daemon at `endpoint`,
+    /// having it start one if none is live.
+    ///
+    /// The difference from [`Self::connect_tcp`] is lifetime, not transport.
+    /// A `spawn` connection *is* the agent's life: dropping it kills the
+    /// agent, which is right for a one-shot run and wrong for a window a
+    /// person closes. An attached connection dropping is a detach — the turn
+    /// keeps running, and coming back reaches the same process.
+    ///
+    /// Pass `None` for a session that does not exist yet; the daemon's ack
+    /// names the one the agent minted, which is the only way to learn it
+    /// before the wire starts and the only thing a later reconnect can use.
+    ///
+    /// Falls back to `spawn` against a daemon too old to know the op, so
+    /// upgrading a frontend does not mean upgrading every remote first.
+    /// [`Attached::supervised`] says which happened, because a connection
+    /// that cannot be detached from must not be offered as one.
+    pub fn attach_tcp<W>(
+        endpoint: &str,
+        session: Option<&str>,
+        agent_args: &[String],
+        wake: W,
+    ) -> std::io::Result<Attached>
+    where
+        W: Fn() + Send + 'static,
+    {
+        let header = bridge::attach_header(session, agent_args);
+        let (dialled, supervised) = match Self::dial(endpoint, &header, "attach") {
+            Ok(dialled) => (dialled, true),
+            // A daemon too old for the op cannot decode the frame at all and
+            // says so before doing anything, so there is nothing to undo:
+            // dial again and ask for the one op it does have.
+            Err(err) if is_unknown_op(&err) => (
+                Self::dial(endpoint, &bridge::spawn_header(agent_args), "spawn")?,
+                false,
+            ),
+            Err(err) => return Err(err),
+        };
+        let session = dialled
+            .reply
+            .session
+            .clone()
+            .or_else(|| session.map(String::from));
+        let (client, inbound) = Self::over_bridge(dialled.stream, dialled.reader, wake)?;
+        Ok(Attached {
+            client,
+            inbound,
+            session,
+            supervised,
+        })
+    }
+
+    /// Attach to a listening agent on *this* machine, from its live-session
+    /// registry entry (`dvadva_agent::live`).
+    ///
+    /// No daemon in the path: the entry names an address and a token file,
+    /// which is everything the agent's own handshake asks for. This is what
+    /// makes a local session's `live` flag actionable — without it a live
+    /// local session could be seen and not joined.
+    pub fn attach_live<W>(
+        entry: &dvadva_agent::live::LiveSession,
+        wake: W,
+    ) -> std::io::Result<(Self, Receiver<Inbound>)>
+    where
+        W: Fn() + Send + 'static,
+    {
+        let addr = entry
+            .socket_addr()
+            .ok_or_else(|| std::io::Error::other(format!("`{}` is not an address", entry.addr)))?;
+        let token = std::fs::read_to_string(&entry.token_file).map_err(|err| {
+            std::io::Error::other(format!(
+                "cannot read the attach token in {}: {err}",
+                entry.token_file.display()
+            ))
+        })?;
+
+        let mut stream = TcpStream::connect_timeout(&addr, bridge::CONNECT_TIMEOUT)?;
+        let _ = stream.set_nodelay(true);
+        let handshake = json!({"auth": token.trim(), "client": "wire-client"}).to_string();
+        stream.write_all(handshake.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+
+        // One bounded line, then the wire — the same shape as the bridge
+        // handshake, for the same reason: an agent that accepts and never
+        // answers must not freeze the thread that draws a UI.
+        let ack_handle = stream.try_clone()?;
+        ack_handle.set_read_timeout(Some(bridge::HANDSHAKE_TIMEOUT))?;
+        let mut reader = BufReader::new(ack_handle);
+        let ack = bridge::read_frame_line(&mut reader)
+            .map_err(|err| std::io::Error::other(format!("agent handshake failed: {err}")))?;
+        reader.get_ref().set_read_timeout(None)?;
+        let ack: Value = serde_json::from_str(&ack)
+            .map_err(|err| std::io::Error::other(format!("bad agent handshake: {err}")))?;
+        if ack.get("auth").and_then(Value::as_str) != Some("ok") {
+            let reason = ack
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("the agent refused the attach token");
+            return Err(std::io::Error::other(format!(
+                "the agent for session {} refused us: {reason}",
+                entry.session
+            )));
+        }
+
+        Self::over_bridge(stream, reader, wake)
+    }
+
+    /// Dial a bridge daemon, send one header frame, and read its ack.
+    fn dial(endpoint: &str, header: &str, op: &str) -> std::io::Result<Dialled> {
         let mut stream =
             bridge::connect(endpoint, bridge::CONNECT_TIMEOUT).map_err(std::io::Error::other)?;
 
-        let header = bridge::spawn_header(agent_args);
         stream.write_all(header.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()?;
@@ -174,18 +324,37 @@ impl WireClient {
         let reply = bridge::decode_reply(&ack)
             .map_err(|err| std::io::Error::other(format!("bad bridge handshake: {err}")))?;
         if !reply.ok {
-            let reason = reply.error.unwrap_or_else(|| "bridge refused spawn".into());
+            let reason = reply
+                .error
+                .unwrap_or_else(|| format!("bridge refused {op}"));
             return Err(std::io::Error::other(format!(
-                "bridge `{endpoint}` refused spawn: {reason}"
+                "bridge `{endpoint}` refused {op}: {reason}"
             )));
         }
+        Ok(Dialled {
+            stream,
+            reader,
+            reply,
+        })
+    }
 
-        // The ack read may have buffered early agent output; the BufReader
-        // itself becomes the reader so nothing is lost.
+    /// Wire up a stream whose handshake is already done, whichever kind it
+    /// was. The reader is the one the ack was read from: it may have
+    /// buffered agent output pipelined behind that line, and dropping it
+    /// would drop those bytes.
+    fn over_bridge<W>(
+        stream: TcpStream,
+        reader: BufReader<TcpStream>,
+        wake: W,
+    ) -> std::io::Result<(Self, Receiver<Inbound>)>
+    where
+        W: Fn() + Send + 'static,
+    {
         let reader: Box<dyn BufRead + Send> = Box::new(reader);
         let writer: Box<dyn Write + Send> = Box::new(stream.try_clone()?);
-        // Half-close on shutdown: the daemon turns it into the agent's
-        // stdin EOF, which is how the agent is asked to exit.
+        // Half-close on shutdown: on a `spawn` connection the daemon turns it
+        // into the agent's stdin EOF (the graceful "please exit"); on an
+        // attached one it is simply this client leaving.
         let shutdown_handle = stream;
         let half_close = Box::new(move || {
             let _ = shutdown_handle.shutdown(Shutdown::Write);
@@ -601,6 +770,33 @@ mod tests {
         addr
     }
 
+    /// Same, but answering every connection rather than one — for the cases
+    /// where the client dials twice (an `attach` refused by a daemon that has
+    /// no such op, then the `spawn` it falls back to).
+    fn fake_daemon_serving<F>(handler: F) -> String
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::Builder::new()
+            .name("fake-bridge".into())
+            .spawn(move || {
+                for sock in listener.incoming() {
+                    let Ok(sock) = sock else { break };
+                    let mut writer = sock.try_clone().unwrap();
+                    let mut reader = BufReader::new(sock);
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).is_err() {
+                        continue;
+                    }
+                    let _ = writeln!(writer, "{}", handler(header.trim_end()));
+                }
+            })
+            .unwrap();
+        addr
+    }
+
     /// A fake daemon that runs an arbitrary script against the connection's
     /// reader and writer, for the cases a one-shot reply cannot express
     /// (a trailer after the ack, a peer that never answers).
@@ -697,6 +893,74 @@ mod tests {
         // Shutdown half-closes; nothing may panic on a closed stream.
         client.shutdown();
         assert!(wake_count.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn attach_tcp_names_the_session_the_daemon_gave_it() {
+        // The case a reconnect depends on: the caller asked for a *new*
+        // session, and the ack is the only place its id appears before the
+        // wire starts.
+        let endpoint = fake_daemon(|header| {
+            assert!(header.contains(r#""op":"attach""#), "{header}");
+            r#"BRIDGE1 {"ok":true,"session":"minted-by-the-agent"}"#.to_string()
+        });
+        let attached = WireClient::attach_tcp(&endpoint, None, &[], || {}).expect("attach");
+        assert_eq!(attached.session.as_deref(), Some("minted-by-the-agent"));
+        assert!(attached.supervised);
+    }
+
+    #[test]
+    fn attach_tcp_keeps_the_session_it_asked_for_when_the_ack_is_silent() {
+        // A daemon that acknowledges without naming one: the caller already
+        // knew, and losing the id would cost the reconnect its target.
+        let endpoint = fake_daemon(|_| r#"BRIDGE1 {"ok":true}"#.to_string());
+        let attached =
+            WireClient::attach_tcp(&endpoint, Some("known-already"), &[], || {}).expect("attach");
+        assert_eq!(attached.session.as_deref(), Some("known-already"));
+    }
+
+    #[test]
+    fn attach_tcp_falls_back_to_spawn_against_a_daemon_that_has_no_attach() {
+        // A frame-protocol 1.0 daemon cannot decode the op at all. Upgrading
+        // a frontend must not require upgrading every remote first — but the
+        // session that results is not detachable, and says so.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let endpoint = fake_daemon_serving(move |header| {
+            recorder.lock().unwrap().push(header.to_string());
+            if header.contains(r#""op":"attach""#) {
+                r#"BRIDGE1 {"ok":false,"error":"bad bridge frame: unknown variant `attach`"}"#
+                    .to_string()
+            } else {
+                r#"BRIDGE1 {"ok":true}"#.to_string()
+            }
+        });
+
+        let attached = WireClient::attach_tcp(&endpoint, Some("s"), &[], || {}).expect("attach");
+
+        assert!(
+            !attached.supervised,
+            "a spawn fallback must not be sold as an attach"
+        );
+        let headers = seen.lock().unwrap().clone();
+        assert_eq!(headers.len(), 2, "attach then spawn: {headers:?}");
+        assert!(headers[1].contains(r#""op":"spawn""#), "{headers:?}");
+    }
+
+    #[test]
+    fn a_refusal_on_the_merits_is_not_mistaken_for_an_old_daemon() {
+        // The fallback must not swallow a real diagnosis. A daemon that
+        // understood the op and refused it says why, and that reason is what
+        // the user needs to read.
+        let endpoint = fake_daemon(|_| {
+            r#"BRIDGE1 {"ok":false,"error":"the agent exited before it started listening (exit status: 2)"}"#
+                .to_string()
+        });
+        let err = match WireClient::attach_tcp(&endpoint, None, &[], || {}) {
+            Ok(_) => panic!("attach must be refused"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("exit status: 2"), "{err}");
     }
 
     #[test]

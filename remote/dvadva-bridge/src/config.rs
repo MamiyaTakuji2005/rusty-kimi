@@ -35,7 +35,20 @@ pub struct ServeConfig {
     pub agent_bin: Option<String>,
     /// Work directory for agents whose spawn args name none.
     pub work_dir: Option<String>,
+    /// How long a supervised agent may sit with nobody attached and nothing
+    /// to do before it stops itself, in seconds. `0` disables it. Absent
+    /// means [`DEFAULT_AGENT_IDLE_TIMEOUT`], because the daemon is where
+    /// agents accumulate: it starts one per session anybody ever attaches
+    /// to, and nothing else would ever end them.
+    pub agent_idle_timeout: Option<u64>,
 }
+
+/// What a supervised agent gets when the config names nothing. An hour is
+/// long enough that stepping away and coming back rejoins the same process,
+/// and short enough that a week of sessions does not become a week of
+/// processes. Nothing is lost when it fires: the session's transcript and
+/// context are on disk, and attaching again starts a fresh agent on them.
+pub const DEFAULT_AGENT_IDLE_TIMEOUT: u64 = 3600;
 
 /// The file as the daemon sees it. `[[remotes]]` is the frontends' half and
 /// is ignored here (serde skips unknown fields by default).
@@ -96,6 +109,16 @@ mod tests {
         assert_eq!(config.listen.as_deref(), Some("127.0.0.1:9100"));
         assert_eq!(config.work_dir.as_deref(), Some("/home/kimi"));
         assert_eq!(config.agent_bin, None);
+        assert_eq!(config.agent_idle_timeout, None, "unset means the default");
+    }
+
+    #[test]
+    fn the_idle_timeout_can_be_set_and_can_be_switched_off() {
+        let set = parse_serve("[serve]\nagent_idle_timeout = 120").expect("parses");
+        assert_eq!(set.agent_idle_timeout, Some(120));
+        // Zero is a real answer, and a different one from "unset".
+        let off = parse_serve("[serve]\nagent_idle_timeout = 0").expect("parses");
+        assert_eq!(off.agent_idle_timeout, Some(0));
     }
 
     #[test]

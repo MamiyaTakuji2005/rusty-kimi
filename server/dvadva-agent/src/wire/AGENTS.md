@@ -104,6 +104,47 @@
   failure logs at debug (`SilentClose`); everything else still warns. A
   listing must not fill an agent's log.
 
+## How an Agent That Outlives Its Clients Ever Ends
+
+- **One token, three ways in.** `WireServer::stop_token` is the session's
+  "the process is done", and the listener watches it: a signal, the wire's
+  `shutdown` method, and the idle watch all cancel the same one. Over stdio
+  the pipe closing already does that job, which is why the token belongs to
+  the transport and not to the protocol.
+- **`shutdown` is not `cancel`.** `cancel` stops a turn and leaves the agent
+  for the next one; `shutdown` ends the process. Any attached client may ask,
+  with no ownership to appeal to — a session is not a client's, and the
+  frontend that spawned the agent is quite likely the one already gone. It is
+  the only ending available to a client two daemons away, which cannot signal
+  the process at all.
+- **The ack goes out before the token is cancelled**, and `Fanout::detach`
+  drains a queue rather than dropping it, so the caller sees its answer and
+  *then* the end of the stream. A client has to be able to tell "it is going"
+  from "it fell over".
+- **Idle is a conjunction, and the second half of it is the interesting
+  one.** No clients and no turn is plainly idle. No clients and a turn
+  *parked on a request* is idle too: an approval waits for a person, and with
+  nothing attached there is no person coming. Excluding it would mean the one
+  way to strand an agent forever is walking away mid-turn — the exact thing
+  detaching exists to make safe. A turn that is *working* is never idle,
+  however long it takes and however alone it is.
+- **`--idle-timeout` is off by default and the supervisor passes one.** A
+  person who ran `--listen` by hand owns the process; `dvadva-bridge remote`
+  owns the ones it starts, and it is where they accumulate.
+- **What a returning client is told.** `initialize` names the `session` (the
+  only way a client learns the id of a session the agent minted, and the only
+  thing a reconnect can ask for), and `replay` reports `turn_running` — the
+  present tense the replayed past cannot express, since a `TurnBegin` with no
+  end reads the same whether the turn is live or was interrupted. The flag is
+  read at the same instant as the catch-up snapshot, so a turn that ends
+  during a long file walk is reported as running and its `TurnEnd` is staged:
+  the client is told the truth and then told it changed.
+- **A client that did not start a turn still needs it to end.** Its `prompt`
+  answer goes to the asker alone, so a reattached client watching an older
+  turn has nothing coming — the `TurnEnd` *event* is the only thing that can
+  bring it back to ready. Both frontends act on it when they have no prompt
+  of their own in flight.
+
 ## Merge Behavior
 
 - `WireSoulSide` merges adjacent `ContentPart`, `ToolCall`, and `ToolCallPart` via `merge_in_place`.

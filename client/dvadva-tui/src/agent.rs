@@ -6,6 +6,7 @@
 //! approval reverse-requests are collected for the UI to answer; `Esc`
 //! cancels.
 
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use serde_json::{Value, json};
 use dvadva_agent::wire::protocol::WIRE_PROTOCOL_VERSION;
 use dvadva_agent::wire::{ApprovalResponse, ApprovalResponseKind, WireMessage};
 
-use wire_client::launch::AgentLaunch;
+use wire_client::launch::{AgentLaunch, session_arg};
 use wire_client::remotes::Remote;
 use wire_client::transcript::{ApprovalInfo, Block, Transcript};
 use wire_client::{Inbound, WireClient};
@@ -25,7 +26,20 @@ pub enum Phase {
     Replaying,
     Ready,
     Running,
+    /// The connection ended and there is a way back to the agent. Not an
+    /// ending: the agent keeps its turn, its context and its pid, and `Ctrl+R`
+    /// rejoins it.
+    Detached(String),
     Failed(String),
+}
+
+/// How a detached session gets back to its agent: an `attach` through the
+/// bridge daemon it came in by, which finds the live agent or starts one on
+/// the same session files.
+#[derive(Clone)]
+struct WayBack {
+    endpoint: String,
+    args: Vec<String>,
 }
 
 /// A live approval waiting for an answer: `(rpc_id, request_id)`.
@@ -43,31 +57,69 @@ pub struct AgentSession {
     prompt_id: Option<String>,
     /// Approvals awaiting a decision, oldest first.
     pub approvals: Vec<PendingApproval>,
+    /// Which session on the agent's machine this is, once the agent or the
+    /// daemon has said. Without it a reconnect has nothing to ask for.
+    session_id: Option<String>,
+    /// How to get back after a detach, or `None` for a locally spawned agent
+    /// whose life is this process's pipe.
+    way_back: Option<WayBack>,
+    /// The repaint hook, kept because a reconnect builds a whole new client
+    /// and every client needs one.
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl AgentSession {
     /// Start a session per the launch configuration: spawn a local agent,
-    /// or connect through a bridge daemon when `--remote` named one.
+    /// or attach through a bridge daemon when `--remote` named one.
     ///
     /// `remote` is what `launch.remote` resolved to — a configured entry in
     /// `~/.kimi/bridge.toml` or a bare `host:port` — so the endpoint dialled
     /// here is already the real address.
+    ///
+    /// The remote path *attaches*: quitting leaves the agent running, and the
+    /// same command run again rejoins it. A daemon too old for the op falls
+    /// back to a spawn, and then quitting means what it used to.
     pub fn launch(
         launch: &AgentLaunch,
         remote: Option<&Remote>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
-        let (client, inbound) = match remote {
-            Some(remote) => WireClient::connect_tcp(&remote.endpoint, &launch.agent_args, wake)
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let session = session_arg(&launch.agent_args);
+        let (client, inbound, session_id, way_back) = match remote {
+            Some(remote) => {
+                let nudge = Arc::clone(&wake);
+                let attached = WireClient::attach_tcp(
+                    &remote.endpoint,
+                    session.as_deref(),
+                    &launch.agent_args,
+                    move || nudge(),
+                )
                 .map_err(|err| {
                     let name = &remote.name;
                     format!("remote bridge `{name}`: {err}")
-                })?,
+                })?;
+                let way_back = attached.supervised.then(|| WayBack {
+                    endpoint: remote.endpoint.clone(),
+                    args: launch.agent_args.clone(),
+                });
+                (
+                    attached.client,
+                    attached.inbound,
+                    attached.session,
+                    way_back,
+                )
+            }
             None => {
                 // Plain `spawn`: a terminal frontend shares its console with
                 // the agent, and there is no window to suppress.
-                WireClient::spawn(&launch.agent_bin, &launch.agent_args, wake)
-                    .map_err(|err| format!("failed to spawn agent `{}`: {err}", launch.agent_bin))?
+                let nudge = Arc::clone(&wake);
+                let (client, inbound) =
+                    WireClient::spawn(&launch.agent_bin, &launch.agent_args, move || nudge())
+                        .map_err(|err| {
+                            format!("failed to spawn agent `{}`: {err}", launch.agent_bin)
+                        })?;
+                (client, inbound, session, None)
             }
         };
         let init_id = client.send_request(
@@ -90,7 +142,75 @@ impl AgentSession {
             replay_id: None,
             prompt_id: None,
             approvals: Vec::new(),
+            session_id,
+            way_back,
+            wake,
         })
+    }
+
+    /// Whether quitting leaves the agent running.
+    pub fn outlives_this_process(&self) -> bool {
+        self.way_back.is_some()
+    }
+
+    /// Which session this is, once the agent or the daemon has said.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub fn can_reconnect(&self) -> bool {
+        self.way_back.is_some() && matches!(self.phase, Phase::Detached(_))
+    }
+
+    /// Rejoin the agent after a detach (`Ctrl+R`).
+    ///
+    /// A fresh connection replays the whole session, so the transcript is
+    /// dropped first — otherwise every block would appear twice.
+    pub fn reconnect(&mut self) {
+        let Some(way_back) = self.way_back.clone() else {
+            return;
+        };
+        let nudge = Arc::clone(&self.wake);
+        let attached = match WireClient::attach_tcp(
+            &way_back.endpoint,
+            self.session_id.as_deref(),
+            &way_back.args,
+            move || nudge(),
+        ) {
+            Ok(attached) => attached,
+            Err(err) => {
+                self.phase = Phase::Detached(format!("{err}"));
+                return;
+            }
+        };
+        if let Some(session) = attached.session {
+            self.session_id = Some(session);
+        }
+        self.client = attached.client;
+        self.inbound = attached.inbound;
+        self.transcript = Transcript::default();
+        self.init_id = Some(self.client.send_request(
+            "initialize",
+            json!({
+                "protocol_version": WIRE_PROTOCOL_VERSION,
+                "client": {
+                    "name": "dvadva-tui",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }),
+        ));
+        self.phase = Phase::Initializing;
+    }
+
+    /// Ask the agent itself to stop, rather than only leaving it. The only
+    /// way to end an agent on another machine, which cannot be signalled
+    /// from here.
+    pub fn stop_agent(&mut self) {
+        if self.way_back.is_some() {
+            self.client.send_request("shutdown", json!({}));
+        }
+        self.way_back = None;
+        self.client.shutdown();
     }
 
     pub fn has_pending_approvals(&self) -> bool {
@@ -123,6 +243,16 @@ impl AgentSession {
                         self.approvals
                             .retain(|(_, request_id)| *request_id != resp.request_id);
                     }
+                    // A turn this client did not start still ends for it: a
+                    // reattached client watching a turn from before it
+                    // arrived has no `prompt` answer coming, so the event is
+                    // the only thing that can bring it back to ready.
+                    if matches!(event, WireMessage::TurnEnd(_))
+                        && self.phase == Phase::Running
+                        && self.prompt_id.is_none()
+                    {
+                        self.phase = Phase::Ready;
+                    }
                     self.transcript.apply_event(event);
                 }
                 Inbound::Request { id, message } => self.handle_request(id, message),
@@ -130,9 +260,19 @@ impl AgentSession {
                     self.handle_response(id, result, error);
                 }
                 Inbound::AgentExited(reason) => {
-                    if !matches!(self.phase, Phase::Failed(_)) {
-                        self.phase = Phase::Failed(format!("agent exited: {reason}"));
+                    if matches!(self.phase, Phase::Failed(_) | Phase::Detached(_)) {
+                        continue;
                     }
+                    // A modal whose answer cannot reach anybody is worse than
+                    // no modal.
+                    self.approvals.clear();
+                    self.init_id = None;
+                    self.replay_id = None;
+                    self.prompt_id = None;
+                    self.phase = match self.way_back {
+                        Some(_) => Phase::Detached(reason),
+                        None => Phase::Failed(format!("agent exited: {reason}")),
+                    };
                 }
                 Inbound::ProtocolError(err) => {
                     self.transcript
@@ -194,6 +334,12 @@ impl AgentSession {
                         self.phase = Phase::Failed(err);
                         return;
                     }
+                    // The agent's own answer to "which session is this" — the
+                    // one thing a reconnect cannot do without, and the only
+                    // way a new session's id is ever learned.
+                    if let Some(session) = result.get("session").and_then(|v| v.as_str()) {
+                        self.session_id = Some(session.to_string());
+                    }
                     self.server_name = result
                         .pointer("/server/name")
                         .and_then(|v| v.as_str())
@@ -217,7 +363,21 @@ impl AgentSession {
             }
         } else if Some(&id) == self.replay_id.as_ref() {
             self.replay_id = None;
-            self.phase = Phase::Ready;
+            // Nothing in the replayed history says whether a turn is running
+            // *now* — a `TurnBegin` with no end reads the same whether the
+            // turn is live or was interrupted — so the agent says it
+            // outright. An older agent omits the field, and its silence
+            // reads as ready, exactly as before.
+            let running = result
+                .as_ref()
+                .and_then(|result| result.get("turn_running"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            self.phase = if running {
+                Phase::Running
+            } else {
+                Phase::Ready
+            };
         } else if Some(&id) == self.prompt_id.as_ref() {
             self.prompt_id = None;
             self.phase = Phase::Ready;

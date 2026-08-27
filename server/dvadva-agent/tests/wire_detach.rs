@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
 use dvadva_agent::live::Registry;
@@ -23,8 +24,12 @@ use dvadva_agent::wire::server::WireServer;
 
 use wire_agent_fixture::{
     ARRIVES, Fixture, TestClient, asking_agent, event_type, is_answer_to, request_type,
-    talking_agent,
+    talking_agent, working_agent,
 };
+
+/// Short enough that the lifetime tests finish, long enough that a loaded
+/// machine does not reap an agent mid-handshake.
+const IMPATIENT: Duration = Duration::from_secs(2);
 
 /// A listening agent, and what a client needs to reach it.
 struct Listening {
@@ -32,12 +37,19 @@ struct Listening {
     token: String,
     agent: Fixture,
     registry: Registry,
+    /// The serving task. Its completion *is* the end of the agent, which is
+    /// what the lifetime tests below wait on.
+    serving: tokio::task::JoinHandle<()>,
     _tmp: TempDir,
 }
 
 impl Listening {
     /// Put a scripted agent on a loopback port, exactly as `--listen` does.
     async fn start(agent: Fixture) -> Self {
+        Self::start_with(agent, None).await
+    }
+
+    async fn start_with(agent: Fixture, idle_timeout: Option<Duration>) -> Self {
         let tmp = TempDir::new().expect("temp dir");
         let registry = Registry::at(tmp.path().join("live"));
         let listening = bind(ListenOptions {
@@ -49,6 +61,7 @@ impl Listening {
             // And a test agent must not advertise itself to the frontends
             // running on the machine the test runs on.
             registry_dir: Some(registry.dir().to_path_buf()),
+            idle_timeout,
         })
         .await
         .expect("bind");
@@ -56,7 +69,7 @@ impl Listening {
         let addr = listening.addr();
         let token = listening.token().to_string();
         let server: Arc<WireServer> = Arc::clone(&agent.server);
-        tokio::spawn(async move {
+        let serving = tokio::spawn(async move {
             let _ = listening.serve(server).await;
         });
 
@@ -65,8 +78,16 @@ impl Listening {
             token,
             agent,
             registry,
+            serving,
             _tmp: tmp,
         }
+    }
+
+    /// Wait for the agent to stop of its own accord, and say whether it did.
+    async fn stops_within(&mut self, patience: Duration) -> bool {
+        tokio::time::timeout(patience, &mut self.serving)
+            .await
+            .is_ok()
     }
 
     /// Attach the way a frontend does: connect, present the token, go.
@@ -318,4 +339,175 @@ async fn a_listening_agent_lists_itself_and_can_be_reached_from_the_listing_alon
 
     assert_eq!(hello.get("auth"), Some(&json!("ok")), "denied: {hello}");
     assert_eq!(hello.get("session"), Some(&json!(entry.session)));
+}
+
+// ------------------------------------------- how a detached agent ever ends
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_nobody_ever_attached_to_stops_by_itself() {
+    // The accumulation case: a supervisor started an agent, whoever asked
+    // for it never arrived, and nothing else was ever going to end it.
+    let mut listening = Listening::start_with(talking_agent(), Some(IMPATIENT)).await;
+    wait_for_listing(&listening.registry).await;
+
+    assert!(
+        listening.stops_within(ARRIVES).await,
+        "an idle agent should stop on its own"
+    );
+    assert!(
+        listening.registry.list().await.is_empty(),
+        "and take its registry entry with it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_is_working_is_never_idle_however_alone_it_is() {
+    // The opposite case, and the one that makes detaching worth anything:
+    // the client left mid-turn, and the turn is the point.
+    let mut listening = Listening::start_with(working_agent(), Some(IMPATIENT)).await;
+    let release = Arc::clone(&listening.agent.release);
+
+    let mut client = listening.attach().await;
+    client.initialize().await;
+    client.call("prompt", json!({"user_input": "go"})).await;
+    client
+        .wait_for("the tool call to start", |frame| {
+            event_type(frame) == Some("ToolCall")
+        })
+        .await;
+    drop(client);
+
+    // Well past the timeout, with nobody watching and the tool still running.
+    tokio::time::sleep(IMPATIENT * 3).await;
+    assert!(
+        !listening.serving.is_finished(),
+        "a working agent must not be reaped for having no audience"
+    );
+
+    // And once the work is done, the same silence does end it.
+    release.notify_one();
+    assert!(
+        listening.stops_within(ARRIVES).await,
+        "an agent that finished its turn alone should then stop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_parked_with_nobody_left_to_answer_counts_as_idle() {
+    // A turn waiting on an approval is waiting on a person. With nothing
+    // attached there is no person, so this is the one shape of "busy" that
+    // would otherwise strand an agent forever.
+    let mut listening = Listening::start_with(asking_agent(), Some(IMPATIENT)).await;
+
+    let mut client = listening.attach().await;
+    client.initialize().await;
+    client.call("prompt", json!({"user_input": "go"})).await;
+    client
+        .wait_for("the approval request", |frame| {
+            request_type(frame) == Some("ApprovalRequest")
+        })
+        .await;
+    drop(client);
+
+    assert!(
+        listening.stops_within(ARRIVES).await,
+        "an agent parked on a question nobody is left to answer should stop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attached_client_can_ask_the_agent_to_stop() {
+    // The explicit end, for a frontend two daemons away that has no way to
+    // send this process a signal.
+    let mut listening = Listening::start(talking_agent()).await;
+    wait_for_listing(&listening.registry).await;
+
+    let mut client = listening.attach().await;
+    client.initialize().await;
+    let id = client.call("shutdown", json!({})).await;
+    let ack = client
+        .wait_for("the shutdown ack", |frame| is_answer_to(frame, &id))
+        .await;
+    assert_eq!(ack.pointer("/result/status"), Some(&json!("stopping")));
+
+    assert!(
+        listening.stops_within(ARRIVES).await,
+        "the agent should stop when asked"
+    );
+    assert!(listening.registry.list().await.is_empty());
+
+    // The ack came first and the stream ended after it, in that order: a
+    // client must be able to tell "it is going" from "it fell over".
+    assert!(
+        client.reader.read_u8().await.is_err(),
+        "the connection should end once the session does"
+    );
+}
+
+// ------------------------------------------------ what a returning client needs
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_names_the_session_a_client_landed_on() {
+    // A client that means to come back has to know what to come back *to*,
+    // and only the agent can say — a fresh session's id is minted here.
+    let listening = Listening::start(talking_agent()).await;
+
+    let mut client = listening.attach().await;
+    let result = client.initialize().await;
+
+    assert_eq!(
+        result.pointer("/result/session").and_then(Value::as_str),
+        Some(listening.agent.server.session_id().as_str())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_catching_up_is_told_whether_the_agent_is_busy() {
+    // Replay is the past tense. A client that attaches mid-turn replays a
+    // `TurnBegin` with no end and cannot tell that from an interrupted one,
+    // so it has to be told the present tense outright.
+    let listening = Listening::start(working_agent()).await;
+    let release = Arc::clone(&listening.agent.release);
+
+    let mut worker = listening.attach().await;
+    worker.initialize().await;
+    let turn = worker.call("prompt", json!({"user_input": "go"})).await;
+    worker
+        .wait_for("the tool call to start", |frame| {
+            event_type(frame) == Some("ToolCall")
+        })
+        .await;
+
+    let mut newcomer = listening.attach().await;
+    newcomer.initialize().await;
+    let replay = newcomer.call("replay", json!({})).await;
+    let caught_up = newcomer
+        .wait_for("the replay result", |frame| is_answer_to(frame, &replay))
+        .await;
+    assert_eq!(
+        caught_up.pointer("/result/turn_running"),
+        Some(&json!(true)),
+        "a client joining a working agent must not be told it is ready"
+    );
+
+    // Waiting for the `prompt` answer rather than for the `TurnEnd` event:
+    // the event is emitted from inside the turn, the answer after the
+    // session has released the turn slot, and the slot is what this flag
+    // reports.
+    release.notify_one();
+    worker
+        .wait_for("the end of the turn", |frame| is_answer_to(frame, &turn))
+        .await;
+
+    // And the same question, asked of a quiet agent, answers the other way.
+    let mut later = listening.attach().await;
+    later.initialize().await;
+    let replay = later.call("replay", json!({})).await;
+    let caught_up = later
+        .wait_for("the replay result", |frame| is_answer_to(frame, &replay))
+        .await;
+    assert_eq!(
+        caught_up.pointer("/result/turn_running"),
+        Some(&json!(false))
+    );
 }

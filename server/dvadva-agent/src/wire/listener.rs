@@ -36,6 +36,15 @@
 //! holding the pipes is a stronger claim than knowing the token, and making
 //! the one-shot path carry a secret would have made every existing caller a
 //! new caller.
+//!
+//! **How an agent that outlives its clients ever ends.** Three ways, all
+//! cancelling the one token `WireServer::stop_token` hands out: a signal
+//! (whoever owns the process), the wire's `shutdown` method (any attached
+//! client, including one two daemons away that has no way to signal
+//! anything), and the idle watch below (nobody at all). The last is what
+//! keeps a machine from collecting one process per session ever opened, and
+//! it is why the plainly-idle case is not the only one that counts as idle —
+//! see [`WireServer::is_idle`].
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -73,6 +82,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// it to find out is how a stranger gets to allocate memory here.
 const HANDSHAKE_LINE_LIMIT: usize = 8 * 1024;
 
+/// How often the idle watch asks whether anything is happening. An upper
+/// bound: a timeout shorter than this is checked at its own length instead,
+/// so a test can ask for two seconds and get two seconds.
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
 /// What the listening transport needs and the wire protocol does not.
 pub struct ListenOptions {
     pub addr: SocketAddr,
@@ -87,6 +101,11 @@ pub struct ListenOptions {
     /// machine reads; tests name their own so a test run does not advertise
     /// itself to the user's frontends.
     pub registry_dir: Option<PathBuf>,
+    /// Stop after this long with nobody attached and nothing to do. `None`
+    /// means never, which is right for an agent a person started by hand and
+    /// wrong for one a supervisor started on their behalf — so the flag is
+    /// off by default and the bridge daemon passes one.
+    pub idle_timeout: Option<Duration>,
 }
 
 /// A bound listener with its secret already resolved.
@@ -101,6 +120,7 @@ pub struct Listening {
     token_file: PathBuf,
     inherit_stdio: bool,
     registry: Registry,
+    idle_timeout: Option<Duration>,
 }
 
 /// Take the address and the token, or fail before anything is running.
@@ -126,6 +146,7 @@ pub async fn bind(options: ListenOptions) -> Result<Listening> {
         token_file: options.token_file,
         inherit_stdio: options.inherit_stdio,
         registry,
+        idle_timeout: options.idle_timeout,
     })
 }
 
@@ -190,8 +211,13 @@ impl Listening {
             serve_inherited_stdio(Arc::clone(&server));
         }
 
-        let shutdown = CancellationToken::new();
+        // One token for every way this process can be asked to end: a
+        // signal, an idle timeout, or a `shutdown` from an attached client.
+        // The wire server owns it because the third of those arrives as a
+        // wire message and has to reach the accept loop somehow.
+        let shutdown = server.stop_token();
         let signals = spawn_signal_watch(shutdown.clone());
+        let idle = self.spawn_idle_watch(Arc::clone(&server), shutdown.clone());
         let result = self
             .accept_loop(Arc::clone(&server), &session_id, shutdown)
             .await;
@@ -199,8 +225,57 @@ impl Listening {
         info!("stopping the listening agent");
         server.shutdown().await;
         signals.abort();
+        if let Some(idle) = idle {
+            idle.abort();
+        }
         background.abort();
         result
+    }
+
+    /// Stop an agent that nobody came back to.
+    ///
+    /// A detached agent has no natural end: its clients are gone, and the
+    /// thing that gave it a lifetime — a pipe, a socket — is the thing it now
+    /// outlives. Without this, every session ever attached to accumulates a
+    /// process. `WireServer::is_idle` decides what counts; this only decides
+    /// how long it has to keep being true.
+    ///
+    /// Polled rather than event-driven on purpose: idleness is a conjunction
+    /// of three facts that change independently, and one clock asking is far
+    /// simpler to reason about than three notifications racing.
+    fn spawn_idle_watch(
+        &self,
+        server: Arc<WireServer>,
+        shutdown: CancellationToken,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let timeout = self.idle_timeout?;
+        info!("will stop after {}s idle", timeout.as_secs());
+        Some(tokio::spawn(async move {
+            // Check often enough that the timeout is roughly honoured and
+            // rarely enough to be free; a whole minute of slack on a timeout
+            // measured in minutes or hours is nobody's problem.
+            let tick = timeout.min(IDLE_CHECK_INTERVAL).max(Duration::from_secs(1));
+            let mut idle_for = Duration::ZERO;
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(tick) => {}
+                }
+                if !server.is_idle().await {
+                    idle_for = Duration::ZERO;
+                    continue;
+                }
+                idle_for += tick;
+                if idle_for >= timeout {
+                    info!(
+                        "nothing attached and nothing to do for {}s; stopping",
+                        timeout.as_secs()
+                    );
+                    shutdown.cancel();
+                    return;
+                }
+            }
+        }))
     }
 
     /// Put this agent in the live-session registry, so that something which
@@ -505,8 +580,9 @@ where
 }
 
 /// Stop on the signals a supervisor uses to end a process, so that a detached
-/// agent can be asked to go rather than only killed. An explicit `shutdown`
-/// over the wire is Phase 3's, along with idle timeouts.
+/// agent can be asked to go rather than only killed. One of three ways in;
+/// the others are the wire's `shutdown` method and the idle watch, and all
+/// three cancel the same token.
 fn spawn_signal_watch(shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         #[cfg(unix)]
@@ -623,6 +699,7 @@ mod tests {
             token_file: dir.path().join(TOKEN_FILE_NAME),
             inherit_stdio: false,
             registry_dir: Some(dir.path().join("live")),
+            idle_timeout: None,
         };
 
         // Deliberately not built with a soul: the refusal has to come before

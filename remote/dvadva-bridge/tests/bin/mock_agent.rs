@@ -45,8 +45,14 @@ use dvadva_agent::live::{self, LiveSession, Registry};
 
 /// A test agent that nobody stops must still not outlive the test run: a
 /// stray one holds its own binary open, and on Windows that fails the next
-/// build rather than the next test.
-const MAX_LIFETIME: Duration = Duration::from_secs(120);
+/// *build* rather than the next test — with a message about file permissions
+/// that says nothing about where it came from.
+///
+/// Several tests leave an agent running deliberately (that is the phase being
+/// tested), so this is not a fallback for a bug; it is the normal ending for
+/// those. Kept far above the suite's own runtime — seconds — and far below
+/// how long a person will wait before building again.
+const MAX_LIFETIME: Duration = Duration::from_secs(20);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
