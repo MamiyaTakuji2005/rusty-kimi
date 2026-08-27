@@ -1,6 +1,6 @@
 # Detached agent — attach/detach plan
 
-Status: **Phase 0 done**, Phases 1-3 not started. Written 2026-08-27.
+Status: **Phases 0 and 1 done**, Phases 2-3 not started. Written 2026-08-27.
 
 Goal: a `dvadva-agent` that runs with no frontend attached, that several
 frontends (GUI, TUI, a daemon, a script) can attach to and detach from while
@@ -132,14 +132,14 @@ cannot mismatch — which is fine, because the check exists for the split
 deployment (local GUI, remote agent), and there it works. Extracting a shared
 `wire-protocol` crate stays the deferred refactor `AGENTS.md` already names.
 
-Next version number to spend: **protocol 1.3**, for Phase 1.
+Next version number spent: **protocol 1.3**, by Phase 1.
 
 ---
 
-## Phase 1 — many clients on one live agent
+## Phase 1 — many clients on one live agent — **DONE** (protocol 1.3)
 
 Still connection-scoped lifetime; worth doing on its own merits (two GUIs, or
-a GUI and the TUI, on one session). This is where the design risk is, and it
+a GUI and the TUI, on one session). This is where the design risk was, and it
 is nearly all inside `server/dvadva-agent/src/wire/`.
 
 ### What already helps
@@ -152,7 +152,7 @@ is nearly all inside `server/dvadva-agent/src/wire/`.
   it back into the matching `Block::Approval`. The "dismiss the other client's
   dialog" event exists and is half-handled.
 
-### Work
+### Work as planned
 
 **Fan-out and routing.** `write_queue` becomes a `BroadcastQueue` with a
 per-connection `Queue` and a writer task per connection. Careful: not
@@ -197,6 +197,74 @@ detaching client leaves tools registered that nothing can service, so the next
 turn that calls one hangs until the wire closes. First cut: only the first
 attachment may register external tools; later, ownership plus deregistration
 on detach.
+
+### What shipped, and where the plan was wrong
+
+**The transport generalized itself.** `serve_connection(reader, writer)` is
+the unit of "one attached client"; `serve()` over stdio is one caller and the
+tests are another (a `tokio::io::duplex` pair per client). Phase 2's listener
+is now a third caller rather than a rewrite. `WireServer` split into
+`SessionCore` (soul, fan-out, open requests, the turn, tool ownership) and
+`Connection` (initialized, catching up, its own replay token).
+
+**Routing did not need `(connection, id)` keys after all.** The plan worried
+about it because ids from `WireClient::next_id` are unique only per
+connection. But nothing ever needs to route *by* a client's id: the handler
+answering a call already knows whose call it was, so it unicasts. And every
+reverse-RPC id is minted by the *agent* (a uuid), so `pending` stays one flat
+map. Two clients both calling their first request `"1"` is a test, not a
+problem — `two_clients_initialize_on_one_agent_without_their_ids_colliding`.
+
+`Fanout` is a keyed map rather than the `BroadcastQueue` the plan named,
+because the same registry has to serve both the broadcast and the unicast. It
+prunes a client whose queue has gone rather than reporting an error: one
+frontend closing its window must not silence the others.
+
+**Gapless join: the `seq` field would not have worked, and is not needed.**
+The plan assumed the file and the live stream carry the same messages. They
+do not. `WireRecorder` subscribes to the **merged** queue (`channel.rs`) while
+the wire server subscribes to the **raw** one, so the file holds coalesced
+content parts and the live feed holds the deltas. A sequence number could not
+have matched one against the other. What is real, and what shipped, is that
+replay output and live output must not *interleave*: a catch-up stages the
+connection's live traffic and releases it when the file walk ends.
+
+What remains is inherent rather than a bug: a client attaching while an
+assistant message is streaming sees only its tail, because the in-flight
+message is not in the file yet and its beginning has already gone past. The
+next turn's replay shows it whole. Closing that would mean unifying the raw
+and merged streams, which is a `channel.rs` question, not an attach one.
+
+**Approval arbitration** is now a defined first-answer-wins: the losers find
+nothing in `pending` and are dropped with a debug line naming the race. Both
+frontends drop their own dialog on the broadcast `ApprovalResponse` event, so
+a modal that no longer decides anything comes down.
+
+**Re-arming open requests** had an ordering trap the plan did not name. Both
+frontends render a request that arrives while they are replaying and
+deliberately do *not* arm it (`session.rs`, `agent.rs`: "historical: already
+answered"). So the still-open requests have to be handed over *after* the
+replay response, not before, or a live approval is filed as history. Caught by
+`a_client_can_attach_to_a_parked_agent_and_answer_the_approval`, which is the
+end-to-end test of the whole phase: attach to a parked agent, replay, answer
+the approval the first client raised, watch the first client's dialog vanish.
+
+**External tools** went straight to the "later" design — ownership by
+`ConnId` plus `KimiToolset::unregister_external_tool` on detach — because the
+first-attachment-only rule needed the same bookkeeping and would still have
+left dead registrations behind.
+
+**Protocol 1.3** spends the minor on one additive field: `capabilities` in the
+`initialize` result (`{"multi_client": true}`). Everything else in this phase
+is a relaxation or a fix, invisible to a 1.2 client. The field exists so a
+frontend or supervisor can *ask* rather than infer capability from a number,
+which is what Phase 2 will need.
+
+**Also found, not fixed**: `cancel` during a replay was unreachable before
+this phase, because the replay ran inline and blocked the connection's read
+loop. Replay is now its own task and its own per-connection token, so a client
+can abort a long catch-up; a `cancel` with no replay in flight still stops the
+turn, as before.
 
 ---
 

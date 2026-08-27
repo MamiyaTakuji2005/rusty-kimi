@@ -115,6 +115,14 @@ impl AgentSession {
         while let Ok(msg) = self.inbound.try_recv() {
             match msg {
                 Inbound::Event(event) => {
+                    // Any client attached to this session can answer an
+                    // approval, and the agent broadcasts the resolution to
+                    // all of them. Take our own prompt down for a request
+                    // somebody else just answered.
+                    if let WireMessage::ApprovalResponse(resp) = &event {
+                        self.approvals
+                            .retain(|(_, request_id)| *request_id != resp.request_id);
+                    }
                     self.transcript.apply_event(event);
                 }
                 Inbound::Request { id, message } => self.handle_request(id, message),

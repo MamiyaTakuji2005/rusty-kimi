@@ -22,7 +22,12 @@
 use thiserror::Error;
 
 /// The protocol this build speaks, as it goes on the wire.
-pub const WIRE_PROTOCOL_VERSION: &str = "1.2";
+///
+/// 1.3 added the `capabilities` object to the `initialize` result. Nothing
+/// was removed or given a new meaning, so a 1.2 client sees exactly the
+/// session it saw before — it simply cannot ask whether the agent accepts a
+/// second one.
+pub const WIRE_PROTOCOL_VERSION: &str = "1.3";
 
 /// The version assumed for a `wire.jsonl` written before the metadata header
 /// existed. A file-format concern only — never a negotiation input.
@@ -38,7 +43,7 @@ pub struct ProtocolVersion {
 impl ProtocolVersion {
     /// What this build speaks. Kept in step with [`WIRE_PROTOCOL_VERSION`] by
     /// `current_matches_the_wire_constant`.
-    pub const CURRENT: Self = Self { major: 1, minor: 2 };
+    pub const CURRENT: Self = Self { major: 1, minor: 3 };
 
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
@@ -120,8 +125,8 @@ mod tests {
     #[test]
     fn parse_accepts_major_minor_only() {
         assert_eq!(
-            ProtocolVersion::parse("1.2").unwrap(),
-            ProtocolVersion::new(1, 2)
+            ProtocolVersion::parse("1.3").unwrap(),
+            ProtocolVersion::new(1, 3)
         );
         assert_eq!(
             ProtocolVersion::parse("10.31").unwrap(),
@@ -140,14 +145,14 @@ mod tests {
         // The additive case: they know messages we do not, and we ignore them.
         let peer = check_peer("1.9").expect("same major must be accepted");
         assert_eq!(peer, ProtocolVersion::new(1, 9));
-        assert!(peer.has(2), "a 1.9 peer has everything 1.2 introduced");
+        assert!(peer.has(3), "a 1.9 peer has everything 1.3 introduced");
     }
 
     #[test]
     fn a_peers_lower_minor_is_compatible_but_lacks_later_features() {
         let peer = check_peer("1.0").expect("same major must be accepted");
         assert!(peer.has(0));
-        assert!(!peer.has(2), "a 1.0 peer predates 1.2's additions");
+        assert!(!peer.has(3), "a 1.0 peer predates 1.3's additions");
     }
 
     #[test]

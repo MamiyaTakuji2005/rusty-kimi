@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod fanout;
 pub mod file;
 pub mod jsonrpc;
 pub mod protocol;
@@ -26,6 +27,7 @@ pub use channel::{
     Wire, WireMessageQueue, WireSoulSide, WireUISide, now_timestamp, out_of_turn_events,
     send_out_of_turn,
 };
+pub use fanout::{ConnId, Fanout};
 pub use file::{WireFile, WireFileMetadata, WireMessageRecord};
 pub use serde::{deserialize_wire_message, serialize_wire_message};
 pub use types::{

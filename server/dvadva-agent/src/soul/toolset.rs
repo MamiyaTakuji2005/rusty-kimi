@@ -109,6 +109,20 @@ impl KimiToolset {
         Ok(())
     }
 
+    /// Drop an external tool when the client that services it goes away.
+    ///
+    /// A registration outlives its client otherwise, and the next turn that
+    /// calls the tool waits on a reverse-RPC nobody will ever answer. Only
+    /// external tools can be removed this way: a builtin of the same name is
+    /// left alone.
+    pub fn unregister_external_tool(&mut self, name: &str) -> bool {
+        if !self.external_tools.remove(name) {
+            return false;
+        }
+        self.tools.remove(name);
+        true
+    }
+
     pub fn load_tools(
         &mut self,
         tool_paths: &[String],

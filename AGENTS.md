@@ -78,7 +78,7 @@ client/                  frontends + shared frontend kit
 remote/                  relay daemons for remote access
   dvadva-bridge/           byte-relay daemon pair (bin: dvadva-bridge; design in remote/PLAN.md)
 _history/                historical rewrite PROMPT.md / PLAN.md (Chinese; context only)
-PLAN-detached-agent.md   design record: headless agent + attach/detach (phase 0 done)
+PLAN-detached-agent.md   design record: headless agent + attach/detach (phases 0-1 done)
 ```
 
 Per-module notes live in sub-tree `AGENTS.md` files — read them before touching
@@ -107,9 +107,17 @@ the loop**.
   block stream rendered by `render.rs`; forks appear as sub-tabs.
 - **Agent runtime path**: `cli/` (arg parsing; subcommands `info`, `mcp`) →
   `app.rs` (`KimiCLI::create` wiring) → `soul/kimisoul.rs` (loop, steps,
-  flow/Ralph runner) → `tools/` dispatch; `wire/server.rs` exposes the stdio
+  flow/Ralph runner) → `tools/` dispatch; `wire/server.rs` exposes the
   JSON-RPC server. The agent process owns session persistence (writes its own
   `wire.jsonl` / `context.jsonl` under `~/.kimi`).
+- **Several clients, one agent**: `serve_connection` serves one attached
+  client over any reader/writer pair, and stdio is only its first caller. What
+  the session owns (one turn at a time, the open approvals, the toolset) lives
+  on `SessionCore`; what a client owns (initialized, catching up, its external
+  tools) lives on `Connection`. Events broadcast, responses are unicast; see
+  `wire/AGENTS.md` for the rules. Lifetime is still tied to the stdio client
+  — detaching without killing the agent is Phase 2 of
+  `PLAN-detached-agent.md`.
 - **Wire surface**: the frontend sends `initialize` / `prompt` / `cancel` /
   `replay` / `steer` plus approval replies; the agent answers with typed
   events (`TurnBegin`, `StepBegin`, `ContentPart`, `ToolResult`,
@@ -130,7 +138,15 @@ against the agent:
   `PROTOCOL_VERSION_MISMATCH`, the frontends fail the session with the same
   text). A peer's *higher* minor is safe to talk to — ignore what you do not
   recognize — and a peer's *lower* minor means do not use what it predates,
-  which is what `ProtocolVersion::has` is for.
+  which is what `ProtocolVersion::has` is for. 1.3 added the `initialize`
+  result's `capabilities` object; ask it, do not infer capability from a
+  version number.
+- **A client's own JSON-RPC ids are not addresses.** They come from
+  `WireClient::next_id` and are unique only within one connection — two
+  attached clients both call their first request `"1"`. Nothing on the agent
+  side may key state by them or route by them. Ids the *agent* mints for
+  reverse-RPC (approvals, external tool calls) are globally unique and are
+  the only ones safe to use as keys.
 - **Bridge frame protocol**: `remote/dvadva-bridge/src/proto.rs`, versioned on
   its own clock and duplicated byte-for-byte in `wire-client/src/bridge.rs`
   (a dev-dependency test pins the two). The digit in the `BRIDGE1` magic is

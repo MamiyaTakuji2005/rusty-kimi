@@ -8,7 +8,11 @@
 - `protocol.rs`: the protocol version, and the compatibility rule for it
   (`ProtocolVersion`, `check_peer`).
 - `jsonrpc.rs`: JSON-RPC models/utilities for wire server.
-- `server.rs`: stdio JSON-RPC wire server.
+- `server.rs`: the JSON-RPC wire server. `SessionCore` is what the session
+  owns, `Connection` is what one attached client owns; `serve_connection`
+  serves one client over any reader/writer pair, and stdio is just its first
+  caller.
+- `fanout.rs`: routing to the attached clients (`Fanout`, `ConnId`).
 - `channel.rs`: `Wire`, `WireSoulSide`, `WireUISide`, merge + recording logic.
 
 ## Compatibility Rules
@@ -25,6 +29,39 @@
 - `ContentPart` wire messages always use `type="ContentPart"` at the envelope layer.
 - `ApprovalRequestResolved` must map to `ApprovalResponse` for backward compatibility.
 - `SubagentEvent.event` is serialized as an embedded `WireMessageEnvelope`.
+
+## Many Clients, One Agent
+
+- **Events and reverse-RPC requests broadcast; responses are unicast.** A
+  response id was minted by one client's `next_id` and is unique only within
+  that connection, so it goes back to the asker alone. Nothing ever routes
+  *by* a client-minted id — the handler that answers already knows whose
+  question it was. Reverse-RPC ids are minted by the agent and are globally
+  unique, which is why `SessionCore::pending` is one flat map.
+- **Session-wide vs. per-connection.** One turn at a time is a session rule
+  (`cancel_token`). `initialize` and `replay` are per-connection: refusing
+  them mid-turn would refuse exactly the case worth attaching to.
+- **A catch-up is staged.** `replay` starts by snapshotting the open requests
+  and switching the connection to staging in one step, so nothing is both
+  replayed from the file and delivered live. The staged traffic is released
+  when the file walk ends. `request_approval` publishes while still holding
+  the `pending` lock so that snapshot cannot race a new request.
+- **Open requests are re-armed *after* the replay response.** Both frontends
+  render a request that arrives while they are replaying and deliberately do
+  not arm it, so handing them over any earlier files a live approval as
+  history.
+- **First answer wins.** With several clients the same dialog is on every
+  screen; the losers find nothing in `pending` and are dropped with a debug
+  line. Clients drop their own dialog on the `ApprovalResponse` event.
+- **External tool names are owned by the client that registered them**
+  (`SessionCore::tool_owner`) and are unregistered when it detaches — a
+  registration nobody can service would hang the next turn that called it.
+- **Not gapless mid-stream.** A client attaching while an assistant message
+  is streaming sees only its tail: the file records the *merged* stream and
+  the live feed is the *raw* one, so the in-flight message is in neither the
+  replay nor, from the start, the live traffic. Inherent to the two
+  representations, not a sequencing bug; the next turn's replay shows it
+  whole.
 
 ## Merge Behavior
 
